@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------------------
+# Runtime data — conversations, workspaces, learner profile, API keys.
+# Never commit any of this.
+# ---------------------------------------------------------------------------
+data/
+.test-data/
+
+# Build & packaging output
+dist/
+build/*.blockmap
+*.tgz
+
+# Local caches & backups
+.pack-data-backup/
+.electron-cache/
+.npm-cache/
+*.backup-*.json
+profile-log.jsonl
+
+# Developer probe output (the probe scripts themselves are tracked)
+.probe/rendered.html
+.probe/*.txt
+.probe/richdoc-*.html
+.cf-dump/
+smoke.png
+
+# Editor / OS
+node_modules/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

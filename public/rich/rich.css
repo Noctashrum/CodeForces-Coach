@@ -1,0 +1,254 @@
+/* ==========================================================================
+   CF Coach · 图文讲解样式系统（rich.css）
+   设计语言：为"算法讲解"裁剪的自包含样式（配色 / 卡片 / 图解 / 公式 / 交互）。
+   规则：模型只写**内容标记**（用下面已有的 class），不写 <style> 大块样式。
+   ========================================================================== */
+
+:root {
+  --bg: #0f1523;
+  --bg-soft: #151d2e;
+  --card: #182136;
+  --card-2: #1d2740;
+  --line: #26314b;
+  --text: #e6ebf5;
+  --text-2: #a8b3c9;
+  --text-3: #7b869c;
+  --primary: #4f8cff;
+  --primary-soft: rgba(79, 140, 255, 0.14);
+  --green: #2fbf8f;
+  --green-soft: rgba(47, 191, 143, 0.14);
+  --violet: #8b6cf0;
+  --violet-soft: rgba(139, 108, 240, 0.16);
+  --amber: #e0a028;
+  --amber-soft: rgba(224, 160, 40, 0.15);
+  --red: #ef5b73;
+  --red-soft: rgba(239, 91, 115, 0.15);
+  --cyan: #2bb3d4;
+  --cyan-soft: rgba(43, 179, 212, 0.14);
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+  --radius: 12px;
+  --shadow: 0 8px 26px rgba(0, 0, 0, 0.28);
+}
+:root[data-theme="light"] {
+  --bg: #f7f9fc; --bg-soft: #eef2f8; --card: #ffffff; --card-2: #f4f7fc;
+  --line: #dfe6f2; --text: #1a2438; --text-2: #46536e; --text-3: #6b7899;
+  --shadow: 0 8px 22px rgba(24, 39, 75, 0.09);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.75 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  padding: 0 0 26px;
+  -webkit-font-smoothing: antialiased;
+}
+#progress { position: sticky; top: 0; height: 3px; width: 0; z-index: 9;
+  background: linear-gradient(90deg, var(--primary), var(--violet)); transition: width .12s linear; }
+.wrap { max-width: 860px; margin: 0 auto; padding: 20px 20px 0; }
+
+/* ---------- 头部 ---------- */
+.hero { padding: 8px 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.kicker { display: inline-block; font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--primary); background: var(--primary-soft); border: 1px solid rgba(79,140,255,.3);
+  padding: 3px 10px; border-radius: 999px; margin-bottom: 12px; }
+.hero h1 { font-size: 26px; line-height: 1.35; margin: 0 0 8px; letter-spacing: -.01em; }
+.hero .subtitle { color: var(--text-2); font-size: 15px; margin: 0 0 12px; }
+.hero .meta { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12.5px; color: var(--text-3); margin-bottom: 14px; }
+.hero .meta b { color: var(--text-2); font-weight: 600; }
+.oneliner { background: linear-gradient(180deg, var(--primary-soft), transparent);
+  border: 1px solid var(--line); border-left: 3px solid var(--primary);
+  border-radius: var(--radius); padding: 12px 14px; font-size: 14.5px; }
+.oneliner b { color: var(--primary); }
+
+/* ---------- 章节 ---------- */
+.chapter { margin: 30px 0 6px; }
+.chapter > h2 { display: flex; align-items: center; gap: 10px; font-size: 19px; margin: 0 0 6px; }
+.chapter > h2 .num { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+  font-size: 13px; background: var(--primary-soft); color: var(--primary); border: 1px solid rgba(79,140,255,.32); }
+.lead { color: var(--text-2); font-size: 14.5px; margin: 4px 0 14px; }
+h3.sub { font-size: 16px; margin: 20px 0 6px; color: var(--text); }
+h4.subsub { font-size: 14.5px; margin: 14px 0 4px; color: var(--text-2); }
+p { margin: 8px 0; }
+ul, ol { margin: 8px 0; padding-left: 22px; }
+li { margin: 4px 0; }
+a.inline { color: var(--primary); text-decoration: none; border-bottom: 1px dashed rgba(79,140,255,.5); }
+
+/* ---------- 卡片 / 网格 ---------- */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; margin: 12px 0; }
+.card > h4 { margin: 0 0 6px; font-size: 14.5px; }
+.grid { display: grid; gap: 12px; margin: 12px 0; }
+.grid.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 720px) { .grid.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .grid.g2, .grid.g3, .grid.g4 { grid-template-columns: 1fr; } }
+.mini { background: var(--card-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; }
+.mini h5 { margin: 0 0 5px; font-size: 13.5px; display: flex; align-items: center; gap: 6px; }
+.mini h5 .ico { color: var(--primary); }
+.mini p { margin: 0; font-size: 13.5px; color: var(--text-2); }
+
+/* ---------- 提示框 ---------- */
+.callout { position: relative; border-radius: 10px; padding: 12px 14px 12px 42px; margin: 12px 0;
+  border: 1px solid var(--line); background: var(--card-2); font-size: 14px; }
+.callout::before { position: absolute; left: 13px; top: 11px; font-size: 15px; }
+.callout .ttl { display: block; font-weight: 700; margin-bottom: 3px; font-size: 13.5px; }
+.callout.tip { border-color: rgba(47,191,143,.4); background: var(--green-soft); }
+.callout.tip::before { content: "💡"; } .callout.tip .ttl { color: var(--green); }
+.callout.key { border-color: rgba(79,140,255,.45); background: var(--primary-soft); }
+.callout.key::before { content: "🔑"; } .callout.key .ttl { color: var(--primary); }
+.callout.warn { border-color: rgba(224,160,40,.42); background: var(--amber-soft); }
+.callout.warn::before { content: "⚠️"; } .callout.warn .ttl { color: var(--amber); }
+.callout.danger { border-color: rgba(239,91,115,.42); background: var(--red-soft); }
+.callout.danger::before { content: "🚫"; } .callout.danger .ttl { color: var(--red); }
+.callout.analogy { border-color: rgba(139,108,240,.42); background: var(--violet-soft); }
+.callout.analogy::before { content: "🎈"; } .callout.analogy .ttl { color: var(--violet); }
+.callout.quote { border-color: var(--line); background: var(--bg-soft); font-style: italic; color: var(--text-2); }
+.callout.quote::before { content: "❝"; }
+
+/* ---------- SVG 图解 ---------- */
+figure.diagram { margin: 16px 0; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px; }
+figure.diagram svg { width: 100%; height: auto; display: block; }
+figure.diagram figcaption { margin-top: 10px; font-size: 13px; color: var(--text-2); line-height: 1.65; }
+figure.diagram figcaption b { color: var(--primary); }
+
+/* ---------- 流程图（纯 CSS） ---------- */
+.flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+.flow .step { flex: 1 1 130px; background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 11px 12px; }
+.flow .step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 6px;
+  background: var(--primary-soft); color: var(--primary); font-size: 11.5px; margin-bottom: 5px; }
+.flow .step h6 { margin: 0 0 4px; font-size: 13.5px; }
+.flow .step p { margin: 0; font-size: 12.5px; color: var(--text-2); }
+.flow .arrow { display: grid; place-items: center; color: var(--text-3); font-size: 16px; }
+.flow.violet .step .n { background: var(--violet-soft); color: var(--violet); }
+.flow.green .step .n { background: var(--green-soft); color: var(--green); }
+.flow.amber .step .n { background: var(--amber-soft); color: var(--amber); }
+
+/* ---------- 对比双栏 ---------- */
+.compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+@media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
+.compare .side { border-radius: 10px; padding: 12px 14px; border: 1px solid var(--line); background: var(--card-2); }
+.compare .side h5 { margin: 0 0 6px; font-size: 14px; }
+.compare .side ul { margin: 0; padding-left: 20px; font-size: 13.5px; color: var(--text-2); }
+.compare .side.a { border-color: rgba(47,191,143,.4); background: var(--green-soft); }
+.compare .side.a h5 { color: var(--green); }
+.compare .side.b { border-color: rgba(239,91,115,.4); background: var(--red-soft); }
+.compare .side.b h5 { color: var(--red); }
+.compare .side.n { border-color: var(--line); }
+
+/* ---------- 表格 ---------- */
+.table-wrap { overflow-x: auto; margin: 14px 0; }
+table.data { width: 100%; border-collapse: collapse; font-size: 13.5px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+table.data caption { caption-side: top; text-align: left; font-size: 12.5px; color: var(--text-3); padding: 0 0 6px; }
+table.data th, table.data td { padding: 8px 11px; border-bottom: 1px solid var(--line); text-align: left; }
+table.data thead th { background: var(--card-2); font-size: 12.5px; color: var(--text-2); }
+table.data tbody tr:last-child td { border-bottom: 0; }
+table.data td.num, table.data th.num { text-align: right; font-family: var(--mono); }
+table.data td.best { color: var(--green); font-weight: 700; }
+table.data td.worst { color: var(--red); }
+
+/* ---------- 公式 ---------- */
+.formula { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; margin: 14px 0; }
+.formula .fx { font-size: 17px; text-align: center; padding: 8px 0 12px; font-family: var(--mono); color: var(--text); }
+.formula .fx .var { color: var(--primary); }
+.formula .legend dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13.5px; }
+.formula .legend dt { color: var(--primary); font-family: var(--mono); }
+.formula .legend dd { margin: 0; color: var(--text-2); }
+.formula .why { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line);
+  font-size: 13.5px; color: var(--text-2); }
+.formula .why b { color: var(--text); }
+
+/* ---------- 分步列表 ---------- */
+ol.steps { counter-reset: st; list-style: none; padding-left: 0; margin: 14px 0; }
+ol.steps > li { position: relative; padding: 0 0 14px 34px; margin: 0; }
+ol.steps > li::before { counter-increment: st; content: counter(st); position: absolute; left: 0; top: 1px;
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--primary-soft); color: var(--primary); border: 1px solid rgba(79,140,255,.35); font-size: 12px; }
+ol.steps > li:not(:last-child)::after { content: ""; position: absolute; left: 10.5px; top: 26px; bottom: 2px;
+  width: 1px; background: var(--line); }
+ol.steps h5 { margin: 0 0 3px; font-size: 14px; }
+ol.steps p { margin: 0; font-size: 13.5px; color: var(--text-2); }
+
+/* ---------- 交互演示 ---------- */
+.anim-box { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 13px 15px; margin: 14px 0; }
+.anim-box .head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.anim-box .head h5 { margin: 0; font-size: 14px; flex: 1; }
+button.ctl { font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 7px; cursor: pointer;
+  background: var(--primary-soft); color: var(--primary); border: 1px solid rgba(79,140,255,.4); }
+button.ctl:hover { background: rgba(79,140,255,.24); }
+button.ctl.ghost { background: transparent; color: var(--text-2); border-color: var(--line); }
+/* A. 序列点亮 */
+.tokens { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.tok { font-family: var(--mono); font-size: 13px; padding: 3px 9px; border-radius: 7px;
+  background: var(--card-2); border: 1px solid var(--line); color: var(--text-3);
+  transition: all .32s ease; transform: translateY(2px); }
+.tok.on { color: var(--text); border-color: rgba(79,140,255,.5); background: var(--primary-soft); transform: none; }
+.tok.alt.on { color: var(--violet); border-color: rgba(139,108,240,.5); background: var(--violet-soft); }
+/* B. 柱状图生长 */
+.bars { display: flex; align-items: flex-end; gap: 14px; height: 150px; padding-top: 6px; }
+.bar-item { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+.bar { width: 100%; max-width: 62px; height: 0; border-radius: 7px 7px 0 0;
+  background: linear-gradient(180deg, var(--primary), rgba(79,140,255,.35));
+  display: flex; align-items: flex-start; justify-content: center;
+  transition: height .9s cubic-bezier(.22,1,.36,1); }
+.bar span { font-size: 11.5px; font-family: var(--mono); color: var(--text); transform: translateY(-17px); }
+.bar-item .cap { font-size: 12px; color: var(--text-3); margin-top: 6px; text-align: center; }
+/* C. 分步滑块 */
+.slider-steps .pane { display: none; }
+.slider-steps .pane.on { display: block; animation: fadeUp .28s ease; }
+.slider-steps .pane h4 { margin: 0 0 5px; font-size: 14.5px; color: var(--primary); }
+.slider-steps .pane p { margin: 0; font-size: 13.5px; color: var(--text-2); }
+.slider-nav { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.slider-nav .dot { width: 8px; height: 8px; padding: 0; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--line); }
+.slider-nav .dot.on { background: var(--primary); }
+.slider-nav .pos { margin-left: auto; font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+/* D. 高亮漫游 */
+.anim-box mark { background: transparent; color: inherit; border-bottom: 2px solid var(--line);
+  cursor: pointer; transition: all .3s ease; padding: 0 1px; }
+.anim-box mark.on { background: var(--amber-soft); color: var(--text); border-bottom-color: var(--amber); border-radius: 3px; }
+.anim-box .note { margin-top: 9px; font-size: 13px; color: var(--text-2); min-height: 20px;
+  border-left: 2px solid var(--amber); padding-left: 9px; }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+/* ---------- 自测题 ---------- */
+.quiz { margin: 14px 0; }
+.quiz .q { border: 1px solid var(--line); border-radius: 10px; background: var(--card); margin-bottom: 9px; }
+.quiz .qh { padding: 11px 14px; cursor: pointer; font-size: 14px; display: flex; gap: 9px; align-items: flex-start; }
+.quiz .qh .idx { flex: none; width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center;
+  background: var(--violet-soft); color: var(--violet); font-size: 11.5px; }
+.quiz .qh:hover { color: var(--primary); }
+.quiz .qa { display: none; padding: 0 14px 13px 43px; font-size: 13.5px; color: var(--text-2); }
+.quiz .q.open .qa { display: block; animation: fadeUp .24s ease; }
+.quiz .qa .ans { color: var(--green); font-weight: 600; margin: 0 0 4px; }
+
+/* ---------- 术语表 ---------- */
+.glossary { margin: 14px 0; }
+.glossary dl.g { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0 0 10px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.glossary dt { color: var(--text); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+.glossary dt .en { color: var(--text-3); font-weight: 400; font-size: 12px; margin-left: 4px; }
+.glossary dd { margin: 0; font-size: 13.5px; color: var(--text-2); }
+
+/* ---------- 代码 / 行内 ---------- */
+pre.code { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; overflow-x: auto; font-family: var(--mono); font-size: 12.8px; line-height: 1.65;
+  margin: 12px 0; color: var(--text); }
+pre.code .cm { color: var(--text-3); font-style: italic; }
+pre.code .kw { color: var(--violet); }
+pre.code .fn2 { color: var(--cyan); }
+pre.code .hi { background: var(--amber-soft); border-radius: 3px; }
+code { font-family: var(--mono); font-size: 12.8px; background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 5px; padding: 1px 5px; }
+.hl { background: rgba(224,160,40,.22); border-radius: 3px; padding: 0 2px; }
+.hl-blue { background: rgba(79,140,255,.2); border-radius: 3px; padding: 0 2px; }
+.term { border-bottom: 1px dashed var(--primary); cursor: help; }
+.footer { margin: 26px 0 0; padding-top: 14px; border-top: 1px solid var(--line);
+  font-size: 12.5px; color: var(--text-3); }

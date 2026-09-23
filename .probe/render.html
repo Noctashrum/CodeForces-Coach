@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>md render probe</title>
+<link rel="stylesheet" href="../public/vendor/katex/katex.min.css">
+<style>body{background:#0b1220;color:#e6edf7;font:14px/1.7 system-ui,"Microsoft YaHei",sans-serif;padding:24px}</style>
+</head>
+<body>
+<div id="out"></div>
+<script src="../public/vendor/marked.min.js"></script>
+<script src="../public/vendor/katex/katex.min.js"></script>
+<script src="../public/js/md.js"></script>
+<script>
+window.__probeReady = false;
+window.__renderProbe = function (markdown, opts) {
+  var html = MD.renderMarkdown(markdown, opts || {});
+  document.getElementById('out').innerHTML = html;
+  var text = document.getElementById('out').textContent || '';
+  // 判据：渲染后正文里是否还残留原始自定义标记（说明没被渲染成组件而是当纯文本吐出来了）
+  var leaked = (text.match(/<viz-[a-z]+/g) || []).length;
+  return {
+    html: html,
+    visibleText: text,
+    leakedTags: leaked,
+    codeBlocks: document.querySelectorAll('#out pre.code-block, #out .code-block').length,
+    plainPre: document.querySelectorAll('#out pre:not(.code-block)').length,
+    vizNodes: document.querySelectorAll('#out [class^="viz-"]').length,
+    escapedAngle: (text.match(/&lt;|<\w/g) || []).length
+  };
+};
+window.__probeReady = true;
+</script>
+</body>
+</html>
