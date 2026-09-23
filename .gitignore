@@ -1,0 +1,11 @@
+/data/
+/dist/
+/node_modules/
+/.electron-cache/
+/.npm-cache/
+/.pack-data-backup/
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
