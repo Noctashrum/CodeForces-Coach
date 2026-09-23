@@ -1,0 +1,42 @@
+{
+  "name": "codeforces-coach",
+  "version": "1.0.0",
+  "description": "CF Coach — a local-first Codeforces coach: it writes a solution, a brute force and a data generator, verifies them against each other on your machine, and only then teaches the problem with a rich, figure-annotated document. All data stays local.",
+  "private": true,
+  "main": "electron/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Noctashrum/CodeForces-Coach.git"
+  },
+  "keywords": ["codeforces", "competitive-programming", "algorithm", "coach", "electron", "local-first", "stress-testing"],
+  "author": "Noctashrum",
+  "scripts": {
+    "start": "node server.js",
+    "app": "electron .",
+    "mock": "node scripts/mock-llm.js",
+    "mock-cf": "node scripts/mock-cf.js",
+    "test": "node scripts/run-e2e.js",
+    "test:e2e-only": "node scripts/test-e2e.js",
+    "test:harness": "node scripts/test-harness.js",
+    "test:runner": "node scripts/test-runner.js",
+    "test:anticheat": "node scripts/test-anticheat.js",
+    "test:explaindoc": "node scripts/test-explaindoc.js",
+    "test:statement": "node scripts/test-statement.js",
+    "test:pricing": "node scripts/test-pricing.js",
+    "test:parallel": "node scripts/test-parallel.js",
+    "test:agentruns": "node scripts/test-agentruns.js",
+    "test:units": "node scripts/test-anticheat.js && node scripts/test-explaindoc.js && node scripts/test-statement.js && node scripts/test-pricing.js && node scripts/test-parallel.js && node scripts/test-agentruns.js && node scripts/test-harness.js && node scripts/test-runner.js",
+    "smoke": "node scripts/run-smoke.js",
+    "cf-dump": "node scripts/cf-dump.js",
+    "icon": "node scripts/gen-icon.js",
+    "pack": "node scripts/pack.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.3.0"
+  }
+}

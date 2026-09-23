@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CF Coach · 本地算法教练</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%86%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/vendor/hljs/github.min.css" id="hljs-light">
+  <link rel="stylesheet" href="/vendor/hljs/github-dark.min.css" id="hljs-dark" media="(prefers-color-scheme: dark)" disabled>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="bg-layer"></div>
+  <div id="app">
+    <!-- 侧边栏 -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sb-header">
+        <div class="logo">
+          <span class="logo-mark">🏆</span>
+          <span class="logo-text">CF Coach</span>
+        </div>
+        <button id="btn-collapse" class="icon-btn sb-collapse" title="收起侧边栏">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+      </div>
+      <button id="btn-new-chat" class="btn-new-chat">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <span>问一道题</span>
+      </button>
+      <div class="sb-tabs">
+        <button class="sb-tab active" data-tab="active">对话</button>
+        <button class="sb-tab" data-tab="archive">归档<span class="sb-tab-count" id="archive-count" hidden></span></button>
+      </div>
+      <div class="sb-search">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input id="input-search" type="text" placeholder="搜索对话…" autocomplete="off">
+      </div>
+      <div id="conv-list" class="conv-list"></div>
+      <div class="sb-footer">
+        <button id="btn-library" class="icon-btn nav-btn" title="题目库（分类浏览问过的题）">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        </button>
+        <button id="btn-profile" class="icon-btn nav-btn" title="我的（CF 账号 / rating 曲线 / 信息卡）">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </button>
+        <button id="btn-settings" class="icon-btn nav-btn" title="设置">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button id="btn-theme" class="icon-btn" title="切换主题">
+          <svg id="icon-theme-light" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg id="icon-theme-dark" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main id="main" class="main">
+      <header id="chat-header" class="chat-header">
+        <button id="btn-expand" class="icon-btn" title="展开侧边栏" style="display:none">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+        <div class="header-info">
+          <div id="header-title" class="header-title">CF Coach</div>
+          <div class="header-chips">
+            <span id="header-rating" class="rating-badge cf-gray" hidden>—</span>
+            <span id="header-model" class="chip-soft" hidden></span>
+            <span id="header-progress" class="chip-soft chip-progress" hidden></span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="btn-tray" class="icon-btn" title="最小化到托盘（后台运行）" hidden>
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <button id="btn-conv-menu" class="icon-btn" title="会话操作" hidden>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="workbench">
+        <div class="wb-main">
+          <div id="chat-scroll" class="chat-scroll">
+            <div id="chat-view" class="chat-view"></div>
+          </div>
+
+          <div id="composer-wrap" class="composer-wrap">
+            <div id="composer" class="composer">
+              <div id="edit-chip" class="edit-chip" hidden>
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                <span>正在编辑消息，发送后将重发并替换后续内容</span>
+                <button id="btn-cancel-edit" class="chip-close" title="取消编辑">✕</button>
+              </div>
+              <div class="composer-input-row">
+                <textarea id="input" rows="1" placeholder="输入 Codeforces 题目编号（如 1800C），或直接粘贴题面…"></textarea>
+                <button id="btn-send" class="btn-send" title="发送">
+                  <svg id="icon-send" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                  <svg id="icon-stop" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" stroke="none" style="display:none"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                </button>
+              </div>
+              <div class="composer-bar">
+                <div class="composer-bar-left">
+                  <button id="btn-lang-select" class="model-select" title="选择讲解语言（代码与讲解都用该语言）">
+                    <span class="lang-icon">⌨</span>
+                    <span id="lang-select-label">C++23</span>
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <button id="btn-intent-select" class="model-select" title="选择本次提问的意图">
+                    <span id="intent-select-icon" class="lang-icon">🎯</span>
+                    <span id="intent-select-label">完整讲解</span>
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                  <button id="btn-cf-import" class="model-select cf-import-btn" title="从 Codeforces 获取题面" hidden>
+                    <span>📥 CF 取题</span>
+                  </button>
+                  <button id="btn-model-select" class="model-select" title="选择模型">
+                    <span id="model-select-label">未选择模型</span>
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+                  </button>
+                </div>
+                <div class="composer-bar-right">
+                  <span id="coach-level-hint" class="token-hint" hidden></span>
+                </div>
+              </div>
+            </div>
+            <div class="composer-footer">
+              <span>⚔️ 本地对拍验证 · 内容由 AI 生成，请注意甄别</span>
+              <span class="local-badge" title="所有对话数据仅保存在本地 data/ 目录，不会上传">🔒 数据仅存本地</span>
+            </div>
+          </div>
+        </div>
+
+        <aside id="problem-panel" class="problem-panel">
+          <div class="pp-head">
+            <span class="pp-title">题目面板</span>
+            <button id="btn-pp-refresh" class="icon-btn" title="刷新面板" style="width:26px;height:26px">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+            </button>
+          </div>
+          <div id="pp-body" class="pp-body"></div>
+          <!-- Agent 工作台：实时显示每个子 Agent 的思考与输出（由 renderAgentWorkbench 填充） -->
+          <div data-agent-workbench class="agent-workbench" hidden></div>
+        </aside>
+      </div>
+
+      <div id="page-library" class="page" hidden>
+        <div class="page-inner">
+          <div class="page-head"><div class="page-title">📚 题目库</div><div class="page-sub">按知识点 / 比赛 / 难度浏览问过的每一道题</div></div>
+          <div class="lib-filters">
+            <select class="form-select lib-filter" data-lib-knowledge>
+              <option value="">全部知识点</option>
+            </select>
+            <select class="form-select lib-filter" data-lib-rating>
+              <option value="">全部难度</option>
+              <option value="0-1200">0 - 1200</option>
+              <option value="1200-1600">1200 - 1600</option>
+              <option value="1600-2000">1600 - 2000</option>
+              <option value="2000-2400">2000 - 2400</option>
+              <option value="2400-9999">2400+</option>
+            </select>
+            <select class="form-select lib-filter" data-lib-contest>
+              <option value="">全部比赛</option>
+            </select>
+            <input class="form-input lib-filter" data-lib-search type="text" placeholder="搜索题目…" style="max-width:220px">
+          </div>
+          <div data-lib-list></div>
+        </div>
+      </div>
+
+      <div id="page-profile" class="page" hidden>
+        <div class="page-inner" data-profile-page></div>
+      </div>
+
+      <div id="page-conv-settings" class="page" hidden>
+        <div class="page-inner" data-conv-settings-page></div>
+      </div>
+
+      <div id="page-provider-edit" class="page" hidden>
+        <div class="page-inner" data-provider-edit-page></div>
+      </div>
+
+      <div id="page-settings" class="page" hidden>
+        <div class="page-inner" data-settings-page></div>
+      </div>
+
+      <button id="btn-scroll-bottom" class="btn-scroll-bottom" hidden title="回到底部">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+      </button>
+    </main>
+  </div>
+
+  <!-- 弹出层 -->
+  <div id="modal-root"></div>
+  <div id="menu-root" class="menu-root"></div>
+  <div id="toast-root"></div>
+
+  <!-- 本地化依赖（离线可用，无 CDN 请求） -->
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/hljs/highlight.min.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/vendor/katex/auto-render.min.js"></script>
+  <script src="/js/md.js"></script>
+  <script src="/js/agentruns.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
