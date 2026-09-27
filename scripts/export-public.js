@@ -136,6 +136,12 @@ function scanForPersonalData(dir, handle) {
       if (st.isDirectory()) { walk(p); return; }
       if (st.size > 2 * 1024 * 1024) return;             // 大文件（vendor/图标）跳过
       if (!/\.(js|json|jsonl|md|html|css|txt|yml|yaml|sh|py)$/i.test(name)) return;
+      // 扫描器自己的源码是"模式文本的载体"：正则字面量 /C:\\+Users\\+…/ 会被通用绝对路径
+      // 判据匹配到（那是判据本身，不是使用痕迹）。只跳过这个文件，其余文件照旧全扫。
+      if (name === 'export-public.js' && path.basename(d) === 'scripts') {
+        console.log('  ℹ️ 跳过扫描器自身（scripts/export-public.js：内含判据文本，不是使用痕迹）');
+        return;
+      }
       const text = fs.readFileSync(p, 'utf8');
       textPatterns.forEach((pt) => {
         const m = text.match(pt.re);
