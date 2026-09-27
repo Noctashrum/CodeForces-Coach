@@ -23,7 +23,7 @@ contract → solution ∥ brute force ∥ generator (three isolated agents, in p
 | Ordinary "AI explains a problem" | CF Coach |
 | --- | --- |
 | The model's answer is taken on faith | The solution must agree with an independently written brute force on randomized data |
-| One model, one context | Four isolated agents (solution / brute force / generator / explainer) that cannot see each other's code |
+| One model, one context | Three isolated agents (solution / brute force / generator) that never see each other's code — plus an explainer that works only from the verified artifacts |
 | "Sample passed" = done | Samples only calibrate the ruler; correctness is argued by stress testing, and gaps are reported honestly |
 | Silent failures | Every round ends with a verdict: `ok`, `unverified`, `no-bruler`, `samples-failed`, `budget` — and the UI shows it |
 | Chat log | Structured lesson + problem library + learner profile + per-round token/cost accounting |
