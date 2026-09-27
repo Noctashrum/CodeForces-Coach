@@ -21,8 +21,24 @@ profile-log.jsonl
 .probe/rendered.html
 .probe/*.txt
 .probe/richdoc-*.html
+.probe/*.json
+.probe/*.har
+.probe/*.log
+.probe/cookies*
 .cf-dump/
 smoke.png
+
+# Python bytecode caches. The sandbox helper (lib/sandbox/sitecustomize.py) is
+# compiled on first run, and a .pyc embeds the absolute path of the machine that
+# compiled it — i.e. it can carry local directory names into a public repo.
+__pycache__/
+*.pyc
+
+# Logs & local scratch
+*.log
+*.tmp
+*.bak
+*.orig
 
 # Editor / OS
 node_modules/

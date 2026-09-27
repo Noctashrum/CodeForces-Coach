@@ -144,6 +144,192 @@ async function openaiChat(req, res, body) {
     return;
   }
 
+  // ---- 技能驱动的教练工具循环（agentloop）：请求里带 tools 就走这条 ----
+  // 为什么必须模拟它：新架构下"教练"是一个**工具循环** —— 三个代码 Agent（题解/暴力/生成器）
+  // 不再由 /api/chat 直接拉起，而是被 `cf_verify` 工具拉起的。模拟教练如果只回一段文字，
+  // 流水线永远不跑、工作台永远是空的 —— 那不是产品坏了，是夹具没跟上架构。
+  //
+  // 这里按一个**称职教练**的走法来，而不是写死"永远调 cf_verify"：
+  //   ① 追问（上下文里已有回答）→ 一个工具都不调，直接答（这本身就是产品要求：追问不重跑链路）；
+  //   ② 提到 CF 题号且本题题面还没取 → cf_fetch；
+  //   ③ 题面有了但没验证过 → cf_verify（学员提做法问行不行时带上 idea，先做可行性评估）；
+  //   ④ 完整讲解 / 用户要图文 → cf_doc 出图文文档（文档被校验打回就按提示重写一次）；
+  //   ⑤ 收尾：写讲解正文。
+  if (stream && Array.isArray(body.tools) && body.tools.length) {
+    const hasTool = (n) => body.tools.some((t) => t && t.function && t.function.name === n);
+    const msgs = body.messages || [];
+    const toolMsgs = msgs.filter((m) => m && m.role === 'tool').map((m) => String(m.content || ''));
+    const toolText = toolMsgs.join('\n');
+    const lastToolText = toolMsgs.length ? toolMsgs[toolMsgs.length - 1] : '';
+    // ⚠️ 必须是**最后一条用户消息**：工具循环里"最后一条消息"往往是 tool 结果，
+    // 用它会让 mock 丢掉学员真正说的话（曾导致"贴了代码却不带 userCode"这类假失败）
+    const userMsgs = msgs.filter((m) => m && m.role === 'user');
+    const lastUser = userMsgs.length ? userMsgs[userMsgs.length - 1] : null;
+    const userText = String((lastUser && (typeof lastUser.content === 'string'
+      ? lastUser.content
+      : (Array.isArray(lastUser.content) ? lastUser.content.filter((p) => p && p.type === 'text').map((p) => p.text).join(' ') : ''))) || '').slice(0, 4000);
+    // 上下文里已经有"教练说过的话" → 这一轮是追问（工具调用产生的空 assistant 消息不算）
+    const isFollowUp = msgs.some((m) => m && m.role === 'assistant' && String(m.content || '').trim());
+    const fetched = /【题面已取到/.test(toolText);
+    const verified = /【验证结论/.test(toolText);
+    const docMade = /【文档已生成并落盘】/.test(toolText);
+    const docRejected = /【文档未通过校验|【文档没有落盘/.test(lastToolText);
+    const docTried = /【文档/.test(toolText);
+    const runTried = /【运行结果】|【运行失败】/.test(toolText);
+    /**
+     * 工作区里**已经有这题验证通过的产物** → 不重跑对拍（cf-explain §0 的口径）。
+     * 夹具必须照做，否则测不到真实场景：用户第二次问同一道题时，教练跳过对拍是对的，
+     * 但**文档仍然要交付**（真实事故：跳过了对拍，也顺手跳过了文档 → 又是纯文字）。
+     */
+    const wsVerified = /已有验证记录：status=ok/.test(toolText);
+    const wsChecked = /【工作区 /.test(toolText);
+    // 意图由系统提示词给出（buildCoachSystem 的「本次意图：…」）。
+    // auto（默认档）时提示词里写的是"自动（由你判断）"→ mock 必须**自己判断**，
+    // 这正是真实模型在 auto 模式下要做的事（判错就会用错交付形态）。
+    const intentM = /本次意图：([^\n（]+)/.exec(sysText) || [];
+    const rawIntent = (intentM[1] || '').trim();
+    const isAuto = !rawIntent || /自动/.test(rawIntent);
+    const intent = isAuto ? inferIntentFromText(userText) : rawIntent;
+    if (isAuto && process.env.MOCK_DEBUG) console.log('[mock-coach] 意图自动判定 → ' + intent);
+    /** 完整讲解（默认意图）或用户点名要图文 → 要产出图文文档；思路提示/题干解读则只给文字 */
+    const wantDoc = /完整讲解/.test(intent) || !intent || /图文|文档|图解|生动/.test(userText);
+    /** 思路提示 / 题干解读：只给方向，**不贴完整代码、不出文档**（这是意图选择器的产品语义） */
+    const hintMode = /思路提示|题干解读/.test(intent);
+    /** 验证没通过 → 讲解必须走诚实降级口径（第一句就说清楚，文档里也要有警示） */
+    const unverified = /【验证结论：(?!OK)/.test(toolText) || /未标定|UNVERIFIED/.test(toolText);
+    const cfRef = /(?:CF[^\d]{0,3})?(\d{3,4})\s*([A-Z]\d?)\b/i.exec(userText);
+    /** 「没听懂」→ 必须换一种讲法（手算/更小的例子），而不是把上一轮的话再说一遍 */
+    const wantsRethink = /(没听懂|没懂|没理解|看不懂|不理解|太抽象|换个说法|换一种)/.test(userText);
+    // 注意排除 wantsRethink："能不能换个说法"里的"能不能"不是"提了一个做法"
+    const asksApproach = !wantsRethink && /(能写吗|能不能|行不行|可以吗|可行)/.test(userText);
+    /** 学员贴了代码（代码评估 / 体检）：要让 cf_verify 带上 userCode，否则走的是"只验证题解"那条路 */
+    const codeM = /```[a-z0-9+#]*\n([\s\S]*?)```/i.exec(userText);
+    const userCode = codeM ? codeM[1] : '';
+    // 题面来源：cf_fetch 的结果里有全文；否则用用户自己贴的内容
+    const stmtM = /题面全文（已完整落盘；后续轮次直接引用，不需要再取）：\n([\s\S]*)$/.exec(toolText);
+    const statement = (stmtM ? stmtM[1] : userText).slice(0, 4000);
+    /**
+     * 题面**已经在会话里**（用户直接粘的，或上一轮取过）→ 不要 cf_fetch。
+     * 服务端会在 current_state 里明写"⛔ 题面正文已经在会话里了"，
+     * 一个好教练看到这句就该跳过去直接用；夹具照这个口径做，e2e 才能守住这条回归
+     * （真实事故：用户粘了题面，教练还去 CF 抓了一遍，白等一轮往返）。
+     */
+    const statementInConv = /题面正文已经在会话里了|题面是否已在会话中：是/.test(sysText);
+    // 调试开关：把"mock 到底看到了什么"打出来（排 e2e 假失败时非常省时间）
+    if (process.env.MOCK_DEBUG) {
+      console.log('[mock-coach] roles=' + msgs.map((m) => m.role).join(',')
+        + ' | 题面在会话里=' + statementInConv
+        + ' | userText=' + JSON.stringify(userText.slice(0, 120))
+        + ' | userCode=' + userCode.length + ' 字 | intent=' + intent);
+    }
+    // 文档重写：**除了** mock-bad-rich（它"怎么写都写不好"，用来验证如实回落 Markdown）
+    const badDocAlways = /mock-bad-rich/.test(model);
+
+    /** 用户点名要"图文/文档/图解" → 这是一个**交付请求**（不是普通追问），要出文档 */
+    const explicitDoc = /图文|文档|图解|生动/.test(userText);
+
+    let call = null;
+    // 追问且没提做法、没要文档 → 纯对话（不碰任何链路）。
+    // 但"提了一个做法/贴了代码"的追问必须去验证：那正是代码评估要干的事。
+    const needsVerify = !verified && (!isFollowUp || asksApproach || !!userCode);
+    // 取题失败（网络/反爬）→ 别死循环重试：改用自带的最小题面继续验证，
+    // 这样夹具在离线环境里也能把"验证 → 文档"这条链跑完（真实教练也会退而求其次）
+    const fetchFailed = /【没能取到题面|题面获取失败|反爬|HTTP 4\d\d/.test(toolText);
+    const fallbackStatement = '牌堆问题：遇到 0 就取此前没取过的最大正数牌，求能取得的最大总和。\n\n输入格式\n第一行 t。每个测试用例一行 n、一行 n 个整数。\n\n输出格式\n每组输出一行整数。';
+    if (isFollowUp && !asksApproach && !explicitDoc) {
+      call = null;
+    } else if (!wsChecked && hasTool('cf_workspace')) {
+      // 像真实教练一样：先看一眼工作区（这题验证过没有、有没有可用代码），再决定跑不跑链路。
+      // 真实轨迹里第一步就是 cf_workspace —— 夹具照做，才测得到"已有产物就别重跑"这条。
+      call = { name: 'cf_workspace', args: { action: 'list' } };
+    } else if (!isFollowUp && cfRef && !fetched && !fetchFailed && !statementInConv && hasTool('cf_fetch')) {
+      call = { name: 'cf_fetch', args: { contestId: cfRef[1], index: cfRef[2].toUpperCase() } };
+    } else if (needsVerify && !(wsVerified && !asksApproach && !userCode) && hasTool('cf_verify')) {
+      // 贴了代码 → 带 userCode（走代码诊断/体检）；提了做法 → 带 idea（先做可行性评估）
+      const args = { statement: fetchFailed ? fallbackStatement : statement };
+      if (userCode) args.userCode = userCode;
+      else if (asksApproach) args.idea = userText;
+      call = { name: 'cf_verify', args };
+    } else if (!runTried && verified && hasTool('cf_run')) {
+      /**
+       * 验证过了、想亲手跑一遍样例确认（真实教练常做的动作）。
+       * 这条也守着 cf_run 的回归：它曾经用**过期的位置参数**调 runner.runSamples，
+       * 于是每次调用都只回一句"当前题目没有可用样例"，模型白试 4 次最后重跑整条链。
+       */
+      call = { name: 'cf_run', args: { lang: 'python', code: 'import sys\nprint(sys.stdin.read().count("0"))', input: '3\n3 3 0\n2\n5 0\n' } };
+    } else if (wantDoc && !docTried && hasTool('cf_doc')) {
+      call = { name: 'cf_doc', args: { title: '模拟图文讲解', html: docFixtureFor(model, unverified) } };
+    }
+    // 文档被打回 → 按校验提示重写一次（真实教练收到错误也是这么做的）；
+    // mock-bad-rich 例外：它"怎么写都写不好"，用来验证回落路径
+    if (docRejected && !docMade && hasTool('cf_doc') && !badDocAlways) {
+      call = { name: 'cf_doc', args: { title: '模拟图文讲解（修正版）', html: MOCK_RICH_DOC(unverified) } };
+    }
+
+    sse(res);
+    const send = (obj) => res.write('data: ' + JSON.stringify(obj) + '\n\n');
+    // 思考过程：真实推理模型先吐 reasoning_content（"思考实时可见"这条链路就靠它）
+    for (const piece of ('判断一下这轮该做什么：' + (call ? ('调用 ' + call.name) : '直接回答（追问不重跑链路）')).match(/[\s\S]{1,12}/g) || []) {
+      await sleep(6);
+      send({ id: 'mock-think', object: 'chat.completion.chunk', model,
+        choices: [{ index: 0, delta: { reasoning_content: piece }, finish_reason: null }] });
+    }
+    if (call) {
+      const id = 'call_' + Math.random().toString(36).slice(2, 8);
+      const argStr = JSON.stringify(call.args);
+      // 分片下发：真实服务商就是这么发的，lib/llm.js 的 accumulateToolCalls 必须能把碎片拼回来
+      send({ id: 'mock-tool', object: 'chat.completion.chunk', model,
+        choices: [{ index: 0, delta: { tool_calls: [
+          { index: 0, id, type: 'function', function: { name: call.name, arguments: '' } }
+        ] }, finish_reason: null }] });
+      for (const piece of (argStr.match(/[\s\S]{1,24}/g) || [])) {
+        await sleep(8);
+        send({ id: 'mock-tool', object: 'chat.completion.chunk', model,
+          choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: piece } }] }, finish_reason: null }] });
+      }
+      send({ id: 'mock-tool', object: 'chat.completion.chunk', model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 300, completion_tokens: 30, total_tokens: 330 } });
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    // 收尾：讲解正文（Markdown）。图文文档已经通过 cf_doc 交付，正文只留引子与要点。
+    // 注意："追问"分支只适用于**真的只是追问**：用户点名要文档时，正文要给文档引子而不是上一句的解释
+    const followUpAnswer = isFollowUp && !docMade && !explicitDoc;
+    const finalText = followUpAnswer
+      ? (wantsRethink
+        // 「没听懂」→ 换一种讲法：不重复上一轮的说法，改成一个更小的例子一步步手算
+        ? '换个说法：我们不写代码，只拿 a=[3,0] 一步步看。第一步读到 3，把它放进"待取"的集合；'
+          + '第二步读到 0，此时集合里只有 3，取走它，总和变成 3。所以规则就是"遇到 0 就取当前集合里的最大值"。'
+        : '这一行是在维护"已取走"的状态：读入正数就入堆，遇到 0 就弹出堆顶累加，所以第 12 行必须放在循环里。')
+      : [
+        unverified ? '这题我还没能验证通过，下面只讲我有把握的部分（代码未经验证）。' : '',
+        docMade ? '图文讲解已经生成，见上方文档。' : '这题的讲解如下。',
+        '',
+        hintMode ? '方向：把"每个 0 取走它之前最大的正数牌"这件事，交给一个大根堆去做 —— 具体实现你自己写。'
+          + '关键在于：0 只能动用**它之前**出现过的牌，所以必须边读边维护堆，不能先把所有正数排序再贪心。'
+          + '你可以先试着写一版，卡住了再问我。' : '1. 突破口：每个 0 独立地取走**它之前**出现的最大正数牌；',
+        hintMode ? '' : '2. 为什么：交换论证 —— 把取的 x 换成当前最大值只会让总和更大；',
+        hintMode ? '' : '3. 走一遍 a=[3,0,2,0,1]：读到 3 入堆；读到 0 弹 3（累计 3）；读到 2 入堆；读到 0 弹 2（累计 5）；末尾 1 不计入；',
+        hintMode ? '' : '4. 算法：大根堆维护可选最大值，O(n log n)；',
+        '',
+        verified ? '验证结论见上方工具结果（已对拍）。' : '（本轮没有跑验证。）',
+        hintMode ? '' : '\n```python\n' + MOCK_SOL_PY + '\n```'
+      ].filter((x) => x !== '').join('\n');
+    for (const piece of (finalText.match(/[\s\S]{1,32}/g) || [])) {
+      await sleep(10);
+      send({ id: 'mock-tool2', object: 'chat.completion.chunk', model,
+        choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] });
+    }
+    send({ id: 'mock-tool2', object: 'chat.completion.chunk', model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 500, completion_tokens: 120, total_tokens: 620 } });
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
+
   if (!stream) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -551,29 +737,7 @@ function mockAgentOutput(role, body, sysText) {
     // 真实模型很常见的写法。这类不该整份作废（作废=回落到没有图的 Markdown，学员看到"生不出图"），
     // 机械净化 + 宽容计数后应当照常交付。
     if (/mock-rich-soft/.test(model)) {
-      return [
-        '下面是这道题的图文讲解。',
-        '',
-        '```html',
-        '<div class="wrap">',
-        '  <div class="hero"><h1>牌堆贪心</h1><div class="oneliner">遇到 0 取当前最大值</div></div>',
-        '  <section class="chapter"><h2><span class="num">1</span>思路</h2><p>用大根堆维护可选最大值。</p>',
-        '    <div class="card"><svg viewBox="0 0 700 220" role="img" aria-label="扫描示意">',
-        '      <rect x="20" y="60" width="120" height="60" rx="10" fill="#e8f0ff" stroke="#2f6fed"/>',
-        '      <text x="80" y="96" text-anchor="middle" font-size="14" fill="#1b4fc0">正数入堆</text>',
-        '    </svg><p class="cap">图 1｜扫描时的两个动作</p></div>',
-        '  </section>',
-        '  <section class="chapter"><h2><span class="num">2</span>复杂度分析</h2>',
-        '    <div class="card"><svg viewBox="0 0 640 200" role="img" aria-label="复杂度对比">',
-        '      <text x="320" y="100" text-anchor="middle" font-size="14" fill="#3c4a6b">O(n log n) 对比 O(n²)</text>',
-        '    </svg><p class="cap">图 2｜两种做法的规模增长</p></div>',
-        '  </section>',
-        '  <section class="chapter"><h2><span class="num">3</span>代码</h2><pre class="code">heapq.heappush</pre>',
-        '  </section>',
-        '  <div class="footer">验证：官方样例 2 组通过 · 随机对拍 120 组一致</div>',
-        // 故意不写收尾的 </div>
-        '```'
-      ].join('\n');
+      return ['下面是这道题的图文讲解。', '', '```html', MOCK_RICH_DOC_SOFT(), '```'].join('\n');
     }
     // 富讲解：输出一份符合设计系统的图文文档（模拟）
     return [
@@ -644,6 +808,66 @@ function mockAgentOutput(role, body, sysText) {
   ].filter((x) => x !== '').join('\n');
 }
 
+/**
+ * 按模型名挑"这次该交哪份文档"：
+ *   mock-bad-explain → 第一次交没有图的（验证"打回 → 重写"）
+ *   mock-bad-rich    → 每次都不合格（验证"如实回落 Markdown + 给用户原因"）
+ *   mock-rich-soft   → 图在但是写法不规范、末尾缺闭合标签（验证"机械挽救不该整份作废"）
+ *   其余             → 正常文档；验证没通过时带未验证警示
+ */
+function docFixtureFor(model, unverified) {
+  if (/mock-bad-explain|mock-bad-rich/.test(model)) return MOCK_BAD_DOC();
+  if (/mock-rich-soft/.test(model)) return MOCK_RICH_DOC_SOFT();
+  return MOCK_RICH_DOC(unverified);
+}
+
+/**
+ * 不合格的图文文档（**故意没有图**）：用来验证"校验打回 → 定向修复 → 重新交付"这条链。
+ * 真实场景：模型写了一堆排版很漂亮的文字，却忘了画图 —— 那就不是图文讲解。
+ */
+function MOCK_BAD_DOC() {
+  return [
+    '<div class="wrap">',
+    '  <div class="hero"><h1>牌堆贪心</h1><p class="subtitle">只有文字，没有图。</p></div>',
+    '  <section class="chapter"><h2><span class="num">1</span>思路</h2>',
+    '    <p>用大根堆维护当前可选的最大值，遇到 0 就弹出堆顶累加。</p></section>',
+    '  <section class="chapter"><h2><span class="num">2</span>复杂度分析</h2>',
+    '    <p>每个元素最多进出堆一次，总计 O(n log n)。</p></section>',
+    '</div>'
+  ].join('\n');
+}
+
+/**
+ * "软失败"文档：图确实画了（`<div class="card">` 里插了大 svg），但没写成 `<figure class="diagram">`，
+ * 末尾还少一个 `</div>`。真实模型很常见的写法 —— 这类**不该整份作废**
+ * （作废 = 回落到没有图的 Markdown，学员看到的就是"生不出图"），机械净化 + 补齐后应当照常交付。
+ */
+function MOCK_RICH_DOC_SOFT() {
+  return [
+    '<div class="wrap">',
+    '  <div class="hero"><h1>牌堆贪心</h1><div class="oneliner">遇到 0 取当前最大值</div></div>',
+    '  <section class="chapter"><h2><span class="num">1</span>思路</h2><p>用大根堆维护可选最大值。</p>',
+    '    <div class="card"><svg viewBox="0 0 700 220" role="img" aria-label="扫描示意">',
+    '      <rect x="20" y="60" width="120" height="60" rx="10" fill="#e8f0ff" stroke="#2f6fed"/>',
+    '      <text x="80" y="96" text-anchor="middle" font-size="14" fill="#1b4fc0">正数入堆</text>',
+    '      <line x1="150" y1="90" x2="300" y2="90" stroke="#6b7899" stroke-width="1.6"/>',
+    '      <text x="430" y="96" text-anchor="middle" font-size="14" fill="#0a7a58">0 弹堆顶</text>',
+    '    </svg><p class="cap">图 1｜扫描时的两个动作</p></div>',
+    '  </section>',
+    '  <section class="chapter"><h2><span class="num">2</span>复杂度分析</h2>',
+    '    <div class="card"><svg viewBox="0 0 640 200" role="img" aria-label="复杂度对比">',
+    '      <line x1="40" y1="160" x2="600" y2="160" stroke="#6b7899" stroke-width="1.6"/>',
+    '      <text x="320" y="100" text-anchor="middle" font-size="14" fill="#3c4a6b">O(n log n) 对比 O(n²)</text>',
+    '    </svg><p class="cap">图 2｜两种做法的规模增长</p></div>',
+    '  </section>',
+    '  <section class="chapter"><h2><span class="num">3</span>代码</h2>',
+    '    <pre class="code">' + MOCK_SOL_PY.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>',
+    '  </section>',
+    '  <div class="footer">验证：官方样例 2 组通过 · 随机对拍 120 组一致</div>'
+    // 故意不写收尾的 </div>
+  ].join('\n');
+}
+
 /** 富讲解文档样例（符合 lib/richdoc.js 的白名单与结构要求） */
 function MOCK_RICH_DOC(degraded) {
   return [
@@ -678,11 +902,12 @@ function MOCK_RICH_DOC(degraded) {
     '      <text x="50" y="52" text-anchor="middle" font-size="12" fill="#1b4fc0">O(n log n)</text>',
     '      <rect x="120" y="20" width="60" height="80" rx="6" fill="#ffe9ed" stroke="#e0455f"/>',
     '      <text x="150" y="14" text-anchor="middle" font-size="12" fill="#b8273f">O(n²)</text>',
+    '      <line x1="20" y1="104" x2="300" y2="104" stroke="#6b7899" stroke-width="1.6"/>',
     '      <text x="240" y="70" text-anchor="middle" font-size="12" fill="#3c4a6b">堆贪心更快</text>',
     '    </svg><figcaption><b>图 2</b>｜两种做法的规模增长对比。</figcaption></figure>',
     '  </section>',
     '  <section class="chapter" id="c4"><h2><span class="num">4</span>代码</h2>',
-    '    <pre class="code"><span class="kw">import</span> heapq</pre>',
+    '    <pre class="code">' + MOCK_SOL_PY.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>',
     '  </section>',
     '  <section class="chapter" id="c5"><h2><span class="num">5</span>交互演示</h2>',
     '    <div class="anim-box" data-anim="sequence"><div class="head"><h5>演示：扫描顺序</h5>',
@@ -694,6 +919,19 @@ function MOCK_RICH_DOC(degraded) {
     '  <div class="footer">验证：官方样例 2 组通过 · 随机对拍 120 组一致</div>',
     '</div>'
   ].filter(Boolean).join('\n');
+}
+
+/**
+ * 自动意图：mock 教练按学员原话判断他要哪一种（真实模型在 auto 档做的就是这件事）。
+ * 判据刻意写得像人话，方便对照：贴代码/问为什么错 → 代码评估；只要方向 → 思路提示；
+ * 读不懂题 → 题干解读；其余（"讲一下/怎么做"）→ 完整讲解。
+ */
+function inferIntentFromText(text) {
+  const t = String(text || '');
+  if (/(我的代码|这段代码|为什么.{0,6}(WA|TLE|RE|超时|错)|编译报错|帮我看看|错在哪|哪里错|怎么改)/i.test(t)) return '代码评估';
+  if (/(思路|提示|怎么想|没头绪|卡住|想不出|hint)/i.test(t)) return '思路提示';
+  if (/(没看懂题|看不懂题|题意|读不懂|什么意思|讲的什么)/.test(t)) return '题干解读';
+  return '完整讲解';
 }
 
 const server = http.createServer(async (req, res) => {

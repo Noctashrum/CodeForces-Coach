@@ -93,28 +93,37 @@ const server = http.createServer((req, res) => {  const url = new URL(req.url, '
     res.end(JSON.stringify(obj));
   };
   try {
-    if (url.pathname === '/problemset/problem/1800/C') {
+    // 题目页的**规范地址**是 /contest/<id>/problem/<idx>（真实 CF 对新旧比赛都成立；
+    // /problemset/problem/... 只在题目进了总表之后才有）。两个地址都提供，
+    // 夹具才跟真实站点一致 —— 应用现在优先用规范地址。
+    if (/^\/contest\/1800\/problem\/C$/.test(url.pathname) || url.pathname === '/problemset/problem/1800/C') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PROBLEM_HTML);
       return;
     }
     // 2264D：答案是一串 0/1（**长字面量**）——复刻真实事故现场的题型，
     // 用来端到端验证"打表（硬编码样例答案）会被机械拦下"这条防线。
-    if (url.pathname === '/problemset/problem/2264/D') {
+    if (/^\/contest\/2264\/problem\/D$/.test(url.pathname) || url.pathname === '/problemset/problem/2264/D') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PROBLEM_2264D_HTML);
       return;
     }
     // 反爬挑战（模拟 Cloudflare 403）
-    if (url.pathname === '/problemset/problem/999/A') {
+    if (/^\/contest\/999\/problem\/A$/.test(url.pathname) || url.pathname === '/problemset/problem/999/A') {
       res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8', 'cf-mitigated': 'challenge' });
       res.end('<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Enable JavaScript and cookies to continue</body></html>');
       return;
     }
     // 被重定向到其它页面（返回别的题目题面）
-    if (url.pathname === '/problemset/problem/998/A') {
+    if (/^\/contest\/998\/problem\/A$/.test(url.pathname) || url.pathname === '/problemset/problem/998/A') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PROBLEM_HTML.replace('C. Powering the Hero (hard version)', 'A. Another Problem'));
+      return;
+    }
+    // 比赛总表：用来**快速**判断"这个比赛号到底存不存在"（题号写错时不该白等 20 秒）。
+    // 7777 故意不存在 → e2e 用它验证"比赛号不存在"能被说清楚。
+    if (url.pathname === '/api/contest.list') {
+      sendJson({ status: 'OK', result: [{ id: 1800 }, { id: 1799 }, { id: 2264 }, { id: 998 }, { id: 999 }] });
       return;
     }
     // 全量题目总表（元数据主通道：CF 的 contest.standings 对非 gym 已禁止附加参数）
@@ -132,10 +141,22 @@ const server = http.createServer((req, res) => {  const url = new URL(req.url, '
       });
       return;
     }
-    // 复刻真实行为：非 gym 比赛的 contest.standings 带附加参数/其它请求会被拒绝
+    // 复刻真实行为：非 gym 比赛的 contest.standings **只接受不含附加参数的匿名请求**；
+    // 带 from/count 等参数会被 400 拒掉（匿名、无附加参数的形式是允许的，实测：
+    // 真实 CF 的 /api/contest.standings?contestId=1799 能返回该比赛的完整题号表）。
     if (url.pathname === '/api/contest.standings' && url.searchParams.get('contestId') === '1799') {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'FAILED', comment: 'contestId: Non-gym contest standings for non-admin users are available only via anonymous GET requests with no extra parameters' }));
+      const extra = [...url.searchParams.keys()].filter((k) => k !== 'contestId');
+      if (extra.length) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'FAILED', comment: 'contestId: Non-gym contest standings for non-admin users are available only via anonymous GET requests with no extra parameters' }));
+        return;
+      }
+      sendJson({
+        status: 'OK',
+        result: {
+          problems: [{ contestId: 1799, index: 'C', name: 'Sum on Subarrays', rating: 1500, tags: ['greedy', 'constructive algorithms'] }]
+        }
+      });
       return;
     }
     if (url.pathname === '/api/contest.standings' && url.searchParams.get('contestId') === '1800') {
