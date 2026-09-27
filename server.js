@@ -1,5 +1,5 @@
 /**
- * cf-coach — 本地优先的大模型对话客户端服务端
+ * CF Coach — 本地优先的 Codeforces 算法教练：先验证，再讲解（服务端）
  * 特性：
  *  - 零依赖（仅 Node >= 18 内置模块）
  *  - 所有数据保存在本地 data/ 目录（config.json + 每个会话一个 JSON 文件）
@@ -22,6 +22,10 @@ const harness = require('./lib/harness');
 const statementLib = require('./lib/statement');
 const profileLib = require('./lib/profile');
 const pricing = require('./lib/pricing');
+const skillsLib = require('./lib/skills');
+const toolsLib = require('./lib/tools');
+const agentloop = require('./lib/agentloop');
+const cfreview = require('./lib/cfreview');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -59,6 +63,7 @@ function ensureDir(dir) {
 ensureDir(DATA_DIR); ensureDir(CONV_DIR); ensureDir(ARCH_DIR);
 cf.setCacheDir(DATA_DIR);   // 题目总表落盘缓存（data/cache/problemset.json），断网也能查 rating/tags
 workspace.setRoot(DATA_DIR); // 每题工作区（data/workspace/<会话id>/）：题解 / 暴力 / 生成器缓冲区
+cfreview.setCacheDir(DATA_DIR); // 题解缓存（data/cache/editorials/<题号>.json）：同一道题只抓一次
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -174,6 +179,21 @@ function saveConfig() {
 
 /* ---------------- 会话存储 ---------------- */
 
+/** 读出全部会话（含归档）。给"批量操作 / 文件夹重排"这类需要遍历全部会话的地方用 */
+function eachConversation() {
+  const out = [];
+  for (const dir of [CONV_DIR, ARCH_DIR]) {
+    let files = [];
+    try { files = fs.readdirSync(dir); } catch { /* 目录不存在就跳过 */ }
+    for (const f of files) {
+      if (!f.endsWith('.json') || f.includes('.tmp-')) continue;
+      const c = readJSON(path.join(dir, f), null);
+      if (c && c.id) out.push(c);
+    }
+  }
+  return out;
+}
+
 function convDir(archived) { return archived ? ARCH_DIR : CONV_DIR; }
 function convPath(id) {
   if (fs.existsSync(path.join(CONV_DIR, id + '.json'))) return path.join(CONV_DIR, id + '.json');
@@ -202,6 +222,25 @@ function deleteConvFile(id) {
   try { fs.unlinkSync(p); } catch {}
 }
 
+/* ---------------- 对话文件夹 ----------------
+ * 为什么单独一个文件：文件夹是"整理用语料"，跟会话内容无关，也不需要跟着会话搬家
+ * （归档/恢复会移动会话文件，文件夹清单不该跟着抖）。一个 JSON 数组，坏了也只丢分类，不丢对话。
+ */
+const FOLDERS_FILE = path.join(DATA_DIR, 'folders.json');
+
+function loadFolders() {
+  const j = readJSON(FOLDERS_FILE, null);
+  const list = Array.isArray(j) ? j : (j && Array.isArray(j.folders) ? j.folders : []);
+  return list.filter((f) => f && typeof f.id === 'string' && typeof f.name === 'string')
+    .map((f) => ({ id: f.id, name: String(f.name).slice(0, 40), at: f.at || Date.now() }));
+}
+function saveFolders(list) {
+  writeFileAtomic(FOLDERS_FILE, JSON.stringify(list, null, 2));
+}
+function newFolder(name) {
+  return { id: uid('f_'), name: String(name || '新文件夹').trim().slice(0, 40) || '新文件夹', at: Date.now() };
+}
+
 function newConversation(extra) {
   const now = Date.now();
   const cfg = loadConfig();
@@ -214,14 +253,19 @@ function newConversation(extra) {
     params: { temperature: null, topP: null, maxTokens: null },
     mode: 'coach',         // coach（纯算法教练）；chat 仅为历史兼容保留
     lang: null,            // 讲解语言：null=全局默认，cpp | python
-    intent: 'full',        // 提问意图：full | hint | explain | debug | idea
+    intent: 'auto',        // 提问意图：auto（默认，由模型判断）| full | hint | explain | debug
     rich: false,           // 富讲解模式：允许输出可视化 HTML 组件（更耗 token）
     cfProblem: null,       // { contestId, index, title }
+    // 题面的**持久化存放处**：CF 抓到的、用户粘贴后被整理成标准结构的，都写在这里。
+    // 为什么必须落盘：追问时流水线/工具循环都要重新拿到题面，而旧版只存在局部变量里，
+    // 第二轮起题面就退化成"用户这一句提问"（实测事故的根因）。
+    statementText: '',
     problemMeta: null,     // 题目分类：{ rating, knowledge[], summary, tags[], contest, source }
     createdAt: now,
     updatedAt: now,
     archived: false,
     pinned: false,
+    folder: '',            // 所属文件夹 id（'' = 未分类）；文件夹清单在 data/folders.json
     messages: []
   }, extra || {});
 }
@@ -544,6 +588,232 @@ async function pumpUpstream(res, emit) {
   try { await reader.cancel(); } catch (e) { /* ignore */ }
 }
 
+/**
+ * 浏览器抓取通道（源码 / 提交页）：由 Electron 主进程注入。
+ * 为什么需要它：Codeforces 的**网页**全在 Cloudflare 后面（实测普通 HTTP 一律 403 + cf-mitigated: challenge，
+ * 无头浏览器也会被识破），只有真实非无头 Chromium 能过——那是桌面版才有的能力。
+ * Web 模式（node server.js）下它是 null，工具会如实告诉用户"请把代码粘过来"。
+ */
+let submissionBrowserFetch = null;
+function setSubmissionBrowserFetch(fn) {
+  submissionBrowserFetch = typeof fn === 'function' ? fn : null;
+  console.log('[cf] 提交源码浏览器通道: ' + (submissionBrowserFetch ? '已启用' : '未启用'));
+}
+
+/** 官方题解的浏览器抓取通道（同样由桌面版注入；不是每道题都有题解） */
+let editorialBrowserFetch = null;
+function setEditorialBrowserFetch(fn) {
+  editorialBrowserFetch = typeof fn === 'function' ? fn : null;
+  console.log('[cf] 题解浏览器通道: ' + (editorialBrowserFetch ? '已启用' : '未启用'));
+}
+
+/**
+ * CF 会话预热通道（桌面版注入）。
+ *
+ * 为什么要提前预热：新进程里**第一个** CF 网页请求容易被 CF 拒（302 回首页），
+ * 之后才正常——实测第一条提交要 6~12 秒才抓到（含一次失败重试），后面的只要 1.5~2.5 秒。
+ * 复盘页一打开就预热，等于把这笔"冷启动开销"花在用户挑题的时候，而不是让他盯着进度条等。
+ * 是幂等的：一个进程只真正做一次（见 electron/main.js 的 warmCfSession）。
+ */
+let cfWarmOpener = null;
+function setCfWarmOpener(fn) {
+  cfWarmOpener = typeof fn === 'function' ? fn : null;
+  console.log('[cf] 会话预热通道: ' + (cfWarmOpener ? '已启用' : '未启用'));
+}
+
+/** 反爬挑战的人工兜底通道（打开可见窗口让挑战跑完）；同样只在桌面版可用 */
+let challengeWindowOpener = null;
+function setChallengeWindowOpener(fn) {
+  challengeWindowOpener = typeof fn === 'function' ? fn : null;
+}
+
+/** Codeforces 登录通道（应用内浏览器登录一次；抓提交源码必需） */
+let cfLoginOpener = null;
+function setCfLoginOpener(fn) {
+  cfLoginOpener = typeof fn === 'function' ? fn : null;
+}
+
+/**
+ * agent 调用桥：`agentCall` / `agentModelLabel` 需要读写 handleChat 里的流式缓冲，
+ * 所以把那个缓冲对象传进来（读写它的字段），而不要把它们定义在 handleChat 内部——
+ * 工具循环（live 分支）与验证链（runVerify）都要用它们，必须是模块级可见的。
+ *
+ * @param {object} deps cfg / provider / model / send / signal / stream
+ *   `stream` 是 handleChat 里的流式缓冲对象 { content, reasoning, target }（就地读写）
+ */
+function makeAgentCall(deps) {
+  const { cfg, provider, model, send, stream } = deps;
+  const agentCall = async (opts) => {
+    const tuned = resolveAgentTarget(cfg, provider, model, opts.role);
+    const label = opts.label || opts.role;
+    const isExplainer = opts.role === 'explainer';
+    // 讲解 agent 的增量默认直接写进消息（学员要边写边看）；但**图文讲解**的正文是一份 HTML 文档，
+    // 边写边塞进消息只会闪一堆裸标签 —— 这种就只喂工作台（同样实时可见，只是不进正文）。
+    const toMessage = isExplainer && !!opts.stream && !opts.workbenchOnly;
+    const t0 = Date.now();
+    // 讲解**重跑**（结构校验后的定向修复）时要重置流式缓冲：
+    // 否则学员会在生成过程中看到"草稿 + 修复版"两段拼接（定稿虽然是修复版，但过程中会闪错）
+    if (toMessage) { stream.content = ''; stream.reasoning = ''; }
+    send('agentStart', { role: opts.role, label, reset: toMessage, model: (tuned.provider && tuned.provider.name ? tuned.provider.name + ' · ' : '') + tuned.model });
+    try {
+      const text = await callAgentLLM({
+        provider: tuned.provider,
+        model: tuned.model,
+        system: opts.system,
+        messages: [{ role: 'user', content: opts.user }],
+        // 默认挂上本次生成的取消信号：路由/选题评估/手算锚点这些辅助调用也必须能被"停止"打断，
+        // 否则点了停止还得等一次几分钟的模型调用返回，界面会一直挂着"正在生成中"
+        signal: opts.signal || deps.signal(),
+        stream: !!opts.stream,
+        // 单次输出上限：harness 可以在"上次被截断"的重试里显式要个更大的值
+        // （服务商不接受会自动去掉该字段重试，见 callAgentLLM）
+        maxTokens: (opts.maxTokens != null && opts.maxTokens > 0) ? opts.maxTokens : (cfg.maxOutputTokens || 0),
+        // token 记账：上游给了 usage 就用真值（在 harness 侧汇总成"这题花了多少"）
+        onUsage: (u) => { if (typeof opts.onUsage === 'function') opts.onUsage(u); },
+        // 收尾原因（finish_reason=length 表示被长度上限截断）：harness 据此换"压缩输出"的重试话术
+        onMeta: (m) => { if (typeof opts.onMeta === 'function') opts.onMeta(m); },
+        // 讲解 agent 的输出就是最终回答 → 走 delta；其余 agent（含"只喂工作台"的图文文档）走 agentDelta
+        onDelta: (t) => {
+          if (toMessage) {
+            stream.content += t;
+            streamMsg('content');
+            send('delta', { text: t });
+          } else {
+            send('agentDelta', { role: opts.role, label, text: t });
+          }
+        },
+        // 思考过程：讲解 Agent 的思考直接进消息（学员能实时看到"它在想什么"），
+        // 其余 Agent 的思考进工作台；两条通道都要实时发，不能等跑完（实测反馈：全程黑屏）
+        // 图文文档模式下**正文**不往消息里推（会闪裸 HTML），但**思考照推**：
+        // 文档要写一两分钟，这段时间消息里的"思考过程"就是学员的进度条。
+        onReasoning: (t) => {
+          if (isExplainer) {
+            stream.reasoning += t;
+            streamMsg('reasoning');
+            send('reasoningDelta', { text: t });
+          }
+          send('agentReasoning', { role: opts.role, label, text: t });
+        }
+      });
+      send('agentEnd', { role: opts.role, label, ok: true, ms: Date.now() - t0 });
+      return text;
+    } catch (e) {
+      send('agentEnd', { role: opts.role, label, ok: false, ms: Date.now() - t0, error: friendlyError(e) });
+      throw e;
+    }
+  };
+  const agentModelLabel = (role) => {
+    const tuned = resolveAgentTarget(cfg, provider, model, role);
+    return (tuned.provider && tuned.provider.name ? tuned.provider.name + ' · ' : '') + tuned.model;
+  };
+  function streamMsg(which) {
+    const t = stream.target;
+    if (!t) return;
+    if (which === 'content') t.content = stream.content;
+    else t.reasoning = stream.reasoning;
+  }
+  return { agentCall, agentModelLabel };
+}
+
+/**
+ * 教练的系统提示词：人格（skills/_coach.md）+ 技能目录 + 当前状态。
+ * **技能目录是常驻的**（只有名字与一句话描述），技能正文按需注入（模型自己调 skill 工具读），
+ * 这样加技能不会让每轮 prefill 线性膨胀。
+ */
+/**
+ * 意图的"该怎么做"交代（给教练看，不是给用户看）。
+ *
+ * auto 是默认值：交给模型按用户原话判断。它的判断结果会作为**本轮实际意图**记下来
+ * （见 handleChat 里按模型加载的技能回填 intent），所以画像证据、题目分类这些下游
+ * 拿到的是"它真的做了什么"，而不是用户菜单里那个可能并不合适的选项。
+ */
+function intentBrief(intent) {
+  const v = normalizeIntent(intent);
+  return COACH_INTENTS[v] ? (v + '｜' + COACH_INTENTS[v]).replace(/^auto\|/, '自动（由你判断）｜') : COACH_INTENTS.full;
+}
+
+/** 把意图值换成一句人话（日志/证据用） */
+function intentLabel(intent) {
+  const v = normalizeIntent(intent);
+  return ({ auto: '自动', full: '完整讲解', hint: '思路提示', explain: '题干解读', debug: '代码评估' })[v] || '完整讲解';
+}
+
+/** 模型读了哪个技能 ≈ 它给自己定的意图（auto 模式下用来回填本轮意图） */
+const SKILL_TO_INTENT = {
+  'cf-explain': 'full',
+  'cf-debug': 'debug',
+  'cf-hint': 'hint',
+  'cf-verify': 'full',
+  'cf-review': 'full',
+  'cf-doc': 'full'
+};
+
+function buildCoachSystem(o) {
+  const conv = o.conv || {};
+  const parts = [];
+  const persona = skillsLib.loadInternal('_coach');
+  if (persona) parts.push(persona);
+  const catalog = skillsLib.catalog();
+  if (catalog) parts.push(catalog);
+
+  const wsKey = workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem });
+  const sum = workspace.summary(wsKey);
+  const v = (sum.meta && sum.meta.verification) || null;
+  const state = ['<current_state>'];
+  if (conv.cfProblem) {
+    state.push('当前题目：Codeforces ' + conv.cfProblem.contestId + conv.cfProblem.index
+      + (conv.cfProblem.title ? '「' + conv.cfProblem.title + '」' : '')
+      + (conv.problemMeta && conv.problemMeta.rating ? '（' + conv.problemMeta.rating + ' 分）' : ''));
+  } else if (conv.statementText) {
+    state.push('当前题目：用户粘贴的题面（' + conv.statementText.length + ' 字符，已完整保存在会话里，后续轮次直接引用，**不需要重新索要**）');
+  } else {
+    state.push('当前题目：尚未确定');
+  }
+  state.push('题面是否已在会话中：' + ((conv.statementText || '').trim() ? '是' : '否'));
+  /**
+   * 题面已在会话里 → **明令禁止**再去联网取。
+   *
+   * 为什么写成祈使句：只说"是否已在会话中：是"是陈述句，模型照样会`cf_fetch`一次
+   * （真实事故：用户把题面粘进对话框，教练还是去 CF 取了一遍，白等一轮往返，
+   * 而且那次`cf_fetch`把样例覆盖成了官方 1 组，反而更差）。
+   */
+  if ((conv.statementText || '').trim()) {
+    state.push('⛔ 题面正文已经在会话里了（就是上面那份）：**不要再调 cf_fetch 联网取题**。'
+      + 'cf_verify / cf_contract / cf_doc 都会自己读会话里的题面，直接用即可；'
+      + '只有会话里确实没有题面时才取。');
+  } else if (conv.cfProblem) {
+    state.push('题面还没取：需要题面时用 cf_fetch 取一次（一次就够）。');
+  }
+  state.push('官方样例：' + ((conv.cfProblemSamples || []).length) + ' 组');
+  if (v) {
+    state.push('本题工作区验证记录：status=' + v.status + (v.reason ? '（' + v.reason + '）' : '')
+      + '｜对拍 ' + (v.iterations || 0) + ' 组｜' + (v.at ? new Date(v.at).toLocaleString() : ''));
+  } else {
+    state.push('本题工作区：尚无验证记录');
+  }
+  if (o.userInfo) state.push('学员：' + o.userInfo.handle + '，rating ' + o.userInfo.rating + '（' + o.userInfo.rank + '，最高 ' + o.userInfo.maxRating + '）');
+  if (o.lang) state.push('默认语言：' + (o.lang === 'python' ? 'Python' : 'C++'));
+  /**
+   * 本次意图：界面上那个「完整讲解 / 思路提示 / 题干解读 / 代码评估」选择器必须让模型看见。
+   *
+   * 为什么专门写一句：意图以前是流水线的一个入参（它据此决定讲解等级），改成工具循环之后
+   * 没有任何地方把它传进来 —— 选择器就变成了摆设（用户改了没反应，属于静默失效）。
+   * 这里连同"这个意图下该做什么"一起交代清楚，模型才知道该给方向还是给完整推导。
+   */
+  if (o.intent) state.push('本次意图：' + intentBrief(o.intent));
+  if (o.runtimes) state.push('本机运行时：' + o.runtimes);
+  if (o.profile && (o.profile.profileText || (o.profile.strengths || []).length)) {
+    state.push('学员信息卡：' + [
+      (o.profile.strengths || []).length ? '优势 ' + o.profile.strengths.join('、') : '',
+      (o.profile.weaknesses || []).length ? '薄弱 ' + o.profile.weaknesses.join('、') : '',
+      o.profile.profileText || ''
+    ].filter(Boolean).join('；'));
+  }
+  state.push('</current_state>');
+  parts.push(state.join('\n'));
+  return parts.join('\n\n');
+}
+
 /* ---------------- HTTP 路由 ---------------- */
 
 const MIME = {
@@ -613,6 +883,7 @@ function listConversations(query) {
         model: c.model,
         archived: !!c.archived,
         pinned: !!c.pinned,
+        folder: c.folder || '',
         createdAt: c.createdAt,
         updatedAt: c.updatedAt,
         messageCount: c.messages.length,
@@ -640,6 +911,18 @@ function safeJson(s) {
 const LANG_NAMES = { cpp: 'C++23', python: 'Python 3' };
 
 const COACH_INTENTS = {
+  /**
+   * auto：**默认**。由模型自己判断这次要哪一种（技能也由它自己选，两者是一回事）。
+   * 为什么要它：意图本质上是"用户这句话在要什么"，模型看得到原话、上下文、学员画像，
+   * 比用户先在菜单里选一次更准（用户还得先想清楚"我这算讲解还是评估"）。
+   * 判断口径写在 _coach.md 与各技能里；用户想要确定的行为时仍然可以手动指定。
+   */
+  auto: '自动判断：由你（模型）看用户这句话在要什么，从下面的四种里选一种并按对应技能执行——'
+    + '① 完整讲解（要"讲透/怎么做"）② 思路提示（卡住了，只要方向）③ 题干解读（没看懂题）'
+    + '④ 代码评估（贴了代码问为什么错 / 提了个做法问行不行）。'
+    + '【默认档】只贴题面、或只给题号+一句"讲一下"，一律按**完整讲解**做；'
+    + '不要为了确认意图反问用户（"你是想要思路还是完整讲解？"）——那只是把选择权又推回给他。'
+    + '只有用户明确说"先别给答案/只要思路"时才降到思路提示。',
   full: '完整讲解：按标准流程给出题面拆解、思路、复杂度分析、验证过的完整代码与逐行讲解。',
   hint: '思路提示：用户卡住了，只给关键观察、转化思路与算法方向（含目标复杂度），【不要给完整代码】，可以用伪代码或关键片段。',
   explain: '题干解读：用户没看懂题，只解释题意、样例推导与数据范围的含义，不要讲做法。',
@@ -1126,7 +1409,18 @@ async function classifyProblem(conv, cfg, assistantContent) {
 async function handleChat(req, res) {
   const body = await readBody(req);
   const convId = String(body.conversationId || '');
-  const mode = body.mode === 'edit' ? 'edit' : (body.mode === 'regenerate' ? 'regenerate' : 'send');
+  /**
+   * mode:
+   *   send       用户发了一条新消息（默认）
+   *   edit       编辑某条历史消息后重发
+   *   regenerate 重答最后一条
+   *   continue   **不加新消息**，直接以现有对话历史起一轮 —— 给"材料已经装好、
+   *              让教练主动开讲"的场景用（复盘界面就是：材料装进会话后自动开讲，
+   *              不需要用户再打一句"开始吧"）
+   */
+  const mode = (body.mode === 'edit') ? 'edit'
+    : (body.mode === 'regenerate') ? 'regenerate'
+      : (body.mode === 'continue') ? 'continue' : 'send';
   if (!convId) throw new HttpError(400, '缺少 conversationId');
   const convPeek = loadConv(convId);
   if (!convPeek) throw new HttpError(404, '会话不存在');
@@ -1145,8 +1439,11 @@ async function handleChat(req, res) {
   if (mode === 'edit' && !body.baseUserMessageId) throw new HttpError(400, '缺少 baseUserMessageId');
   const userContent = body.userContent;
   const userText = contentText(userContent);
-  if (mode !== 'regenerate' && !userText && !contentHasImage(userContent)) {
+  if (mode !== 'regenerate' && mode !== 'continue' && !userText && !contentHasImage(userContent)) {
     throw new HttpError(400, '消息内容为空');
+  }
+  if (mode === 'continue' && !convPeek.messages.some((m) => m.role === 'user')) {
+    throw new HttpError(400, '会话里还没有任何用户消息，无法继续');
   }
 
   // ---- SSE 响应头 ----
@@ -1206,12 +1503,16 @@ async function handleChat(req, res) {
         if (idx < 0 || msgs[idx].role !== 'user') throw new HttpError(400, '找不到要重编辑的消息');
         msgs = msgs.slice(0, idx);
       }
-      msgs.push({
-        id: uid('m_'),
-        role: 'user',
-        content: userContent,
-        createdAt: now
-      });
+      // mode='continue' **不追加用户消息**：直接以现有历史（含界面装好的复盘材料）起一轮，
+      // 这样"材料装好 → 教练自动开讲"不需要用户再打一句"开始吧"。
+      if (mode !== 'continue') {
+        msgs.push({
+          id: uid('m_'),
+          role: 'user',
+          content: userContent,
+          createdAt: now
+        });
+      }
       assistantMsgId = uid('m_');
       msgs.push({
         id: assistantMsgId,
@@ -1312,13 +1613,440 @@ async function handleChat(req, res) {
         }
       };
 
+      /**
+       * 流式缓冲的**单一真相**：content / reasoning 就是它，target 是这条助手消息。
+       * 工具循环（agentloop）与验证链（cf_verify 的子 agent）都通过它读写，
+       * 所以界面上的增量、消息上落盘的内容、以及最终回答永远是同一份数据。
+       */
+      const streamState = { content: '', reasoning: '', target: assistantTarget };
+
       // 收尾任务（信息卡 / 题目分类）需要的"学员侧证据"。
       // 必须声明在**教练分支之外**：intent / userCode / userTextFull 都是分支内的局部变量，
       // 分支外直接引用会 ReferenceError（曾被外层 catch 吞掉 → 信息卡与分类双双失效、消息状态被改成 error）
       let postRun = null;
       let runUsage = null;   // 本轮（教练模式）的 token 用量与估算费用
       if (conv.mode === 'coach') {
-        // ===== 算法教练模式：多 Agent 编排（共享契约 + 隔离实现）=====
+        // ===== 教练模式·工具循环 =====
+        // 这里是本次改造的核心：不再把用户发言塞进写死的流水线，而是跑一个真正的 agent 回合——
+        // 真实对话历史参与、模型自己决定调哪个工具（取题 / 对拍 / 运行 / 复盘）、技能按需注入。
+        //
+        // 老的多 Agent 流水线（harness.runPipeline）**完整保留**，现在作为 `cf_verify` 工具的实现：
+        // 它对拍的诚实性保证（标尺隔离、只重写有罪方、反例不得来自失信标尺）一行都没动，
+        // 只是不再无条件地在每一轮都跑一遍。
+        const lang = conv.lang || cfg.defaultCoachLang || 'cpp';
+        // mode='continue' 没有新的用户消息，给模型一句"接着上面的材料开始"的引导语。
+        // 注意它只进 prompt，**不写进会话文件**（否则历史里会多出一条用户没打过的消息）。
+        const userTextFull = (mode === 'continue' && !contentText(userContent).trim())
+          ? '（材料就是上面那条消息，请直接按它的要求开始：先给全局分布，再逐题诊断，最后给下场比赛的行动项。）'
+          : contentText(userContent);
+        const profile = loadProfile();
+        let userInfo = null;
+        const cfHandle = (cfg.cfHandle || '').trim();
+        if (cfHandle) {
+          try { userInfo = await cf.fetchUser(cfHandle); } catch (e) { /* 查询失败不阻塞 */ }
+        }
+        const rt = runtimesText(await getRuntimes());
+
+        // 工具调用在界面上的"步骤 chip"（取题 / 对拍 / 复盘…每步都让学员看见）
+        const runToolChips = [];
+        /**
+         * 本轮用量账本：工具循环自己的调用 + **工具内部的验证链**。
+         *
+         * 为什么必须合并：验证链（三个代码 Agent + 样例校准 + 批量对拍）是本轮最贵的一段，
+         * 而它现在跑在 `cf_verify` 工具里。只统计工具循环那两次调用，"讲这道题花了多少"就是假的
+         * （产品承诺是花费透明）。按角色分开记，界面才能继续按 Agent 拆分。
+         */
+        const usageBook = { calls: 0, promptTokens: 0, completionTokens: 0, byRole: {} };
+        /**
+         * 本轮的验证结论（由工具内部的验证链回填）。
+         * 为什么要留这一份：验证状态必须挂到消息上（历史里能看到"这题验证到什么程度"），
+         * 未通过时还要给用户一条**可见**提醒 —— 以前这两件事由流水线路径做，
+         * 改成工具循环后它们一起消失了：学员看到一段讲得很自信的讲解，却不知道它没验证过。
+         */
+        let turnVerification = null;        const addUsage = (role, u) => {
+          if (!u) return;
+          const key = role || 'coach';
+          const slot = usageBook.byRole[key] || (usageBook.byRole[key] = { calls: 0, promptTokens: 0, completionTokens: 0 });
+          const calls = u.calls || 0;
+          const pin = u.promptTokens || 0;
+          const pout = u.completionTokens || 0;
+          slot.calls += calls; slot.promptTokens += pin; slot.completionTokens += pout;
+          usageBook.calls += calls; usageBook.promptTokens += pin; usageBook.completionTokens += pout;
+        };
+        /** 并入工具内部验证链的用量：它自己已经按角色分好，别再累加一次总数（会翻倍） */
+        const addPipelineUsage = (u) => {
+          if (!u) return;
+          const by = (u.byRole && Object.keys(u.byRole).length) ? u.byRole : null;
+          if (by) Object.keys(by).forEach((k) => addUsage(k, by[k]));
+          else addUsage('verify', u);
+        };
+        // agent 调用桥（模块级工厂）：工具循环与 cf_verify 共用同一份实现
+        const { agentCall, agentModelLabel } = makeAgentCall({
+          cfg, provider, model, send, signal: () => ctrl.signal,
+          stream: streamState
+        });
+
+        /**
+         * auto 意图下，模型自己选了哪个技能 → 本轮"实际意图"。
+         * 为什么要回填：画像证据、题目分类这些下游要的是"它真的做了什么"，
+         * 而不是用户菜单里那个（auto 模式下）并不存在的选项。
+         */
+        let autoIntent = '';
+        /** 本轮有没有试过产出文档（试过就不再催第二次） */
+        let docTried = false;
+        /** 本轮已经验证过的题目（同题不重复跑全链路）+ 那次的结果 */
+        let turnVerifyKey = '';
+        let turnVerifyResult = null;
+
+        /**
+         * 用户**直接把题面贴在输入框里**（最常见的用法）→ 先用机械工具登记，再进模型循环。
+         *
+         * 为什么必须在这里做：这道机械登记（`statement.looksStandard` 抽输入/输出格式段与样例）
+         * 就是原来的"题面格式化工具"。改成工具循环之后，只有模型主动把 statement 传给 cf_fetch
+         * 才会触发它 —— 而模型更常见的动作是自己去 `cf_fetch(contestId)` 联网取一遍
+         * （真实事故：用户粘了题面，教练还去 CF 抓了一次；抓回来的样例反而更少）。
+         * 贴在输入框里的题面本来就够标准，机械抽一遍即可，既省一次往返也让样例当场可用。
+         */
+        // 门槛只防"一句话里带了'输入格式'字样"的误判（真正的题面至少上百字）
+        if (String(userTextFull || '').length > 120) {
+          const det = statementLib.looksStandard(userTextFull, conv.cfProblemSamples || []);
+          /**
+           * 判据刻意放宽：只要有**输入/输出格式段**或**能机械抽出样例**任一项就登记。
+           * 格式不标准的自由文本会由验证链里的【题面整理 Agent】接手整理
+           * （runVerify 里那段 normalizeWithAgent）——那正是它存在的意义，
+           * 不需要在这里就要求"标准"。
+           */
+          if (det.hasInput || det.hasOutput || (det.mechanicalSamples || []).length) {
+            const prevLen = String(conv.statementText || '').length;
+            if (String(userTextFull).length > prevLen) {
+              conv.statementText = userTextFull;
+              if ((det.mechanicalSamples || []).length && !(conv.cfProblemSamples || []).length) {
+                conv.cfProblemSamples = det.mechanicalSamples;
+              }
+              if (typeof saveConv === 'function') saveConv(conv);
+              console.log('[coach] 已机械登记用户粘贴的题面（' + conv.statementText.length + ' 字符，样例 '
+                + ((conv.cfProblemSamples || []).length) + ' 组，格式'
+                + (det.standard ? '标准' : '非标准：' + (det.reasons || []).join('；')) + '）');
+            }
+          }
+        }
+
+        // 历史：本轮助手占位消息之外的**全部**对话（这就是"追问不丢上下文"的关键，
+        // 旧实现每次都只发一条 user 消息，模型连自己上一轮说过什么都不知道）
+        /**
+         * 历史 = 本轮助手占位消息之外的**全部**对话。
+         *
+         * ⚠️ 末尾那条"本轮用户消息"要去掉：`runTurn` 自己会把 userText 追加到消息列表末尾，
+         * 这里再带上它，模型就会收到**两遍同样的用户发言**（实测 messages 形如
+         * system,user,user,...）。多花的 token 是小事，把同一句话重复两遍更容易让模型
+         * 以为是两次提问 —— 这是实打实的 prompt 缺陷。
+         */
+        const history = msgs
+          .filter((m) => m.id !== assistantMsgId && (m.role === 'user' || m.role === 'assistant'))
+          .filter((m) => m.status !== 'streaming')
+          .map((m) => ({ role: m.role, content: contentText(m.content) }))
+          .filter((m) => String(m.content || '').trim())
+          .filter((m, i, arr) => !(i === arr.length - 1 && m.role === 'user'
+            && m.content.trim() === userTextFull.trim()));
+
+        const tools = toolsLib.createTools({
+          conv, cfg, lang, userInfo, profile, runtimes: rt,
+          saveConv: () => saveConv(conv),
+          signal: () => ctrl.signal,
+          wsKey: () => workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem }),
+          emit: (type, data) => send(type, data),
+          browserFetch: submissionBrowserFetch,
+          /**
+           * 图文文档产出：挂到当前助手消息上 + 立刻推 richDoc 事件。
+           *
+           * 为什么必须有这一步：图文讲解是这个产品的核心交付形态。改成工具循环之后，
+           * `cf_doc` 只把文件写进工作区、返回一个路径 —— 学员在对话里根本看不到那份文档，
+           * 等于把最重要的东西从"交付"降级成"附件"。这里把文档挂回消息，前端照旧用
+           * 沙箱 iframe 内联渲染，和流水线时代的行为一致。
+           */
+          onRichDoc: (a) => {
+            if (assistantTarget) { assistantTarget.richDoc = a.html; assistantTarget.richDocPath = a.path; }
+            send('richDoc', { messageId: assistantTarget ? assistantTarget.id : '', size: String(a.html || '').length });
+          },
+          /**
+           * 文档被校验拒了：给用户一条**可见**提醒。
+           * 学员看到的是"这次没有文档、只有文字"，必须知道为什么（否则就是静默降级）。
+           */
+          onRichDocRejected: (a) => {
+            send('notice', { level: 'warn',
+              message: '图文文档没通过校验，本次已用文字讲解代替。原因：'
+                + ((a.errors || []).slice(0, 2).join('；') || '未知')
+                + (a.path ? '（被拒的原文留在工作区 ' + String(a.path).split(/[\\/]/).pop() + '）' : '') });
+          },
+          // 验证链：复用编排器，但只跑到"验证结论"为止（verifyOnly），讲解交给教练自己说
+          runVerify: async (vo) => {
+            const key = workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem });
+            const meta0 = workspace.loadMeta(key) || {};
+            /**
+             * **同一轮里**已经验证过、且这次没有新东西（没贴学员代码、没提新做法）→ 复用，不重跑。
+             *
+             * 为什么要这道闸：模型看到"验证"就想再跑一遍。真实事故里它在一轮对话内连跑两次全链路
+             * （139 秒的 NO-BRULER + 199 秒的 OK），用户等了近 6 分钟，第二次什么新信息都没有。
+             * 范围刻意限定在**本轮**：跨会话/跨轮次的复跑是合理需求（换一道题、换一次问法），
+             * 而且流水线自己会复用已缓存的暴力解与生成器，成本本来就降下来了。
+             */
+            if (turnVerifyKey === key && turnVerifyResult && !vo.userCode && !vo.idea) {
+              send('tool', { calls: [{ id: 'reuse1', name: 'harness_reuse', args: JSON.stringify({ label: '复用本轮已验证结论' }) }] });
+              send('toolResult', { results: [{ id: 'reuse1', name: 'harness_reuse', ok: true,
+                summary: '本轮已经验证过这道题（没有新代码/新做法），直接复用结论，不重跑对拍' }] });
+              turnVerification = turnVerifyResult.verification;
+              return turnVerifyResult;
+            }
+            const reuse = {};
+            if (meta0.verification && meta0.verification.status === 'ok') {
+              reuse.brute = workspace.readCache(key, workspace.bruteName(vo.lang)) || workspace.readFile(key, workspace.bruteName(vo.lang));
+              reuse.gen = workspace.readCache(key, 'gen.py');
+            }
+            const runTools2 = [];
+            /**
+             * 粘贴题面：先机械判格式，不标准就派【题面整理 Agent】整理成标准结构（含结构化样例）。
+             *
+             * 为什么补在这里：这条逻辑以前在流水线入口，改成工具循环后没人接手 ——
+             * 粘贴的自由文本会直接进对拍，抽不出样例就只能"无标尺"，验证质量明显下降。
+             */
+            let stmt = vo.statement;
+            let samples = vo.samples;
+            try {
+              const std = statementLib.looksStandard(stmt, samples);
+              if (!std.standard) {
+                send('tool', { calls: [{ id: 'norm1', name: 'harness_normalize', args: JSON.stringify({ label: '题面格式体检' }) }] });
+                const n = await statementLib.normalizeWithAgent({
+                  callAgent: agentCall,
+                  text: stmt,
+                  mechanicalSamples: std.mechanicalSamples || [],
+                  parseJson: (s) => { try { return JSON.parse(String(s || '').replace(/^```[a-z]*\n?|```$/g, '').trim()); } catch (e) { return null; } }
+                });
+                if (n && n.ok && n.data) {
+                  stmt = statementLib.buildStandardStatement(n.data);
+                  if (n.samples && n.samples.length) samples = n.samples;
+                  send('toolResult', { results: [{ id: 'norm1', name: 'harness_normalize', ok: true,
+                    summary: '题面整理 Agent 已把粘贴内容整理成标准结构（样例 ' + ((n.samples || []).length) + ' 组）' }] });
+                } else {
+                  send('toolResult', { results: [{ id: 'norm1', name: 'harness_normalize', ok: false,
+                    summary: '题面不是标准格式，且整理失败（' + ((n && n.errors && n.errors[0]) || '未知原因') + '）→ 按原文继续，样例可能拿不到' }] });
+                }
+              }
+            } catch (e) { console.log('[coach] 题面整理失败: ' + ((e && e.message) || e)); }
+            /**
+             * 学员提议的做法（"用 Floyd 能不能写"）：先机械评估可行性，再按它实现并对拍。
+             *
+             * 为什么放在验证链里：这一步以前由路由 + harness_idea 承担，改成工具循环后没人接手，
+             * 教练就只能凭感觉说"应该可以"。评估结论随验证结论一起回到上下文，讲解才有依据。
+             */
+            let idea = null;
+            if (vo.idea) {
+              send('tool', { calls: [{ id: 'idea1', name: 'harness_idea', args: JSON.stringify({ label: '做法可行性评估' }) }] });
+              idea = await harness.checkIdea({
+                callAgent: agentCall,
+                statement: stmt,
+                question: vo.idea,
+                contract: harness.extractContract(stmt),
+                solCode: workspace.readFile(key, workspace.solName(vo.lang))
+              });
+              send('toolResult', { results: [{ id: 'idea1', name: 'harness_idea', ok: !!idea.viable,
+                summary: (idea.viable ? '该做法可行' : '该做法不可行') + (idea.reason ? '：' + idea.reason : '')
+                  + (idea.complexity ? '（' + idea.complexity + '）' : '') }] });
+            }
+            const res = await harness.runPipeline({
+              conv, lang: vo.lang, intent: vo.intent || 'full',
+              statement: stmt, samples, userCode: vo.userCode || '',
+              userText: userTextFull, profile, rich: false, userInfo, runtimes: rt,
+              workspace, wsKey: key,
+              rating: (conv.problemMeta && conv.problemMeta.rating) || null,
+              signal: ctrl.signal,
+              verifyOnly: true,          // ← 只验证、不生成讲解文档
+              // 做法可行 → 按学员的做法重写题解；不可行 → 不必再跑链路（讲解重点变成"为什么不行"）
+              idea: (idea && idea.viable && vo.idea) ? { approach: vo.idea, complexity: idea.complexity || '' } : null,
+              skipChain: !!(idea && !idea.viable),
+              reuse,
+              tiers: [8, 20, 50, 200],
+              perTier: 50,
+              maxStressMs: 180000,
+              emit: (ev) => {
+                if (!ev || !ev.type) return;
+                if (ev.type === 'tool') {
+                  (ev.calls || []).forEach((c) => {
+                    let label = '';
+                    try { label = (JSON.parse(c.args || '{}').label) || ''; } catch (e) { /* ignore */ }
+                    runTools2.push({ id: c.id, name: c.name, label, state: 'running' });
+                  });
+                } else if (ev.type === 'toolResult') {
+                  (ev.results || []).forEach((r) => {
+                    const t = runTools2.find((x) => x.id === r.id);
+                    if (t) { t.ok = r.ok; t.summary = r.summary; t.state = 'done'; }
+                  });
+                }
+                if (assistantTarget && runTools2.length) assistantTarget.tools = runTools2.slice(-40);
+                send(ev.type, ev);
+              },
+              callAgent: agentCall,
+              describeModel: agentModelLabel
+            });
+            addPipelineUsage(res && res.usage);
+            if (res && res.verification) turnVerification = res.verification;
+            turnVerifyKey = key;
+            turnVerifyResult = Object.assign({}, res, {
+              verification: Object.assign({}, res.verification || {}, { reused: false })
+            });
+            if (idea) res.idea = idea;      // 评估结论交给教练（工具输出里会写成一段可读结论）
+            return res;
+          }
+        });
+
+        const runTurnHooks = {
+          onDelta: (t) => {
+            streamState.content += t;
+            if (assistantTarget) assistantTarget.content = streamState.content;
+            send('delta', { text: t });
+          },
+          onReasoning: (t) => {
+            streamState.reasoning += t;
+            if (assistantTarget) assistantTarget.reasoning = streamState.reasoning;
+            send('reasoningDelta', { text: t });
+          },
+          onToolStart: (call) => {
+            const id = call.id || ('c' + Math.random().toString(36).slice(2, 8));
+            runToolChips.push({ id, name: call.name, label: '', state: 'running' });
+            if (assistantTarget) assistantTarget.tools = runToolChips.slice(-40);
+            // auto 意图：模型**实际读了哪个技能**就是它给自己定的意图，记下来当本轮真实意图
+            if (call.name === 'skill') {
+              try {
+                const a = JSON.parse(call.args || '{}');
+                const n = String(a.name || '').trim();
+                if (SKILL_TO_INTENT[n]) autoIntent = SKILL_TO_INTENT[n];
+              } catch (e) { /* 参数解析失败不影响主流程 */ }
+            }
+            if (call.name === 'cf_doc') docTried = true;
+            send('tool', { calls: [{ id, name: call.name, args: call.args || '{}' }] });
+          },
+          onToolEnd: (call, ok, out, ms) => {
+            const chip = runToolChips.slice().reverse().find((c) => c.name === call.name && c.state === 'running');
+            const summary = String(out == null ? '' : out).replace(/\s+/g, ' ').slice(0, 200);
+            if (chip) { chip.state = 'done'; chip.ok = ok; chip.summary = summary; chip.ms = ms; }
+            if (assistantTarget) assistantTarget.tools = runToolChips.slice(-40);
+            send('toolResult', { results: [{ id: chip ? chip.id : call.id, name: call.name, ok, summary }] });
+          },
+          onUsage: (u) => {
+            if (!usage) usage = { promptTokens: 0, completionTokens: 0 };
+            if (u.promptTokens != null) usage.promptTokens += u.promptTokens;
+            if (u.completionTokens != null) usage.completionTokens += u.completionTokens;
+            // 工具循环自己的调用按角色 'coach' 记账（与工具内部的子 Agent 区分开）
+            addUsage('coach', { calls: 1, promptTokens: u.promptTokens || 0, completionTokens: u.completionTokens || 0 });
+          }
+        };
+        let result = await agentloop.runTurn({
+          provider, model,
+          system: buildCoachSystem({ conv, profile, userInfo, runtimes: rt, lang, intent: conv.intent }),
+          history,
+          userText: userTextFull,
+          tools,
+          signal: ctrl.signal,
+          maxTokens: (cfg.maxOutputTokens > 0) ? cfg.maxOutputTokens : 0,
+          maxSteps: 12,
+          ...runTurnHooks
+        });
+
+        /**
+         * **图文文档是硬交付**：完整讲解跑完验证却只给了一堆文字（一张图都没有）→ 补一轮硬提醒。
+         *
+         * 为什么要在服务端兜这一下：文档完全靠模型自觉调用 cf_doc，而它常常讲完就收工
+         * （真实事故：用户拿到的是一段纯文字 + 一张 markdown 表格，零 SVG，产品最核心的
+         * "图文讲解"退化成了聊天）。提醒只补一次，避免死循环；已经试过 cf_doc 的不再催。
+         */
+        const convIntentNow = normalizeIntent(conv.intent);
+        const wantDoc = convIntentNow === 'full' || (convIntentNow === 'auto' && (!autoIntent || autoIntent === 'full'));
+        const verifiedThisTurn = runToolChips.some((c) => c.name === 'cf_verify' && c.ok !== false);
+        /**
+         * 这题**在本题工作区里已经验证通过**也算数。
+         *
+         * 真实事故（用户第二次反馈"依旧没有图"）：上一轮已经把这道题验证过（status=ok，对拍 200 组），
+         * 这一轮教练按 cf-explain §0 的口径**正确地跳过了重复对拍**——于是"本轮跑过验证"这个前提不成立，
+         * 文档提醒也没触发，结果又只给了一段纯文字。跳过验证是对的，跳过文档是错的：
+         * 交付物该由"这题的结论可信吗"决定，而不是由"这一轮有没有重新跑一遍"决定。
+         */
+        const wsMetaNow = workspace.loadMeta(workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem })) || {};
+        const wsVerified = !!(wsMetaNow.verification && wsMetaNow.verification.status === 'ok');
+        const substantive = String(streamState.content || '').length > 700;
+        /**
+         * 用户明确只要方向时**不要**催文档。
+         *
+         * 为什么要单独判一次：auto 模式下我没法从技能名可靠地区分"它这次是讲解还是提示"
+         * （两种都会读 cf-explain，提示的口径就写在那份技能里）。但用户自己的话是可靠信号——
+         * "给点思路 / 先别给答案 / 不要代码"这类说法一出现，就必须按提示交付，别硬塞图文文档。
+         */
+        const askedForHint = /(给|要|想|求).{0,3}(点|个)?思路|只.{0,2}(要|给).{0,2}思路|别给答案|先别给|不要代码|不要给代码|提示一下|怎么想|没思路|卡住/.test(userTextFull || '');
+        if (wantDoc && !docTried && !askedForHint && substantive && !(assistantTarget && assistantTarget.richDoc)
+            && !ctrl.signal.aborted && (verifiedThisTurn || wsVerified)) {
+          console.log('[coach] 完整讲解但没有图文文档 → 补一轮提醒');
+          const before = streamState.content;
+          result = await agentloop.runTurn({
+            provider, model,
+            system: buildCoachSystem({ conv, profile, userInfo, runtimes: rt, lang, intent: conv.intent }),
+            history: history.concat([{ role: 'assistant', content: before }]),
+            userText: '【系统提醒·与你上一段回答连续】你刚才只输出了文字，但本次是**完整讲解**，'
+              + '交付物必须是图文文档：现在就调用 cf_doc 生成（≥2 张真图解；**表格不算图**），'
+              + '正文只保留 1–2 句引子（不要把文档内容再复述一遍）。',
+            tools,
+            signal: ctrl.signal,
+            maxTokens: (cfg.maxOutputTokens > 0) ? cfg.maxOutputTokens : 0,
+            maxSteps: 6,
+            ...runTurnHooks
+          });
+        }
+
+        if (result && result.text) streamState.content = result.text;
+        content = streamState.content;
+        reasoning = streamState.reasoning;
+        runUsage = Object.assign({}, usageBook, {
+          steps: (result && result.steps) || 0,
+          cost: estimateCost(cfg, provider.id, model, {
+            promptTokens: usageBook.promptTokens, completionTokens: usageBook.completionTokens
+          })
+        });
+        if (runUsage.calls) {
+          console.log('[usage] 本轮 ' + runUsage.calls + ' 次调用（工具循环 + 验证链）· 输入 '
+            + runUsage.promptTokens + ' / 输出 ' + runUsage.completionTokens + ' tokens'
+            + '｜按角色：' + Object.keys(runUsage.byRole).join(',')
+            + (runUsage.cost ? ' · 约 ¥' + runUsage.cost.amount.toFixed(4) : ''));
+        }
+        if (result && result.toolsUsed && result.toolsUsed.length) {
+          console.log('[coach] 本轮工具：' + result.toolsUsed.join(' → '));
+        }
+        const convIntent = normalizeIntent(conv.intent);
+        // auto：模型没读技能（纯追问）时按"完整讲解"记账，它确实是这个会话的主线任务
+        const effectiveIntent = convIntent === 'auto' ? (autoIntent || 'full') : convIntent;
+        if (convIntent === 'auto') console.log('[coach] 意图自动判定 → ' + intentLabel(effectiveIntent));
+        postRun = {
+          intent: effectiveIntent,
+          userCode: '',
+          userText: userTextFull,
+          minimalCase: null,
+          verification: turnVerification
+        };
+        // 验证状态挂到消息上 + 未通过时发一条**用户可见**的提醒（诚实降级必须看得见）
+        if (turnVerification) {
+          if (assistantTarget) assistantTarget.verification = turnVerification;
+          if (turnVerification.status && turnVerification.status !== 'ok') {
+            send('notice', { level: 'warn',
+              message: '本轮验证未通过（' + turnVerification.status + '）：讲解已按"诚实降级"输出，请注意代码未经验证。' });
+          }
+        }
+        if (ctrl.signal.aborted) { finalizeAborted(); return; }
+        if (!String(content || '').trim()) {
+          content = '**这一轮没有产出正文。**\n\n'
+            + '- 本轮工具调用：' + ((result && result.toolsUsed && result.toolsUsed.join(' → ')) || '（无）') + '\n'
+            + '- 右侧「决策轨迹」有每一步的真实记录。可以再发一次，或把问题问得更具体一点。';
+        }
+      } else if (false) {
+        // ===== 旧的多 Agent 流水线（保留在文件里以便对照与回滚；已由上面的工具循环取代）=====
+        // 说明：这段代码永远不会执行（`else if (false)`），保留原因是它对拍的诚实性保证
+        // （标尺隔离 / 只重写有罪的一方 / 反例不得来自失信标尺）是 `verifyOnly` 路径的直接来源，
+        // 想对照旧行为时可以直接读它。
         const rt = runtimesText(await getRuntimes());
         let userInfo = null;
         const handle = (cfg.cfHandle || '').trim();
@@ -1375,7 +2103,14 @@ async function handleChat(req, res) {
           samples = await ensureSamples(conv);
         }
         const userCode = harness.extractUserCode(userTextFull);
+        // 题面**多级回退**（顺序不能换）：
+        //   ① 本轮取到的（CF 抓取 / 网络缓存）
+        //   ② 会话里**持久化**过的题面（上一轮取到或整理好的）—— 这是"追问不丢题面"的关键
+        //   ③ 才轮到把当前这条用户消息当题面（最后的兜底）
+        // 旧版缺了第 ② 步，于是粘贴题在第二轮开始就把用户提问当题面用了。
+        if (!statement && (conv.statementText || '').trim()) statement = conv.statementText;
         if (!statement) statement = harness.cleanUserStatement(userTextFull);
+        if (statement) conv.statementText = statement;
 
         /* ---------- 粘贴题面：先判是不是标准格式，不标准就派【题面整理 Agent】 ----------
          * 粘贴的题面是自由文本（`**输入**` 可能写在句子结尾），若直接进流水线会切不出格式段、样例为 0 组，
@@ -1415,6 +2150,10 @@ async function handleChat(req, res) {
               if (ns.length) { samples = ns; conv.cfProblemSamples = ns; }
               else if (mech.length && !samples.length) { samples = mech; conv.cfProblemSamples = mech; }
               conv.statementNormalized = true;
+              // **整理结果必须落盘**：旧版只存了 statementNormalized 这个标志位，
+              // 整理出来的标准题面留在局部变量里，下一轮追问就再也拿不回来 → 模型只能看见用户那句提问
+              // （实测事故：第二轮"题面"= 用户提问 30 字，契约抽出"输入 30 字 / 输出 0 字"）。
+              conv.statementText = statement;
               conv.problemMeta = Object.assign({}, conv.problemMeta || {}, {
                 source: 'pasted', title: d.title || (conv.problemMeta && conv.problemMeta.title) || null
               });
@@ -1448,70 +2187,8 @@ async function handleChat(req, res) {
         let explainStyle = '';
         let idea = null;
         let route = { mode: 'chain', reason: '' };
-        const agentCall = async (opts) => {
-          const tuned = resolveAgentTarget(cfg, provider, model, opts.role);
-          const label = opts.label || opts.role;
-          const isExplainer = opts.role === 'explainer';
-          // 讲解 agent 的增量默认直接写进消息（学员要边写边看）；但**图文讲解**的正文是一份 HTML 文档，
-          // 边写边塞进消息只会闪一堆裸标签 —— 这种就只喂工作台（同样实时可见，只是不进正文）。
-          const toMessage = isExplainer && !!opts.stream && !opts.workbenchOnly;
-          const t0 = Date.now();
-          // 讲解**重跑**（结构校验后的定向修复）时要重置流式缓冲：
-          // 否则学员会在生成过程中看到"草稿 + 修复版"两段拼接（定稿虽然是修复版，但过程中会闪错）
-          const resetStream = toMessage;
-          if (resetStream) { content = ''; reasoning = ''; }
-          send('agentStart', { role: opts.role, label, reset: resetStream, model: (tuned.provider && tuned.provider.name ? tuned.provider.name + ' · ' : '') + tuned.model });
-          try {
-            const text = await callAgentLLM({
-              provider: tuned.provider,
-              model: tuned.model,
-              system: opts.system,
-              messages: [{ role: 'user', content: opts.user }],
-              // 默认挂上本次生成的取消信号：路由/选题评估/手算锚点这些辅助调用也必须能被"停止"打断，
-              // 否则点了停止还得等一次几分钟的模型调用返回，界面会一直挂着"正在生成中"
-              signal: opts.signal || ctrl.signal,
-              stream: !!opts.stream,
-              // 单次输出上限：harness 可以在"上次被截断"的重试里显式要个更大的值
-              // （服务商不接受会自动去掉该字段重试，见 callAgentLLM）
-              maxTokens: (opts.maxTokens != null && opts.maxTokens > 0) ? opts.maxTokens : (cfg.maxOutputTokens || 0),
-              // token 记账：上游给了 usage 就用真值（在 harness 侧汇总成"这题花了多少"）
-              onUsage: (u) => { if (typeof opts.onUsage === 'function') opts.onUsage(u); },
-              // 收尾原因（finish_reason=length 表示被长度上限截断）：harness 据此换"压缩输出"的重试话术
-              onMeta: (m) => { if (typeof opts.onMeta === 'function') opts.onMeta(m); },
-              // 讲解 agent 的输出就是最终回答 → 走 delta；其余 agent（含"只喂工作台"的图文文档）走 agentDelta
-              onDelta: (t) => {
-                if (toMessage) {
-                  content += t;
-                  if (assistantTarget) assistantTarget.content = content;
-                  send('delta', { text: t });
-                } else {
-                  send('agentDelta', { role: opts.role, label, text: t });
-                }
-              },
-              // 思考过程：讲解 Agent 的思考直接进消息（学员能实时看到"它在想什么"），
-              // 其余 Agent 的思考进工作台；两条通道都要实时发，不能等跑完（实测反馈：全程黑屏）
-              // 图文文档模式下**正文**不往消息里推（会闪裸 HTML），但**思考照推**：
-              // 文档要写一两分钟，这段时间消息里的"思考过程"就是学员的进度条。
-              onReasoning: (t) => {
-                if (isExplainer) {
-                  reasoning += t;
-                  if (assistantTarget) assistantTarget.reasoning = reasoning;
-                  send('reasoningDelta', { text: t });
-                }
-                send('agentReasoning', { role: opts.role, label, text: t });
-              }
-            });
-            send('agentEnd', { role: opts.role, label, ok: true, ms: Date.now() - t0 });
-            return text;
-          } catch (e) {
-            send('agentEnd', { role: opts.role, label, ok: false, ms: Date.now() - t0, error: friendlyError(e) });
-            throw e;
-          }
-        };
-        const agentModelLabel = (role) => {
-          const tuned = resolveAgentTarget(cfg, provider, model, role);
-          return (tuned.provider && tuned.provider.name ? tuned.provider.name + ' · ' : '') + tuned.model;
-        };
+        // 旧的固定流水线分支（`else if (false)`）里不再定义 agentCall ——
+        // 调用桥已提升到模块级的 makeAgentCall，供工具循环与 cf_verify 共用。
 
         if (verified && !userCode) {
           // 同题缓存总是先加载：无论走哪条链路，都用已验证的暴力解/生成器当标尺（省最大一笔钱）
@@ -1840,9 +2517,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    /**
+     * 清掉某道题（某会话所属工作区）的缓存与验证记录 → 下次问这题会**从零重新对拍**。
+     *
+     * 为什么单独开这个口子：想测"完整验证链"不该靠"把对话删掉"这种副作用
+     * （用户的原话："我删除对话就是为了测试对拍嘛"）。这个按钮的语义一目了然，
+     * 也不会顺手把对话记录一起清掉。
+     */
+    if (method === 'POST' && p === '/api/workspace/purge') {
+      const body = await readBody(req);
+      const conv = loadConv(body.convId);
+      if (!conv) throw new HttpError(404, '会话不存在');
+      const key = workspace.keyFor(conv);
+      const removed = workspace.removeWorkspace(key);
+      sendJSON(res, 200, { ok: true, key, removed });
+      return;
+    }
+
     /* ---- 算法教练：Codeforces / 运行环境 ---- */
-    if (method === 'GET' && p === '/api/cf/problem') {
-      try {
+    if (method === 'GET' && p === '/api/cf/problem') {      try {
         const q = url.searchParams;
         const problem = await cf.fetchProblem(q.get('contestId'), q.get('index'));
         sendJSON(res, 200, problem);
@@ -1858,6 +2551,8 @@ const server = http.createServer(async (req, res) => {
         const contestId = q.get('contestId');
         const index = q.get('index');
         const meta = await cf.fetchProblemMeta(contestId, index);
+        // 总表里查不到这道题 → 如实说 notFound，不要回一个"看起来像题目"的占位标题
+        // （真实事故：界面把占位标题当成"题目已登记"，用户以为题抓到了、其实是空的）
         sendJSON(res, 200, {
           contestId: parseInt(contestId, 10) || contestId,
           index: String(index || '').toUpperCase(),
@@ -1866,7 +2561,8 @@ const server = http.createServer(async (req, res) => {
           tags: meta ? (meta.tags || []) : [],
           statement: '',
           samples: [],
-          metaOnly: true
+          metaOnly: true,
+          notFound: !meta
         });
       } catch (e) {
         sendJSON(res, 400, { error: e.message });
@@ -1879,6 +2575,380 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, 200, user);
       } catch (e) {
         sendJSON(res, 400, { error: e.message });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：提交记录（官方 API，不受反爬影响） ---- */
+    if (method === 'GET' && p === '/api/review') {
+      try {
+        const cfg0 = loadConfig();
+        const handle = String(url.searchParams.get('handle') || cfg0.cfHandle || '').trim();
+        if (!handle) throw new Error('请先在设置里填写 Codeforces 用户名，或在请求里带上 handle');
+        const contestId = url.searchParams.get('contestId') || '';
+        const { list } = await cfreview.fetchSubmissions({ handle, contestId: contestId || undefined });
+        const contests = cfreview.groupByContest(list);
+        let info = null;
+        if (contestId) { try { info = await cfreview.contestInfo(contestId); } catch (e) { /* 名称取不到不影响 */ } }
+        // 默认把最近一场"有提交的比赛"作为复盘对象（数据里 list 是新→旧，聚合后按结束时间排序）
+        const target = contests[0] || null;
+        sendJSON(res, 200, {
+          handle,
+          totalSubmissions: list.length,
+          contests: contests.slice(0, 12).map((c) => ({
+            contestId: c.contestId, submissions: c.submissions, problems: c.problems, solved: c.solved,
+            startAt: c.startAt, endAt: c.endAt, spanMs: c.spanMs,
+            penaltyApprox: c.penaltyApprox, failedSubmissions: c.failedSubmissions,
+            failed: c.failed
+          })),
+          current: target,
+          contestInfo: info
+        });
+      } catch (e) {
+        sendJSON(res, 400, { error: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：开一个"已装好复盘材料"的教练会话（SSE 流式报进度） ----
+     *
+     * 为什么改成 SSE：装材料要逐题抓题解 + 源码，每项都可能要过一次 Cloudflare 挑战，
+     * 11 道题串行就是好几分钟。早先做成一次性 POST，界面只有一行"正在装材料"，
+     * 用户实测**等了十分钟不知道卡在哪**（真实反馈）。
+     * 现在每完成一题就推一条进度，并且带**总预算**（默认 200 秒）——
+     * 超时不再是"静默卡死"，而是明确告诉你"X 题装好了、Y 题因为超时没装到"。
+     */
+    if (method === 'POST' && p === '/api/review/session') {
+      const body = await readBody(req, 2 * 1024 * 1024);
+      const cfg0 = loadConfig();
+      const handle = String(body.handle || cfg0.cfHandle || '').trim();
+      if (!handle) throw new HttpError(400, '缺少 handle');
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      const send = (type, data) => {
+        try { res.write('data: ' + JSON.stringify(Object.assign({ type }, data || {})) + '\n\n'); } catch (e) { /* 客户端走了 */ }
+      };
+      const hb = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) { /* ignore */ } }, 15000);
+      const stopAll = new AbortController();
+      req.on('close', () => { try { stopAll.abort(); } catch (e) { /* ignore */ } });
+      const deadline = Date.now() + (Number(body.budgetMs) || 200000);
+
+      try {
+        const wantSet = Array.isArray(body.problems) && body.problems.length
+          ? new Set(body.problems.map((x) => String(x).toUpperCase()))
+          : null;   // null = 全量
+
+        send('stage', { step: 'records', message: '正在拉取提交记录（官方 API）…' });
+        const { list } = await cfreview.fetchSubmissions({ handle, contestId: body.contestId });
+        const contests = cfreview.groupByContest(list);
+        if (!contests.length) { send('error', { message: '这场比赛没有提交记录' }); clearInterval(hb); res.end(); return; }
+        const c = contests[0];
+        let info = null;
+        try { info = await cfreview.contestInfo(c.contestId); } catch (e) { /* 名称取不到不影响 */ }
+
+        const picked = wantSet ? c.problemList.filter((x) => wantSet.has(x.index)) : c.problemList;
+        if (!picked.length) { send('error', { message: '选中的题目在这场里没有提交记录' }); clearInterval(hb); res.end(); return; }
+
+        send('start', {
+          contestId: c.contestId, contestName: info ? info.name : null,
+          total: picked.length, problems: picked.map((x) => x.index),
+          stats: {
+            submissions: c.submissions, problems: c.problems, solved: c.solved,
+            spanMs: c.spanMs, penaltyApprox: c.penaltyApprox, failedSubmissions: c.failedSubmissions
+          }
+        });
+
+        const probLines = [];
+        const fetchSrc = body.includeSource !== false;
+        const entryIdInput = String(body.entryId || '').trim();
+        let oks = 0; let fails = 0;
+        // 源码装载总计（给界面显示"材料里有多少份真实代码"）
+        let srcGotAll = 0; let srcWantAll = 0;
+        for (let i = 0; i < picked.length; i++) {
+          const x = picked[i];
+          const overBudget = Date.now() > deadline || stopAll.signal.aborted;
+          send('item', { index: x.index, i: i + 1, total: picked.length, state: 'working', message: '抓题解与源码…' });
+
+          const seq = x.verdicts.slice().reverse().map((v) => cfreview.verdictCn(v)).join(' → ');
+          probLines.push('### ' + x.index + '（' + (x.rating || '未定级') + (x.problemName ? '，' + x.problemName : '') + '）');
+          probLines.push('- 结果：' + (x.solved ? 'AC' : cfreview.verdictCn(x.lastVerdict))
+            + '｜提交 ' + x.attempts + ' 次｜判定序列 ' + seq
+            + '｜最后一发用时 ' + (x.lastTimeMs != null ? x.lastTimeMs + 'ms' : '—')
+            + '｜提交 id ' + x.lastSubmissionId);
+          if (x.tags && x.tags.length) probLines.push('- 标签：' + x.tags.join('、'));
+
+          let ed = null;
+          let edNote = '';
+          if (overBudget) {
+            edNote = '超时未抓';
+            ed = { ok: false, hint: '装材料总预算已用完（' + Math.round((Number(body.budgetMs) || 200000) / 1000) + ' 秒），本题没来得及抓题解。' };
+          } else {
+            try {
+              ed = await cfreview.fetchEditorial({
+                contestId: c.contestId, index: x.index,
+                // 用户给了题解链接就直接用它（能省掉"翻题目页找 Tutorial"那一步，
+                // 而这一步要过一次反爬挑战，是整条链里最慢也最容易失败的一环）
+                entryId: entryIdInput || undefined,
+                budgetMs: 35000,
+                browserFetch: editorialBrowserFetch
+              });
+            } catch (e) { ed = { ok: false, hint: (e && e.message) || '抓取失败' }; }
+          }
+          if (ed && ed.ok && ed.content) {
+            oks++;
+            probLines.push('- 官方题解（来自 CF ' + (ed.entryId ? 'blog/entry/' + ed.entryId : '题解页')
+              + (ed.sliced ? '' : '，⚠ 未精确切出本题，以下是整篇') + '）——**已经在这里了，不用再去取**：');
+            probLines.push('```');
+            probLines.push(ed.content.slice(0, 6000));
+            probLines.push('```');
+          } else {
+            fails++;
+            probLines.push('- 官方题解：**没有找到**（' + ((ed && ed.hint) || 'CF 上这道题没有公开题解') + '）');
+            // 只有**确实没抓到题解**时才要求教练自己解题 + 对拍验证（验证需要官方样例，所以先取题面）。
+            // 反之绝不能加这句 —— 材料里已经有题解却还叫它去 cf_fetch/cf_verify，
+            // 就是用户吐槽的"我把信息都给它了，它还要自己去取一遍"。
+            probLines.push('- **本题要你自己的解法**（这条只对本题有效，因为题解没抓到）：先 `cf_fetch` 取题面与官方样例（CF ' + c.contestId + x.index
+              + '），再用 `cf_verify` 跑验证，最后才讲。不要凭选手源码猜正解。');
+          }
+          // 本题源码装载计数（给界面的进度事件用）
+          let srcGot = 0;
+          let srcWant = 0;
+          if (fetchSrc && x.lastSubmissionId && !overBudget) {
+            /**
+             * 逐条装源码：**不只最后一发**。
+             * 一题往往交错着 WA/TLE/AC，只看最后一发就看不到"错在哪 → 怎么改对的"这个过程，
+             * 而那正是复盘最值钱的地方（用户明确提过这一点）。
+             * 每题最多装 3 份（首次提交 / 最后一次未通过 / 首次通过），按 sourcePicks 的顺序取。
+             */
+            const picks = (Array.isArray(x.sourcePicks) && x.sourcePicks.length)
+              ? x.sourcePicks.slice(0, 3)
+              : [{ id: x.lastSubmissionId, role: '最后一发', verdict: x.lastVerdict, lang: '', timeMs: x.lastTimeMs }];
+            const got = [];
+            const missed = [];
+            srcWant = picks.length;
+            for (const pk of picks) {
+              if (Date.now() > deadline) { missed.push(pk.role + '（超时未抓）'); continue; }
+              try {
+                const s = await cfreview.fetchSource({
+                  contestId: c.contestId, submissionId: pk.id, browserFetch: submissionBrowserFetch
+                });
+                if (s && s.ok) got.push({ pick: pk, src: s });
+                else missed.push(pk.role + '（' + ((s && (s.hint || s.reason)) || '未知原因') + '）');
+              } catch (e) {
+                missed.push(pk.role + '（' + ((e && e.message) || '抓取失败') + '）');
+              }
+            }
+            if (got.length) {
+              srcGot = got.length;
+              srcGotAll += got.length; srcWantAll += srcWant;
+              for (const g of got) {
+                probLines.push('- 选手源码 · **' + g.pick.role + '**（提交 ' + g.pick.id + '，'
+                  + cfreview.verdictCn(g.pick.verdict) + '，' + (g.src.lang || g.pick.lang || '') + '）'
+                  + '——**已经在这里了，不用再去 cf_source**：');
+                probLines.push('```' + (g.src.lang || ''));
+                probLines.push(String(g.src.code).slice(0, 6000));
+                probLines.push('```');
+              }
+              if (missed.length) probLines.push('- （另外没取到：' + missed.join('；') + '）');
+            } else {
+              srcGotAll += 0; srcWantAll += srcWant;
+              const first = missed[0] || '未知原因';
+              probLines.push('- 选手源码：**没取到**（' + first + '）');
+              if (/not-found|重定向|未登录/.test(first)) {
+                probLines.push('  - 原因通常是**应用内浏览器没有登录 Codeforces**（源码页要求登录），'
+                  + '或该提交对当前账号不可见。让用户点复盘页的「🔑 登录 Codeforces」登一次；'
+                  + '也可以直接把代码粘给你（粘贴永远可行）。**不要反复重试 cf_source**。');
+              }
+              probLines.push('  ——**不要猜实现细节**');
+            }
+          } else if (fetchSrc && overBudget) {
+            probLines.push('- 选手源码：超时未抓');
+          }
+          probLines.push('');
+          // 每完成一题就推一条进度：界面上能看到"第 i/N 题装好了"，而不是干等
+          // 注意区分"这道题真没有题解"与"抓取超时"——前者重试也没用，后者值得再试一次
+          const edFailReason = (ed && ed.reason) || '';
+          send('item', {
+            index: x.index, i: i + 1, total: picked.length, state: 'done',
+            editorial: (ed && ed.ok) ? 'ok' : (edFailReason || 'none'),
+            source: (fetchSrc && x.lastSubmissionId && !overBudget) ? 'tried' : (overBudget ? 'skipped' : 'off'),
+            // 源码装了几发 / 一共想装几发：界面要能直接看到"材料里到底有没有代码"，
+            // 否则用户只能凭"没取到"四个字猜（真实反馈：材料里只有题解，看不到源码）。
+            srcGot: srcGot, srcWant: srcWant,
+            message: (ed && ed.ok) ? ('题解已装好' + (srcWant ? '｜源码 ' + srcGot + '/' + srcWant + ' 发' : ''))
+              : (edFailReason === 'no-tutorial-link'
+                ? 'CF 上没有这道题的题解（不是每场都有）→ 让 AI 自己解并验证'
+                : (edFailReason === 'timeout'
+                  ? '题解抓取超时（反爬挑战没过）→ 这次当"没有题解"处理，之后可以单独重试'
+                  : '没拿到题解 → 让 AI 自己解并验证'))
+          });
+        }
+        if (stopAll.signal.aborted) { console.log('[review] 客户端中断了装材料'); clearInterval(hb); try { res.end(); } catch (e) { /* ignore */ } return; }
+
+      const statementText = [
+        '【赛后复盘材料】由 CF Coach 自动装好，请按 cf-review 技能处理。',
+        '',
+        '**材料已经装在下面了（逐题统计 / 官方题解 / 选手源码），不要再去取一遍。**',
+        '只有材料里明确写着"没有找到 / 没取到"的东西才需要你处理；用户明确要求时才可以动工具。',
+        '',
+        '- 选手：' + handle,
+        '- 比赛：' + c.contestId + (info && info.name ? '「' + info.name + '」' : '')
+          + (info ? '（' + (info.finished ? '已结束' : '**进行中**，源码在比赛中是隐藏的') + '）' : ''),
+        '- 统计：提交 ' + c.submissions + ' 条｜涉及 ' + c.problems + ' 题｜AC ' + c.solved + ' 题'
+          + '｜本场跨度 ' + Math.round((c.spanMs || 0) / 60000) + ' 分钟'
+          + '｜罚时（只计 AC 题的失败提交×50）' + c.penaltyApprox
+          + '｜未 AC 白交 ' + c.failedSubmissions + ' 发',
+        '- 本次复盘范围：' + (wantSet ? '仅 ' + picked.map((x) => x.index).join('、') : '全部有提交的题目'),
+        '',
+        ...probLines
+      ].join('\n');
+
+      const conv = newConversation({
+        title: '复盘 ' + c.contestId + (info && info.name ? ' ' + info.name : ''),
+        cfProblem: null,
+        statementText,
+        problemMeta: {
+          source: 'review', contest: String(c.contestId),
+          title: 'CF ' + c.contestId + ' 赛后复盘', rating: null, tags: [], knowledge: []
+        }
+      });
+      conv.messages.push({
+        id: uid('m_'),
+        role: 'user',
+        content: '复盘 ' + c.contestId + '：' + (wantSet ? '只看 ' + picked.map((x) => x.index).join('、') : '全部题目')
+          + '。先给全局分布，再逐题诊断，最后给下场比赛的行动项。',
+        createdAt: Date.now()
+      });
+      saveConv(conv);
+      send('done', {
+        ok: true, conversationId: conv.id, title: conv.title,
+        problems: picked.map((x) => x.index),
+        editorialOk: oks, editorialNone: fails,
+        sourceGot: srcGotAll, sourceWant: srcWantAll,
+        degraded: fails > 0 ? '有 ' + fails + ' 题没抓到官方题解，教练会对这些题自己解题并跑验证（会慢一些）' : ''
+      });
+      clearInterval(hb);
+      try { res.end(); } catch (e) { /* ignore */ }
+      return;
+    } catch (e) {
+      console.error('[review] 装材料失败: ' + ((e && e.message) || e));
+      send('error', { message: friendlyError(e) });
+      clearInterval(hb);
+      try { res.end(); } catch (e2) { /* ignore */ }
+      return;
+    }
+  }
+
+    /* ---- 赛后复盘：登录 Codeforces（抓提交源码必需） ---- */
+    if (method === 'POST' && p === '/api/review/login') {
+      const body = await readBody(req, 16 * 1024);
+      if (!cfLoginOpener) {
+        sendJSON(res, 200, { ok: false, error: '登录窗口只在桌面版可用（Web 模式下没有内嵌浏览器）。' });
+        return;
+      }
+      try {
+        const r = await cfLoginOpener({ waitMs: Number(body.waitMs) || 180000 });
+        sendJSON(res, 200, r);
+      } catch (e) {
+        sendJSON(res, 200, { ok: false, error: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：反爬挑战的人工兜底（打开可见窗口过一次挑战） ---- */
+    if (method === 'POST' && p === '/api/review/challenge') {
+      const body = await readBody(req, 64 * 1024);
+      const contestId = String(body.contestId || '').trim();
+      const index = String(body.index || '').trim().toUpperCase();
+      const entryId = String(body.entryId || '').trim();
+      let target = String(body.url || '').trim();
+      if (!target) {
+        if (entryId) target = 'https://codeforces.com/blog/entry/' + entryId;
+        else if (/^\d+$/.test(contestId) && /^[A-Z]\d?$/.test(index)) target = 'https://codeforces.com/contest/' + contestId + '/problem/' + index;
+      }
+      if (!challengeWindowOpener) {
+        sendJSON(res, 200, { ok: false, error: '人工兜底只在桌面版可用（Web 模式下没有内嵌浏览器）。' });
+        return;
+      }
+      try {
+        const r = await challengeWindowOpener({ url: target, waitMs: Number(body.waitMs) || 45000 });
+        sendJSON(res, 200, r);
+      } catch (e) {
+        sendJSON(res, 200, { ok: false, error: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：会话预热（复盘页一打开就调用，把"冷启动第一枪"提前花掉） ---- */
+    if (method === 'POST' && p === '/api/review/warm') {
+      if (!cfWarmOpener) { sendJSON(res, 200, { ok: false, reason: '只在桌面版可用' }); return; }
+      try {
+        const t0 = Date.now();
+        const r = await cfWarmOpener();
+        sendJSON(res, 200, { ok: true, ms: Date.now() - t0, loggedIn: !!(r && r.loggedIn) });
+      } catch (e) {
+        sendJSON(res, 200, { ok: false, reason: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：官方题解（尽力而为，不是每道题都有） ---- */
+    if (method === 'GET' && p === '/api/review/editorial') {
+      const contestId = url.searchParams.get('contestId') || '';
+      const index = url.searchParams.get('index') || '';
+      const entryId = url.searchParams.get('entryId') || '';
+      try {
+        const r = await cfreview.fetchEditorial({
+          contestId, index, entryId,
+          force: url.searchParams.get('force') === '1',
+          browserFetch: editorialBrowserFetch
+        });
+        sendJSON(res, 200, r);
+      } catch (e) {
+        sendJSON(res, 200, { ok: false, reason: 'error', hint: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：单条提交源码（走内嵌浏览器通道） ---- */
+    if (method === 'GET' && p === '/api/review/source') {
+      const contestId = url.searchParams.get('contestId') || '';
+      const submissionId = url.searchParams.get('submissionId') || '';
+      try {
+        const r = await cfreview.fetchSource({ contestId, submissionId, browserFetch: submissionBrowserFetch });
+        sendJSON(res, 200, r);
+      } catch (e) {
+        sendJSON(res, 200, { ok: false, reason: 'error', hint: friendlyError(e) });
+      }
+      return;
+    }
+
+    /* ---- 赛后复盘：诊断材料（打包给 AI 的那份） ---- */
+    if (method === 'GET' && p === '/api/review/bundle') {
+      try {
+        const cfg0 = loadConfig();
+        const handle = String(url.searchParams.get('handle') || cfg0.cfHandle || '').trim();
+        const contestId = url.searchParams.get('contestId') || '';
+        if (!handle) throw new Error('缺少 handle');
+        const r = await cfreview.reviewBundle({
+          handle, contestId: contestId || undefined,
+          includeEditorial: url.searchParams.get('editorial') !== '0',
+          editorialFetch: (q) => cfreview.fetchEditorial(Object.assign({ browserFetch: editorialBrowserFetch }, q)),
+          // 源码也一起装（用户反馈：只装题解等于把最关键的证据漏掉了）
+          includeSource: url.searchParams.get('source') !== '0',
+          sourceFetch: submissionBrowserFetch
+            ? (q) => cfreview.fetchSource(Object.assign({ browserFetch: submissionBrowserFetch }, q))
+            : null,
+          sourceBudgetMs: Number(url.searchParams.get('sourceBudgetMs')) || 100000
+        });
+        sendJSON(res, 200, r);
+      } catch (e) {
+        sendJSON(res, 400, { error: friendlyError(e) });
       }
       return;
     }
@@ -2132,6 +3202,91 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, 200, { active: [...activeGenerations] });
       return;
     }
+    /* ---- 对话文件夹（分类整理用；不影响会话内容） ---- */
+    if (p === '/api/folders') {
+      if (method === 'GET') { sendJSON(res, 200, { folders: loadFolders() }); return; }
+      if (method === 'POST') {
+        const body = await readBody(req);
+        const name = String(body.name || '').trim();
+        if (!name) throw new HttpError(400, '缺少 name');
+        const list = loadFolders();
+        if (list.some((f) => f.name === name)) throw new HttpError(400, '已经有同名文件夹了');
+        const f = newFolder(name);
+        list.push(f);
+        saveFolders(list);
+        sendJSON(res, 200, { ok: true, folder: f, folders: list });
+        return;
+      }
+    }
+    {
+      const mf = p.match(/^\/api\/folders\/([a-zA-Z0-9_\-]+)$/);
+      if (mf) {
+        const id = mf[1];
+        const list = loadFolders();
+        const idx = list.findIndex((f) => f.id === id);
+        if (idx < 0) throw new HttpError(404, '文件夹不存在');
+        if (method === 'PATCH') {
+          const body = await readBody(req);
+          const name = String(body.name || '').trim();
+          if (!name) throw new HttpError(400, '缺少 name');
+          if (list.some((f, i) => i !== idx && f.name === name)) throw new HttpError(400, '已经有同名文件夹了');
+          list[idx].name = name.slice(0, 40);
+          saveFolders(list);
+          sendJSON(res, 200, { ok: true, folder: list[idx], folders: list });
+          return;
+        }
+        if (method === 'DELETE') {
+          // 删文件夹**不删对话**：里面的对话回到"未分类"（用户删的是分类，不是内容）
+          list.splice(idx, 1);
+          saveFolders(list);
+          let moved = 0;
+          for (const c of eachConversation()) {
+            if (c.folder === id) { c.folder = ''; saveConv(c); moved++; }
+          }
+          sendJSON(res, 200, { ok: true, moved, folders: list });
+          return;
+        }
+      }
+    }
+    /* ---- 批量操作：多选对话后一次性归档 / 删除 / 移动 ---- */
+    if (method === 'POST' && p === '/api/conversations/batch') {
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids) ? body.ids.map(String).filter(Boolean) : [];
+      const action = String(body.action || '');
+      if (!ids.length) throw new HttpError(400, '没有选中任何对话');
+      const ok0 = ['archive', 'unarchive', 'delete', 'move', 'pin', 'unpin'];
+      if (ok0.indexOf(action) < 0) throw new HttpError(400, '不支持的批量操作：' + action);
+      const folder = String(body.folder || '');
+      if (action === 'move' && folder && !loadFolders().some((f) => f.id === folder)) {
+        throw new HttpError(400, '目标文件夹不存在');
+      }
+      const done = []; const failed = [];
+      for (const id of ids) {
+        try {
+          const conv = loadConv(id);
+          if (!conv) { failed.push({ id, reason: '会话不存在' }); continue; }
+          if (action === 'delete') {
+            // 正在生成的会话先停掉再删，否则那次生成会在收尾时把文件又写回来
+            const stop = runStops.get(id);
+            if (stop) { try { stop(); } catch (e) { /* ignore */ } }
+            deleteConvFile(id);
+          } else if (action === 'archive' || action === 'unarchive') {
+            conv.archived = action === 'archive';
+            conv.updatedAt = Date.now();
+            saveConv(conv);
+          } else if (action === 'pin' || action === 'unpin') {
+            conv.pinned = action === 'pin';
+            saveConv(conv);
+          } else if (action === 'move') {
+            conv.folder = folder;
+            saveConv(conv);
+          }
+          done.push(id);
+        } catch (e) { failed.push({ id, reason: friendlyError(e) }); }
+      }
+      sendJSON(res, 200, { ok: true, action, done: done.length, ids: done, failed });
+      return;
+    }
     if (method === 'POST' && p === '/api/conversations') {
       const body = await readBody(req);
       const extra = {};
@@ -2173,7 +3328,7 @@ const server = http.createServer(async (req, res) => {
           const body = await readBody(req);
           const conv = loadConv(id);
           if (!conv) throw new HttpError(404, '会话不存在');
-          const allowed = ['title', 'pinned', 'archived', 'providerId', 'model', 'systemPrompt', 'params', 'mode', 'cfProblem', 'lang', 'intent', 'problemMeta', 'rich'];
+          const allowed = ['title', 'pinned', 'archived', 'providerId', 'model', 'systemPrompt', 'params', 'mode', 'cfProblem', 'lang', 'intent', 'problemMeta', 'rich', 'folder'];
           for (const k of allowed) {
             if (k in body) conv[k] = body[k];
           }
@@ -2186,8 +3341,35 @@ const server = http.createServer(async (req, res) => {
           return;
         }
         if (method === 'DELETE') {
+          /**
+           * 删除会话：默认**同时删掉这道题的工作区缓存**（用户的原话："我删除肯定是全删啊"）。
+           *
+           * 但工作区是按**题号**共享的（cf-2269D），别的问过同一题的对话还在用它 ——
+           * 所以先数一下还有几个会话指向同一个工作区：
+           *   · 没有别的会话用 → 直接连缓存一起删（真正的"全删"）；
+           *   · 还有别的会话用 → 默认**保留**缓存，并在响应里如实说明；要连缓存也删就带 forceWorkspace。
+           * 前端据此在删除确认框里给出选择，不再让用户猜"删了没有"。
+           */
+          const conv = loadConv(id);
+          const key = conv ? workspace.keyFor(conv) : '';
+          const body = method === 'DELETE' ? await readBody(req).catch(() => ({})) : {};
+          const forceWs = !!(body && body.forceWorkspace);
+          let sharedWith = [];
+          if (key) {
+            sharedWith = eachConversation().filter((c) => c.id !== id && workspace.keyFor(c) === key).map((c) => c.id);
+          }
           deleteConvFile(id);
-          sendJSON(res, 200, { ok: true });
+          let workspaceCleared = false;
+          let workspaceKept = '';
+          if (key && (forceWs || !sharedWith.length)) {
+            try {
+              workspace.removeWorkspace(key);
+              workspaceCleared = true;
+            } catch (e) { console.log('[workspace] 删除失败: ' + ((e && e.message) || e)); }
+          } else if (key) {
+            workspaceKept = key;
+          }
+          sendJSON(res, 200, { ok: true, workspace: key, workspaceCleared, workspaceKept, sharedWith });
           return;
         }
       }
@@ -2239,7 +3421,7 @@ const server = http.createServer(async (req, res) => {
           if (c && c.id) all.push(c);
         }
       }
-      const payload = { app: 'cf-coach', version: 1, exportedAt: new Date().toISOString(), conversations: all };
+      const payload = { app: 'codeforces-coach', version: 1, exportedAt: new Date().toISOString(), conversations: all };
       res.writeHead(200, {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Disposition': 'attachment; filename="chatbox-export-' + new Date().toISOString().slice(0, 10) + '.json"'
@@ -2332,4 +3514,4 @@ if (require.main === module) {
   startServer(PORT, HOST);
 }
 
-module.exports = { startServer, DATA_DIR };
+module.exports = { startServer, DATA_DIR, setSubmissionBrowserFetch, setEditorialBrowserFetch, setChallengeWindowOpener, setCfLoginOpener, setCfWarmOpener };

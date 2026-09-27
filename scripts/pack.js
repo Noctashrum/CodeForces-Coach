@@ -93,6 +93,10 @@ async function main() {
     asar: false,
     icon: path.join(ROOT, 'build', 'icon.ico'),
     prune: true,
+    // 双击 exe **不要**弹出控制台窗口：这是个纯桌面软件，日志走应用内的工作台/决策轨迹，
+    // 不需要也不该让用户看到一个黑终端。显式声明子系统为 GUI（打包器默认值就是这个，
+    // 但在这里写明意图，避免以后有人"为了看日志"把它改成 Console: true）。
+    win32metadata: { Console: false },
     ignore: [
       /^\/data($|\/)/,
       /^\/dist($|\/)/,

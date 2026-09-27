@@ -185,6 +185,86 @@ body.sidebar-hidden #btn-expand { display: inline-flex !important; }
   padding: 0 6px;
   font-weight: 500;
 }
+/* 右侧的两个小图标按钮（新建文件夹 / 多选）：跟 tab 同高，不抢视觉 */
+.sb-tabs-space { flex: 0 0 4px; }
+.sb-tab-icon {
+  width: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  transition: all var(--transition);
+}
+.sb-tab-icon:hover { background: var(--bg-secondary); color: var(--text); }
+.sb-tab-icon.active { background: var(--primary); color: #fff; }
+
+/* 批量操作条：只在多选模式出现，紧贴标签栏下方 */
+.sb-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 12px 8px;
+  padding: 7px 9px;
+  background: var(--primary-weak);
+  border: 1px solid var(--primary);
+  border-radius: 9px;
+}
+.sb-bulk-count { font-size: 12px; font-weight: 600; color: var(--primary); margin-right: 2px; }
+.sb-bulk-btn {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: all var(--transition);
+}
+.sb-bulk-btn:hover { color: var(--text); border-color: var(--primary); }
+.sb-bulk-btn.danger { color: var(--danger); }
+.sb-bulk-btn.danger:hover { border-color: var(--danger); }
+
+/* 文件夹分组 */
+.conv-folder { margin-bottom: 2px; }
+.conv-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 10px 5px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-radius: 7px;
+  transition: background var(--transition);
+}
+.conv-folder-head:hover { background: var(--bg-tertiary); }
+.conv-folder-arrow { width: 10px; font-size: 10px; color: var(--text-tertiary); }
+.conv-folder-name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-folder-count { font-size: 11px; color: var(--text-tertiary); }
+.conv-folder-menu { padding: 0 4px; border-radius: 5px; color: var(--text-tertiary); opacity: 0; }
+.conv-folder-head:hover .conv-folder-menu { opacity: 1; }
+.conv-folder-menu:hover { background: var(--bg-active); color: var(--text); }
+.conv-folder.collapsed .conv-folder-head { opacity: 0.75; }
+/* 文件夹里的条目稍微缩进，能看出从属关系 */
+.conv-folder .conv-item { margin-left: 8px; }
+
+/* 多选：勾选框 + 选中态 */
+.conv-check {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1.5px solid var(--border-strong, var(--border));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+.conv-check.on { background: var(--primary); border-color: var(--primary); }
+.conv-item.picked { background: var(--primary-weak); }
+.conv-item.selecting .conv-item-actions { display: none; }
 
 .sb-search {
   display: flex;
@@ -733,7 +813,19 @@ body.sidebar-hidden #btn-expand { display: inline-flex !important; }
   background: none;
   font-size: 15px;
   line-height: 1.6;
-  max-height: 200px;
+  /**
+   * 高度由**浏览器自己**跟着内容走（Chromium 123+ 的 field-sizing）。
+   *
+   * 为什么不再只靠 JS 量高度：那是"事件必须每次都触发、每次都量对"才能成立的设计，
+   * 一旦某条路径没触发 input（拖入文本、某些输入法、程序设值…）框子就永远停在
+   * 一行高 —— 真实反馈："我粘贴题面是正常的，但这个对话框一直只有一行"。
+   * field-sizing 让 textarea 天然等于内容高度（受 max-height 约束），与事件无关。
+   * JS 那套 autosizeInput 保留为老内核的兜底（见 CSS.supports 判断）。
+   */
+  field-sizing: content;
+  /* 输入框最高能长到多高：从题面导入的正文有上千字，200px 只能看到十来行，
+     用户会以为"没装进来"（真实反馈）。这里放宽到视口的一部分，又不至于把对话挤没。 */
+  max-height: min(46vh, 420px);
   min-height: 26px;
   padding: 3px 4px;
 }
@@ -2041,3 +2133,152 @@ html[data-bgimage="on"] .modal-mask { backdrop-filter: blur(3px); }
   .msg-user .msg-bubble { max-width: 92%; }
   .problem-panel { display: none; }
 }
+
+/* ============================================================
+ * 赛后复盘页（public/js/review.js）
+ *
+ * 设计取向：这是"看数据 + 做判断"的界面，不是聊天界面。
+ * 所以走表格与卡片，密度比对话高；配色沿用主题变量，不引入新色。
+ * ============================================================ */
+
+.rv-head { margin-bottom: 14px; }
+.rv-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+.rv-bar .form-input { height: 36px; }
+.rv-bar .form-input:nth-of-type(1) { width: 240px; }
+.rv-bar .form-input:nth-of-type(2) { width: 190px; }
+
+.rv-body { display: flex; flex-direction: column; gap: 14px; }
+
+.rv-empty {
+  padding: 14px 16px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md);
+  color: var(--text-tertiary); font-size: 13px; line-height: 1.7;
+}
+.rv-err { border-color: var(--danger); color: var(--danger); }
+
+.rv-card {
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-secondary); overflow: hidden;
+}
+.rv-card-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 14px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary);
+  font-size: 13.5px;
+}
+.rv-right { margin-left: auto; }
+
+.rv-chip {
+  font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  background: var(--bg-active); color: var(--text-secondary);
+}
+.rv-chip-warn { background: var(--warning); color: #1b1400; }
+.rv-chip + .rv-chip { margin-left: 4px; }
+
+.rv-stats { display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 6px; }
+.rv-stat {
+  flex: 1 1 110px; min-width: 100px; padding: 9px 10px; border-radius: var(--radius-sm);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.rv-stat span { font-size: 11.5px; color: var(--text-tertiary); }
+.rv-stat b { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rv-stat-ok b { color: var(--success); }
+.rv-stat-warn b { color: var(--warning); }
+.rv-stat-bad b { color: var(--danger); }
+
+.rv-note { padding: 0 14px 11px; font-size: 11.5px; color: var(--text-tertiary); line-height: 1.6; }
+
+.rv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rv-table th {
+  text-align: left; font-weight: 600; font-size: 11.5px; color: var(--text-tertiary);
+  padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.rv-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.rv-table tr:last-child td { border-bottom: none; }
+.rv-pname { font-size: 11.5px; color: var(--text-secondary); margin-top: 1px; max-width: 220px; }
+.rv-tags { font-size: 10.5px; color: var(--text-tertiary); margin-top: 2px; }
+.rv-seq { white-space: nowrap; }
+.rv-arrow { color: var(--text-tertiary); margin: 0 3px; font-size: 10px; }
+.rv-acts { white-space: nowrap; }
+
+.rv-v {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px;
+  font-family: var(--mono);
+}
+.rv-ok { background: rgba(18, 163, 100, 0.16); color: var(--success); }
+.rv-bad { background: rgba(229, 72, 77, 0.15); color: var(--danger); }
+.rv-slow { background: rgba(217, 154, 31, 0.18); color: var(--warning); }
+.rv-other { background: var(--bg-active); color: var(--text-secondary); }
+
+.rv-warn-dot {
+  display: inline-block; margin-left: 5px; width: 15px; height: 15px; line-height: 15px; text-align: center;
+  border-radius: 50%; background: var(--danger); color: #fff; font-size: 10px; font-weight: 800;
+}
+.rv-none { font-size: 11.5px; color: var(--text-tertiary); }
+
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border-strong); color: var(--text-secondary);
+  border-radius: 7px; padding: 4px 9px; font-size: 12px; cursor: pointer; transition: var(--transition);
+}
+.btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
+.btn-ghost:disabled { opacity: 0.6; cursor: default; }
+.rv-mini { padding: 3px 8px; font-size: 11.5px; }
+
+/* 勾选与批量操作（"只选没过的"这类快捷方式） */
+.rv-inline { padding: 0; font-size: 11.5px; }
+.rv-pickbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg-secondary);
+}
+.rv-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); margin-left: 6px; }
+.rv-check input, .rv-chk input { accent-color: var(--primary); cursor: pointer; }
+.rv-chk { width: 34px; text-align: center; }
+.rv-card-head .btn-primary.rv-mini { padding: 4px 10px; font-size: 12px; }
+
+/* 装材料进度面板：把"静默等十分钟"变成看得见的进度 */
+.rv-progress { padding: 12px 14px; border-color: var(--primary); }
+.rv-progress-head { display: flex; align-items: center; gap: 10px; font-size: 13px; margin-bottom: 8px; }
+.rv-progress-head .rv-chip { margin-left: auto; }
+.rv-bar-track { height: 8px; border-radius: 999px; background: var(--bg-active); overflow: hidden; }
+.rv-bar-fill {
+  height: 100%; border-radius: 999px; background: var(--primary);
+  transition: width 0.3s ease; min-width: 4px;
+}
+.rv-bar-fill.bad { background: var(--danger); }
+.rv-progress-msg { font-size: 12.5px; margin-top: 8px; color: var(--text-secondary); }
+.rv-pitems { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.rv-pitem {
+  font-size: 11.5px; padding: 2px 7px; border-radius: 6px; font-family: var(--mono);
+  background: var(--bg-tertiary); color: var(--text-secondary);
+}
+.rv-pitem.ok { background: rgba(18, 163, 100, 0.16); color: var(--success); }
+.rv-pitem.none { background: rgba(217, 154, 31, 0.16); color: var(--warning); }
+.rv-pitem.timeout { background: var(--bg-hover); color: var(--text-tertiary); }
+
+.rv-recent { display: flex; flex-direction: column; }
+.rv-recent-item {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left;
+  padding: 9px 14px; background: transparent; border: none; border-bottom: 1px solid var(--border);
+  cursor: pointer; color: var(--text); font-size: 13px; transition: var(--transition);
+}
+.rv-recent-item:last-child { border-bottom: none; }
+.rv-recent-item:hover { background: var(--bg-hover); }
+.rv-recent-item.active { background: var(--primary-weak); }
+.rv-recent-item span { font-size: 11.5px; color: var(--text-tertiary); }
+
+.rv-detail .rv-sec { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.rv-detail .rv-sec:last-child { border-bottom: none; }
+.rv-sec-title { font-size: 12.5px; font-weight: 700; margin-bottom: 8px; }
+.rv-link { color: var(--primary); text-decoration: none; font-weight: 400; font-size: 12px; }
+.rv-link:hover { text-decoration: underline; }
+
+.rv-pre {
+  margin: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--code-bg);
+  font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap;
+  word-break: break-word; max-height: 460px; overflow: auto; color: var(--text);
+}
+.rv-code { max-height: 560px; }
+
+@media (max-width: 1180px) {
+  .rv-table { font-size: 12px; }
+  .rv-seq { display: none; }
+}
+

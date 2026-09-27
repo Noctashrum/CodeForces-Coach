@@ -31,6 +31,21 @@
       <div class="sb-tabs">
         <button class="sb-tab active" data-tab="active">对话</button>
         <button class="sb-tab" data-tab="archive">归档<span class="sb-tab-count" id="archive-count" hidden></span></button>
+        <span class="sb-tabs-space"></span>
+        <button id="btn-new-folder" class="sb-tab-icon" title="新建文件夹">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+        </button>
+        <button id="btn-multiselect" class="sb-tab-icon" title="多选（批量归档 / 删除 / 移动）">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        </button>
+      </div>
+      <div id="sb-bulk" class="sb-bulk" hidden>
+        <span class="sb-bulk-count" id="sb-bulk-count">已选 0 项</span>
+        <button class="sb-bulk-btn" data-bulk="all">全选</button>
+        <button class="sb-bulk-btn" data-bulk="move">移动到…</button>
+        <button class="sb-bulk-btn" data-bulk="archive">归档</button>
+        <button class="sb-bulk-btn danger" data-bulk="delete">删除</button>
+        <button class="sb-bulk-btn" data-bulk="exit">取消</button>
       </div>
       <div class="sb-search">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -201,6 +216,7 @@
   <script src="/vendor/katex/auto-render.min.js"></script>
   <script src="/js/md.js"></script>
   <script src="/js/agentruns.js"></script>
+  <script src="/js/review.js"></script>
   <script src="/js/app.js"></script>
 </body>
 </html>
