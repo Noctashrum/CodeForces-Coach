@@ -112,6 +112,55 @@ async function main() {
   // 历史兼容：显式切回 chat 模式跑通用聊天回归
   await api('/api/conversations/' + cid, { method: 'PATCH', body: JSON.stringify({ mode: 'chat' }) });
 
+  console.log('\n== 2b. 对话文件夹 + 多选批量操作 ==');
+  {
+    // 再造两个会话，连同上面的 cid 一起做分类与批量操作
+    const cx = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    const cy = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    check('新会话默认未分类', cx.folder === '', cx.folder);
+
+    const fRes = await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: 'e2e-线段树' }) });
+    check('新建文件夹', fRes.status === 200 && fRes.json.folder && fRes.json.folder.name === 'e2e-线段树', fRes.json);
+    const fid = fRes.json.folder.id;
+    const dup = await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: 'e2e-线段树' }) });
+    check('同名文件夹被拒（不静默建重复）', dup.status === 400, dup.json);
+
+    const mv = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id, cy.id], action: 'move', folder: fid }) });
+    check('批量移动到文件夹', mv.status === 200 && mv.json.done === 2, mv.json);
+    const all1 = (await api('/api/conversations')).json.conversations;
+    const pick = (id) => all1.find((c) => c.id === id) || {};
+    check('列表带 folder 字段且落盘正确', pick(cx.id).folder === fid && pick(cy.id).folder === fid && pick(cid).folder === '',
+      [pick(cx.id).folder, pick(cy.id).folder, pick(cid).folder]);
+
+    const ar = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id], action: 'archive' }) });
+    check('批量归档', ar.json.done === 1, ar.json);
+    const act = (await api('/api/conversations?archived=0')).json.conversations.map((c) => c.id);
+    const arc = (await api('/api/conversations?archived=1')).json.conversations.map((c) => c.id);
+    check('归档后从对话页移出、出现在归档页', act.indexOf(cx.id) < 0 && arc.indexOf(cx.id) >= 0);
+    await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id], action: 'unarchive' }) });
+    const back = (await api('/api/conversations')).json.conversations.find((c) => c.id === cx.id);
+    check('恢复后回到对话页且保留文件夹归属', !!back && back.archived === false && back.folder === fid);
+
+    const badAct = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id], action: 'explode' }) });
+    check('非法批量操作被拒', badAct.status === 400, badAct.json);
+    const empty = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [], action: 'delete' }) });
+    check('空选中被拒（不是静默成功）', empty.status === 400, empty.json);
+    const badFolder = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id], action: 'move', folder: 'f_nope' }) });
+    check('移动到不存在的文件夹被拒', badFolder.status === 400, badFolder.json);
+
+    const delF = await api('/api/folders/' + fid, { method: 'DELETE' });
+    check('删文件夹报告移出的对话数', delF.status === 200 && delF.json.moved === 2, delF.json);
+    const all2 = (await api('/api/conversations')).json.conversations;
+    check('删文件夹不删对话（回到未分类）',
+      all2.length === all1.length && all2.find((c) => c.id === cx.id).folder === '' && all2.find((c) => c.id === cy.id).folder === '',
+      all2.map((c) => [c.title, c.folder]));
+
+    const dl = await api('/api/conversations/batch', { method: 'POST', body: JSON.stringify({ ids: [cx.id, cy.id], action: 'delete' }) });
+    check('批量删除', dl.json.done === 2, dl.json);
+    const all3 = (await api('/api/conversations')).json.conversations;
+    check('批量删除后只剩目标以外的一个会话', all3.length === all1.length - 2 && all3.every((c) => c.id !== cx.id && c.id !== cy.id), all3.length);
+  }
+
   console.log('\n== 3. 流式聊天 (send) ==');
   const ev1 = await sseChat({ conversationId: cid, mode: 'send', userContent: '你好，介绍一下你自己' });
   check('收到 meta 事件', ev1.some((e) => e.type === 'meta' && e.assistantMessageId));
@@ -240,6 +289,15 @@ async function main() {
     const badIndex = await api('/api/cf/problem?contestId=1799&index=B');
     check('错题号给出提示', badIndex.status === 400 && /没有题号 B/.test(badIndex.json.error)
       && /C/.test(badIndex.json.error), badIndex.json.error);
+    // 比赛号不存在 → **必须说准原因**。真实事故：用户查 2269D（2269 只有 A/B 两题），
+    // 界面一律显示"题面被 Codeforces 反爬拦截"，于是他去折腾代理和登录，问题却被掩盖。
+    const noContest = await api('/api/cf/problem?contestId=7777&index=A');
+    check('比赛号不存在 → 说清是比赛号问题（不是"被反爬拦截"）',
+      noContest.status === 400 && /比赛号写错|没有比赛 7777/.test(noContest.json.error)
+      && !/反爬拦截/.test(noContest.json.error), noContest.json.error);
+    const metaMissing = await api('/api/cf/meta?contestId=7777&index=A');
+    check('元数据兜底也查不到时如实标 notFound（不伪造"题目已登记"）',
+      metaMissing.status === 200 && metaMissing.json.notFound === true && !metaMissing.json.rating, metaMissing.json);
 
     // 恢复 OpenAI mock 配置
     const coachCfg = Object.assign({}, cfg, {
@@ -270,7 +328,9 @@ async function main() {
     const evC = await sseChat({ conversationId: convC.id, mode: 'send', userContent: '帮我讲解 Codeforces 1800C' });
     const tools = evC.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
     const toolResults = evC.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
-    // 多 Agent 编排：契约 → 题解 / 暴力 / 生成器（隔离）→ 样例校准 → 批量对拍 → 清理 → 讲解
+    // 编排（新架构）：教练是一个工具循环 —— cf_fetch 取题 → cf_verify 拉起流水线（契约/三 Agent/校准/对拍/清理）
+    // → cf_doc 出图文文档（机械校验后落盘）→ 教练自己收尾讲解。
+    // 注意：这里断言的是**步骤名**，它们由流水线作为工具事件发出来，与旧架构同名同序。
     check('编排：抽取 I/O 契约', tools.includes('harness_contract'), tools);
     check('编排：题解 Agent', tools.includes('agent_solution'), tools);
     check('编排：暴力 Agent', tools.includes('agent_brute'), tools);
@@ -278,33 +338,41 @@ async function main() {
     check('编排：官方样例校准', tools.includes('harness_samples'), tools);
     check('编排：批量对拍', tools.includes('harness_stress'), tools);
     check('编排：验证后清理临时区', tools.includes('harness_cleanup'), tools);
-    check('编排：讲解 Agent 最后执行', tools.indexOf('agent_explainer') > tools.indexOf('harness_stress'), tools);
-    check('暴力解先过样例（标尺冻结）', toolResults.some((s) => s.indexOf('暴力解官方样例全过') >= 0), toolResults);
+    check('编排：先取题面再验证（工具顺序）',
+      tools.indexOf('cf_fetch') >= 0 && tools.indexOf('cf_fetch') < tools.indexOf('cf_verify'), tools);
+    check('编排：收尾讲解在验证之后（cf_doc / 正文都在对拍之后）',
+      tools.indexOf('cf_doc') > tools.indexOf('harness_stress'), tools);
+    check('暴力解先过样例（标尺冻结）',
+      toolResults.some((s) => /暴力解已通过样例并冻结|暴力解官方样例全过/.test(s)), toolResults);
     check('对拍通过并报告组数', toolResults.some((s) => /对拍通过 \d+ 组/.test(s)), toolResults);
     const doneC = evC.find((e) => e.type === 'done');
-    // 图文讲解是默认形式：正文只有一句引子，**内容在 richDoc 文档里**（所以下面按文档断言）
+    // 图文讲解是完整讲解的交付形态：内容在 richDoc 文档里（正文只留引子与要点）
     const docC = (doneC && doneC.message.richDoc) || '';
     check('教练最终讲解产出图文文档', !!doneC && docC.length > 2000
       && /class="chapter"/.test(docC) && docC.indexOf('复杂度') >= 0,
       { docLen: docC.length, content: doneC && doneC.message.content.slice(0, 40) });
+    check('图文文档同时落盘到工作区（richDocPath 可追溯）',
+      !!(doneC && doneC.message.richDocPath && /\.html$/.test(doneC.message.richDocPath)),
+      doneC && doneC.message.richDocPath);
     check('教练讲解状态 done', doneC && doneC.message.status === 'done');
     check('教练讲解：验证通过时不走降级口径（也不自称"没把握"）',
       !!doneC && docC.indexOf('诚实降级') < 0 && docC.indexOf('没有把握') < 0);
     // ---- 实时可见性：思考过程与正文都必须**边生成边可见**（学员反馈过"全程黑屏"）----
     const idxDone = evC.findIndex((e) => e.type === 'done');
-    const docDeltas = evC.slice(0, idxDone < 0 ? evC.length : idxDone)
-      .filter((e) => e.type === 'agentDelta' && e.role === 'explainer' && e.text);
-    check('实时可见：图文文档在 done 之前就已流式写入工作台（agentDelta）', docDeltas.length >= 3, docDeltas.length);
-    const reasonBeforeDone = evC.slice(0, idxDone < 0 ? evC.length : idxDone).filter((e) => e.type === 'reasoningDelta' && e.text);
+    const beforeDone = evC.slice(0, idxDone < 0 ? evC.length : idxDone);
+    // 文档由 cf_doc 一次性交付，因此"生成过程实时可见"由**正文 delta**与**思考**承担
+    const bodyDeltas = beforeDone.filter((e) => e.type === 'delta' && e.text);
+    check('实时可见：讲解正文在 done 之前就流式下发（delta）', bodyDeltas.length >= 3, bodyDeltas.length);
+    check('实时可见：文档在 done 之前就已交付（richDoc 事件）', beforeDone.some((e) => e.type === 'richDoc'));
+    const reasonBeforeDone = beforeDone.filter((e) => e.type === 'reasoningDelta' && e.text);
     check('实时可见：思考过程实时流式下发（reasoningDelta）', reasonBeforeDone.length >= 2, reasonBeforeDone.length);
     const agentReason = evC.filter((e) => e.type === 'agentReasoning' && e.text);
     check('实时可见：子 Agent 的思考实时进工作台（agentReasoning）', agentReason.length >= 2, agentReason.length);
     check('实时可见：讲解消息落盘时带思考内容', !!(doneC && doneC.message.reasoning && doneC.message.reasoning.length > 0),
       doneC && String(doneC.message.reasoning || '').slice(0, 40));
-    // ---- 讲解结构校验：提纲 + 结构校验/图文校验都过了才允许交付 ----
-    check('讲解结构：先出提纲再写正文（先想清楚再动笔）', tools.includes('agent_plan'), tools);
-    check('讲解结构：跑结构校验（图文文档校验）', tools.includes('harness_richdoc'), tools);
-    check('讲解结构：校验通过', toolResults.some((s) => /图文文档通过校验|结构校验通过/.test(s)), toolResults.slice(-4));
+    // ---- 讲解结构：文档由 cf_doc 机械校验（白名单/标签闭合/图解数量）后才允许落盘 ----
+    check('讲解结构：文档经过机械校验并报出统计（cf_doc）',
+      tools.includes('cf_doc') && toolResults.some((s) => /文档已生成并落盘/.test(s)), toolResults.slice(-4));
     check('讲解结构：带图解与交互组件（不是纯文字）',
       (docC.match(/<svg/gi) || []).length >= 2 && /figure class="diagram"/.test(docC) && /anim-box/.test(docC),
       { svg: (docC.match(/<svg/gi) || []).length });
@@ -312,10 +380,11 @@ async function main() {
       docC.indexOf('heapq') >= 0 && docC.indexOf('<pre class="code"') >= 0);
     // ---- 本轮 token 消耗与费用估算（不依赖模型：取服务商 usage；没有就按字符估算并标注）----
     const uC = doneC.message.usage || {};
-    check('用量：统计整轮多 Agent 的调用次数与 token',
+    // 「整轮」= 工具循环自己的调用 + **工具内部验证链的子 Agent 调用**（后者才是最贵的部分）
+    check('用量：统计整轮（工具循环 + 验证链）的调用次数与 token',
       uC.calls >= 3 && uC.promptTokens > 0 && uC.completionTokens > 0, uC);
-    check('用量：按 Agent 拆分（solution / brute / explainer 都有）',
-      !!(uC.byRole && uC.byRole.solution && uC.byRole.brute && uC.byRole.explainer),
+    check('用量：按 Agent 拆分（coach / 三个代码 Agent 之一都在账上）',
+      !!(uC.byRole && uC.byRole.coach && uC.byRole.solution),
       uC.byRole && Object.keys(uC.byRole));
     check('用量：费用按单价估算（mock-gpt-4 命中内置参考价）',
       !!(uC.cost && uC.cost.amount > 0 && uC.cost.currency === 'CNY'), uC.cost);
@@ -340,11 +409,12 @@ async function main() {
     const escape = await api('/api/workspace/file?convId=' + convC.id + '&name=..%2Fconfig.json');
     check('工作区拒绝目录穿越', escape.status >= 400, escape.status);
 
-    // 追问：解释型问题 → 路由判断为 explain → 不重跑验证，直接重新讲解
+    // 追问：解释型问题 → 教练自己判断"上下文里已经有题面与代码"，**一个工具都不调**直接答
+    // （旧架构靠 harness_router 判路由；新架构里这个判断就是模型自己的活，所以断言改成看**结果**）
     const convC3 = await sseChat({ conversationId: convC.id, mode: 'send', userContent: '第 12 行为什么这么写？' });
     const tools3 = convC3.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
-    check('追问：路由判断参与', tools3.includes('harness_router'), tools3);
-    check('追问复用已验证产物（不重跑对拍）', tools3.includes('harness_overview') && !tools3.includes('harness_stress'), tools3);
+    check('追问：不重跑验证链（追问由教练自行判断，不再路由到流水线）',
+      !tools3.includes('harness_stress') && !tools3.includes('cf_verify'), tools3);
     const done3 = convC3.find((e) => e.type === 'done') || {};
     check('追问仍有讲解输出（图文文档或文字都算）',
       !!((done3.message && done3.message.richDoc && done3.message.richDoc.length > 1000)
@@ -358,7 +428,12 @@ async function main() {
     const toolsH = evH.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
     const resultsH = evH.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     check('思路提示也跑全量验证（含对拍）', toolsH.includes('harness_stress'), toolsH);
-    check('思路提示讲解等级降为 L1', resultsH.some((s) => s.indexOf('等级 L1') >= 0), resultsH);
+    // 意图（思路提示）必须**真的影响交付**：只给方向，不能把完整可提交代码塞给学员。
+    // 旧架构靠"讲解等级降到 L1"实现，新架构里由教练自己按意图裁量 —— 所以断言改成看正文。
+    const doneH = evH.find((e) => e.type === 'done') || {};
+    check('思路提示：只给方向，不贴完整可提交代码',
+      !!doneH.message && String(doneH.message.content || '').indexOf('```') < 0,
+      String((doneH.message || {}).content || '').slice(0, 80));
     check('同题缓存：复用已验证的暴力解与生成器', resultsH.some((s) => s.indexOf('复用同题已验证的暴力解') >= 0)
       || resultsH.some((s) => s.indexOf('复用同题缓存产物') >= 0), resultsH);
     const wsH = (await api('/api/workspace?convId=' + convH.id)).json;
@@ -366,6 +441,96 @@ async function main() {
     check('同题缓存：已验证标尺已入缓存', (wsH.cache || []).some((f) => /^brute\./.test(f.name)), (wsH.cache || []).map((f) => f.name));
     check('思路提示同样产出已验证题解', wsH.verification && wsH.verification.status === 'ok', wsH.verification);
     await api('/api/conversations/' + convH.id, { method: 'DELETE' });
+
+    // ===== 意图「自动」（默认）：由模型自己判断这次要哪一种，不再让用户先选 =====
+    const convAuto = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    check('新会话默认真·自动意图', convAuto.intent === 'auto', convAuto.intent);
+    const autoPatch = await api('/api/conversations/' + convAuto.id, { method: 'PATCH', body: JSON.stringify({ intent: 'auto' }) });
+    check('自动意图可以显式设回（不会被回落成别的值）', autoPatch.json && autoPatch.json.intent === 'auto', autoPatch.json && autoPatch.json.intent);
+    await api('/api/conversations/' + convAuto.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python' }) });
+    const evAuto = await sseChat({ conversationId: convAuto.id, mode: 'send', userContent: 'CF 1800C 给我点思路' });
+    const toolsAuto = evAuto.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
+    const doneAuto = evAuto.find((e) => e.type === 'done') || {};
+    // 判据看**交付形态**：自动判定为"思路提示"时不该出图文文档、也不该甩完整代码
+    check('自动意图：只要方向的问法 → 不给完整代码、不产出图文文档',
+      !!doneAuto.message && !doneAuto.message.richDoc && String(doneAuto.message.content || '').indexOf('```') < 0,
+      { rich: !!(doneAuto.message || {}).richDoc, len: String((doneAuto.message || {}).content || '').length });
+    check('自动意图：照样跑完整验证（不是省掉对拍）', toolsAuto.includes('harness_stress'), toolsAuto);
+    await api('/api/conversations/' + convAuto.id, { method: 'DELETE' });
+
+    // ===== 粘贴题面的默认路径：题面已在会话里 → 不联网取、样例当场可用、直接完整讲解 =====
+    // 三条真实事故都固化在这里：
+    //   ① 用户粘了题面，教练还去 cf_fetch 取一遍（白等一轮往返，样例反而变少）；
+    //   ② cf_run 用错调用形状，永远回"当前题目没有可用样例"（模型白试 4 次 → 重跑整条链）；
+    //   ③ 完整讲解只给文字不给图文文档（图文是核心交付）。
+    const convStmt = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    await api('/api/conversations/' + convStmt.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python' }) });
+    const pastedStatement = [
+      '【Codeforces 1800C】C. Powering the Hero (hard version)',
+      '时限：2 seconds · 内存：256 megabytes',
+      '',
+      'There are n cards in a deck. Each card has a positive number or 0.',
+      'In one move you take the top card: a positive number goes onto the top of your bonus stack,',
+      'while a 0 lets you take the maximum bonus from the stack and add it to your score.',
+      'The deck is processed from top to bottom and you may also skip cards entirely.',
+      '',
+      '输入格式',
+      'The first line contains t (1 <= t <= 10^4) — the number of test cases.',
+      'Each test case starts with n (1 <= n <= 2*10^5) and then a line of n integers.',
+      'It is guaranteed that the sum of n over all test cases does not exceed 2*10^5.',
+      '',
+      '输出格式',
+      'For each test case print one integer — the maximum score you can achieve.',
+      '',
+      '样例：',
+      '输入 1：',
+      '2',
+      '3',
+      '3 3 0',
+      '2',
+      '5 0',
+      '输出 1：',
+      '3',
+      '5'
+    ].join('\n');
+    const evStmt = await sseChat({ conversationId: convStmt.id, mode: 'send', userContent: pastedStatement });
+    const toolsStmt = evStmt.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
+    const resultsStmt = evStmt.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
+    check('粘题面：不再联网取题（题面已在会话里）', !toolsStmt.includes('cf_fetch'), toolsStmt);
+    check('粘题面：照样跑完整验证', toolsStmt.includes('harness_stress'), toolsStmt);
+    // cf_run 曾经因为调用形状过期而永远失败 —— 这条断言就是它的看门人
+    check('cf_run 真的能跑（不再回"当前题目没有可用样例"）',
+      resultsStmt.some((s) => /【运行结果】|【运行失败】/.test(s))
+      && !resultsStmt.some((s) => /没有可用样例/.test(s)),
+      resultsStmt.filter((s) => /运行|样例/.test(s)).slice(0, 3));
+    const doneStmt = evStmt.find((e) => e.type === 'done') || {};
+    check('粘题面 = 完整讲解：交付图文文档', !!(doneStmt.message && doneStmt.message.richDoc),
+      { rich: !!((doneStmt.message || {}).richDoc) });
+    const convStmtAfter = (await api('/api/conversations/' + convStmt.id)).json;
+    check('粘题面：题面与样例当场登记进会话（不再依赖联网取）',
+      String(convStmtAfter.statementText || '').length > 300 && (convStmtAfter.cfProblemSamples || []).length >= 1,
+      { stmt: String(convStmtAfter.statementText || '').length, samples: (convStmtAfter.cfProblemSamples || []).length });
+    await api('/api/conversations/' + convStmt.id, { method: 'DELETE' });
+
+    // ===== 同一道题再问一遍（工作区已有验证通过产物）=====
+    // 真实事故：第二轮正确地跳过了重复对拍（cf-explain §0），却**连文档也一起跳过了** ——
+    // 用户拿到的是又一段纯文字（"依旧没有图"）。判据因此必须是"这题可信吗"，而不是
+    // "这一轮有没有重新跑一遍验证"。
+    const convAgain = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    await api('/api/conversations/' + convAgain.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python' }) });
+    const evAgain = await sseChat({
+      conversationId: convAgain.id, mode: 'send',
+      userContent: 'CF 1800C 再给我讲一遍（题面我已经贴过了，这题之前验证过）'
+    });
+    const toolsAgain = evAgain.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
+    const doneAgain = evAgain.find((e) => e.type === 'done') || {};
+    check('再问一遍时：先看工作区（决定要不要重跑）', toolsAgain.includes('cf_workspace'), toolsAgain);
+    // 注意：这里不硬断言"没有 harness_stress"。工作区按**题号**共享，新会话只有在 cfProblem 已登记
+    // （客户端「从 CF 获取题面」那条路会登记）时才命中同一个工作区；这个用例是纯粘贴，
+    // 命中与否取决于题面登记时机。真正要守住的是下面这条：**跳过对拍也必须交付文档**。
+    check('复用已验证结论时：**图文文档照样交付**（跳过对拍 ≠ 跳过文档）',
+      !!(doneAgain.message && doneAgain.message.richDoc), { rich: !!((doneAgain.message || {}).richDoc), tools: toolsAgain });
+    await api('/api/conversations/' + convAgain.id, { method: 'DELETE' });
 
     // 代码评估（只提做法、没贴代码）：问「用 XX 能写吗」→ 先做可行性评估，可行则复用缓存标尺重跑题解
     const evI = await sseChat({ conversationId: convC.id, mode: 'send', userContent: '这题用 Floyd 能写吗？' });
@@ -409,10 +574,13 @@ async function main() {
       wsF.verification && { wallMs: wsF.verification.wallMs, calls: wsF.verification.agentCalls });
     check('决策轨迹：记录每次调用的模型名', (wsF.trace || []).every((t) => typeof t.model === 'string') && (wsF.trace || []).length >= 4,
       (wsF.trace || []).map((t) => t.model));
-    check('历史消息带步骤 chip（重渲染不丢）', !!doneF && Array.isArray(doneF.message.tools) && doneF.message.tools.length >= 5,
+    // 步骤 chip：新架构下一条 chip = 一次**工具调用**（cf_fetch / cf_verify / cf_doc …）；
+    // 流水线内部的每一步在 Agent 工作台里（agentStart/agentDelta/agentEnd），两者分工不同
+    check('历史消息带步骤 chip（重渲染不丢）', !!doneF && Array.isArray(doneF.message.tools) && doneF.message.tools.length >= 3,
       doneF && (doneF.message.tools || []).map((t) => t.name));
     check('决策轨迹已记录（可展开时间线）', Array.isArray(wsF.trace) && wsF.trace.length >= 4
-      && wsF.trace.some((t) => t.role === 'solution') && wsF.trace.some((t) => t.role === 'explainer'), (wsF.trace || []).length);
+      && wsF.trace.some((t) => t.role === 'solution') && wsF.trace.some((t) => t.role === 'brute' || t.role === 'gen'),
+      (wsF.trace || []).map((t) => t.role));
     await api('/api/conversations/' + convF.id, { method: 'DELETE' });
 
     // 暴力解写不出 → 无标尺降级（只做官方样例校验，并如实标注）
@@ -462,22 +630,23 @@ async function main() {
       && (wsCb.verification.solRewrites || 0) === 0, wsCb.verification);
     await api('/api/conversations/' + convCb.id, { method: 'DELETE' });
 
-    // 讲解不合格（缺手算演示/组件没闭合/全是"显然"）→ 结构校验拦下 + 定向修复 + 机械兜底
+    // 图文文档校验（mock-bad-explain）：第一次交的文档**没有图** → 必须被机械校验拦下，
+    // 教练按提示重写一次 → 修正版通过校验并交付。
+    // 为什么断言改成这样：讲解以前由流水线的讲解 Agent 写、由 harness_richdoc 校验；
+    // 现在由教练写、由 `cf_doc` 校验 —— 闸门还在，只是换了执行者。
     const convBad = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
     await api('/api/conversations/' + convBad.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python', model: 'mock-bad-explain' }) });
     const evBad = await sseChat({ conversationId: convBad.id, mode: 'send', userContent: 'CF 1800C 讲解一下' });
     const toolsBad = evBad.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
     const resultsBad = evBad.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     const doneBad = evBad.find((e) => e.type === 'done');
-    check('讲解结构：不合格讲解被拦下（不是直接交付）', resultsBad.some((s) => /结构校验未通过|结构校验仍有问题/.test(s)), resultsBad.slice(-4));
-    // 定向修复是一次额外的 agent 调用（不是新的阶段 chip），所以按 agentStart 事件数判定
-    const explainerRuns = evBad.filter((e) => e.type === 'agentStart' && e.role === 'explainer').length;
-    check('讲解结构：跑了一次定向修复（额外调用讲解 Agent）', explainerRuns >= 2, explainerRuns);
-    if (doneBad) {
-      // 修复版仍不合格 → 必须机械兜底：未闭合的组件标记绝不能出现在给学员的内容里
-      const bad = doneBad.message.content.match(/<viz-[a-z]+[^>]*>[^<]*$/m) || /<viz-steps title="没闭合/.test(doneBad.message.content);
-      check('讲解结构：机械兜底（剥离未闭合的裸标记）', !bad, doneBad.message.content.slice(-120));
-    }
+    check('图文校验：没有图的文档被拦下（不是直接交付）',
+      resultsBad.some((s) => /没有任何 SVG 图解|未通过校验/.test(s)), resultsBad.slice(0, 4));
+    check('图文校验：按校验提示重写了一次（cf_doc 被调用 ≥2 次）',
+      toolsBad.filter((n) => n === 'cf_doc').length >= 2, toolsBad);
+    check('图文校验：修正版通过校验并交付（消息带 richDoc）',
+      !!(doneBad && doneBad.message.richDoc && doneBad.message.richDoc.length > 1000),
+      doneBad && String(doneBad.message.richDoc || '').length);
     await api('/api/conversations/' + convBad.id, { method: 'DELETE' });
 
     // ===== 粘贴题面（非 CF 标准格式）=====
@@ -506,6 +675,43 @@ async function main() {
       toolsPaste.includes('harness_stress') && resultsPaste.some((s) => /对拍通过 \d+ 组/.test(s)), resultsPaste.slice(-3));
     check('粘贴题面：验证状态为 ok', !!(wsPaste.verification && wsPaste.verification.status === 'ok'), wsPaste.verification);
     await api('/api/conversations/' + convPaste.id, { method: 'DELETE' });
+
+    // ===== 删除会话 = 全删（含本题验证缓存），并且要如实报告 =====
+    // 用户的原话："我在 UI 中删除了这个对话为什么还能有缓存呢？我删除肯定是全删啊"
+    // —— 缓存按题号共享，如果不跟着删，既不符删除语义，也没法测"重新对拍"。
+    const delConv = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    await api('/api/conversations/' + delConv.id, { method: 'PATCH', body: JSON.stringify({ cfProblem: { contestId: 4242, index: 'Z', title: 'Z. Cache Test' } }) });
+    // 造一个"已验证"的工作区（不走真链路，直接写 meta，保持用例快）
+    const wsRoot = path.join(((await api('/api/info')).json || {}).dataDir || '', 'workspace');
+    const purgeKey = 'cf-4242Z';
+    const metaFile = path.join(wsRoot, purgeKey, 'meta.json');
+    fs.mkdirSync(path.dirname(metaFile), { recursive: true });
+    fs.writeFileSync(metaFile, JSON.stringify({ verification: { status: 'ok', samples: 1, iterations: 50 } }), 'utf8');
+    const delRes = await api('/api/conversations/' + delConv.id, { method: 'DELETE', body: JSON.stringify({ forceWorkspace: true }) });
+    check('删对话：连本题验证缓存一起删（全删语义）',
+      delRes.status === 200 && delRes.json.workspaceCleared === true && !fs.existsSync(metaFile),
+      delRes.json);
+
+    // 本题缓存被别的对话共用时：保留缓存但**如实说明**（不能假装删干净了）
+    const sharedA = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    const sharedB = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+    for (const cv of [sharedA, sharedB]) {
+      await api('/api/conversations/' + cv.id, { method: 'PATCH', body: JSON.stringify({ cfProblem: { contestId: 4243, index: 'Y', title: 'Y. Shared' } }) });
+    }
+    const sharedMeta = path.join(wsRoot, 'cf-4243Y', 'meta.json');
+    fs.mkdirSync(path.dirname(sharedMeta), { recursive: true });
+    fs.writeFileSync(sharedMeta, JSON.stringify({ verification: { status: 'ok', samples: 1, iterations: 50 } }), 'utf8');
+    const delShared = await api('/api/conversations/' + sharedA.id, { method: 'DELETE' });
+    check('删对话：缓存被别的对话共用 → 保留并如实报告共用者',
+      delShared.status === 200 && delShared.json.workspaceCleared === false
+      && delShared.json.workspaceKept === 'cf-4243Y' && (delShared.json.sharedWith || []).indexOf(sharedB.id) >= 0,
+      delShared.json);
+    // 显式清缓存的口子（UI 的「重新对拍」按钮走的接口）——不必靠删对话来测链路
+    const purge = await api('/api/workspace/purge', { method: 'POST', body: JSON.stringify({ convId: sharedB.id }) });
+    check('重新对拍：清掉本题缓存（下次从零跑验证链）',
+      purge.status === 200 && purge.json.key === 'cf-4243Y' && purge.json.removed === true && !fs.existsSync(sharedMeta),
+      purge.json);
+    await api('/api/conversations/' + sharedB.id, { method: 'DELETE' });
 
     // ===== 没有样例：手算锚点 Agent 造极端小样例并手算答案 =====
     const convAnchor = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
@@ -669,15 +875,22 @@ async function main() {
     check('停止：没有残留"运行中"的步骤 chip（界面不再转圈）', stuckChips.length === 0, stuckChips);
     await api('/api/conversations/' + convStop.id, { method: 'DELETE' });
 
-    // 「没听懂」→ 换讲法（手算演示），而不是把上次的话再说一遍
+    // 「没听懂」→ 换讲法（更小的例子、一步步手算），而不是把上次的话再说一遍。
+    // 旧架构靠 harness_router 判出 rethink；新架构里"要不要换讲法"是教练自己的判断
+    // （cf-explain 技能里写明了这条），所以断言改成看**结果**：没重跑链路，且回答确实换了说法。
     const convRT = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
     await api('/api/conversations/' + convRT.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python', intent: 'full' }) });
     await sseChat({ conversationId: convRT.id, mode: 'send', userContent: 'CF 1800C 讲解一下' });
     const evRT = await sseChat({ conversationId: convRT.id, mode: 'send', userContent: '我没听懂，能不能换个说法' });
     const resultsRT = evRT.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     const toolsRT = evRT.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
-    check('换讲法：路由识别为「没听懂」→ 换一种讲法', resultsRT.some((s) => s.indexOf('换一种讲法') >= 0), resultsRT.slice(0, 3));
+    const msgsRT = ((await api('/api/conversations/' + convRT.id)).json.messages || []).filter((m) => m.role === 'assistant');
+    check('换讲法：换了一种说法（不是把上一轮的话再说一遍）',
+      msgsRT.length >= 2 && String(msgsRT[1].content || '').length > 20
+      && String(msgsRT[1].content || '') !== String(msgsRT[0].content || ''),
+      { prevLen: String((msgsRT[0] || {}).content || '').length, nowLen: String((msgsRT[1] || {}).content || '').length });
     check('换讲法：不重跑对拍链路（省 token）', !toolsRT.includes('harness_stress'), toolsRT);
+    check('换讲法：这一轮一个工具都没调（纯对话）', resultsRT.length === 0 && toolsRT.length === 0, { toolsRT, resultsRT: resultsRT.slice(0, 2) });
     await api('/api/conversations/' + convRT.id, { method: 'DELETE' });
     const convD = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
     await api('/api/conversations/' + convD.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python', intent: 'debug' }) });
@@ -709,6 +922,7 @@ async function main() {
     const resultsH2 = evH2.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     check('代码体检：只针对用户代码（debug 意图才跑）', toolsH2.includes('harness_userhealth'), toolsH2);
     check('代码体检：抓出用户代码的语法错误', resultsH2.some((s) => s.indexOf('你的代码存在编译/语法错误') >= 0), resultsH2);
+    // 注意：tools 是**正常讲解**那条会话的步骤；它里面不该出现"用户代码体检"这类只对用户代码跑的步骤
     check('代码体检：正常流程不跑体检（只跑用户代码）', !tools.includes('harness_userhealth'), tools);
     const wsH2 = (await api('/api/workspace?convId=' + convH2.id)).json;
     check('代码体检：结论写进迭代轨迹', (wsH2.meta.trajectory || []).some((t) => /^user-/.test(t.kind)),
@@ -751,25 +965,26 @@ async function main() {
     const mergedIntent = await api('/api/conversations/' + convC.id, { method: 'PATCH', body: JSON.stringify({ intent: 'idea' }) });
     check('已合并的意图回落为代码评估', mergedIntent.status === 200 && mergedIntent.json.intent === 'debug', mergedIntent.json && mergedIntent.json.intent);
     await api('/api/conversations/' + convC.id, { method: 'PATCH', body: JSON.stringify({ intent: 'debug' }) });
-    // 图文讲解是**默认交付形式**（不再有开关）：完整讲解 / 代码评估自动产出 HTML 文档，
-    // 会话上的 rich 字段已不再参与决策（这里刻意设成 false 来证明它不影响结果）
+    // 图文讲解是完整讲解的交付形态（不再有开关）：会话上的 rich 字段已不参与决策
+    // （这里刻意设成 false 来证明它不影响结果）
     await api('/api/conversations/' + convC.id, { method: 'PATCH', body: JSON.stringify({ rich: false }) });
     const evR = await sseChat({ conversationId: convC.id, mode: 'send', userContent: 'CF 1800C 用图文讲解一遍' });
     const toolsR = evR.filter((e) => e.type === 'tool').map((e) => (e.calls || []).map((c) => c.name)).flat();
     const resR = evR.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     const doneR = evR.find((e) => e.type === 'done');
     check('图文讲解：没有开关也照样产出文档（rich=false 只影响老字段，不影响交付形式）',
-      toolsR.includes('harness_richdoc') && resR.some((s) => /图文文档通过校验/.test(s)), resR.slice(-4));
+      toolsR.includes('cf_doc') && resR.some((s) => /文档已生成并落盘/.test(s)), resR.slice(-4));
     check('图文讲解：消息带 richDoc', !!(doneR && doneR.message.richDoc && doneR.message.richDoc.length > 2000),
       doneR && (doneR.message.richDoc || '').length);
     check('图文讲解：文档含 CSP + 设计系统 + 交互组件',
       !!(doneR && /Content-Security-Policy/.test(doneR.message.richDoc) && /class="chapter"/.test(doneR.message.richDoc)
         && /anim-box/.test(doneR.message.richDoc) && /figure class="diagram"/.test(doneR.message.richDoc)));
-    // 图文文档的增量只喂工作台（不往消息正文里塞裸 HTML）
-    check('图文讲解：文档生成过程实时可见（agentDelta 有内容），且没往正文塞 HTML',
-      evR.some((e) => e.type === 'agentDelta' && e.role === 'explainer' && String(e.text || '').length > 0)
-      && !evR.some((e) => e.type === 'delta' && /```html|<div class="wrap"/.test(String(e.text || ''))),
-      evR.filter((e) => e.type === 'agentDelta' && e.role === 'explainer').length);
+    // 文档是**一次性交付**的（cf_doc 校验通过才落盘），所以正文里绝不会出现裸 HTML，
+    // 而"过程可见"由正文 delta 与思考流承担（旧架构靠讲解 Agent 的 agentDelta 边写边推）
+    check('图文讲解：正文里不塞裸 HTML，且生成过程有实时输出',
+      !evR.some((e) => e.type === 'delta' && /```html|<div class="wrap"/.test(String(e.text || '')))
+      && (evR.filter((e) => e.type === 'delta').length >= 3 || evR.some((e) => e.type === 'richDoc')),
+      evR.filter((e) => e.type === 'delta').length);
     const convR = (await api('/api/conversations/' + convC.id)).json;
     const lastR = convR.messages[convR.messages.length - 1];
     check('图文讲解：文档随消息持久化', !!(lastR && lastR.richDoc && lastR.richDoc.length > 2000));
@@ -790,12 +1005,12 @@ async function main() {
     const noticesBadRich = evBadRich.filter((e) => e.type === 'notice').map((e) => e.message);
     const doneBadRich = evBadRich.find((e) => e.type === 'done');
     const wsBadRich = (await api('/api/workspace?convId=' + convBadRich.id)).json;
-    check('富讲解失败：回落时把**原因**写进步骤 chip',
-      resBadRich.some((s) => /回落为普通 Markdown 讲解｜原因：/.test(s)), resBadRich.slice(-4));
+    check('富讲解失败：回落时把**原因**写进工具结果（不是一句"失败了"）',
+      resBadRich.some((s) => /未通过校验/.test(s) && /没有任何 SVG 图解|校验错误/.test(s)), resBadRich.slice(-4));
     check('富讲解失败：给用户发可见提醒（不是只留在内部日志）',
       noticesBadRich.some((s) => /图文文档没通过校验/.test(s)), noticesBadRich);
     check('富讲解失败：被拒的文档留在工作区（可诊断）',
-      (wsBadRich.files || []).some((f) => /^richdoc-attempt\d\.html$/.test(f.name)),
+      (wsBadRich.files || []).some((f) => /^richdoc-rejected-/.test(f.name)),
       (wsBadRich.files || []).map((f) => f.name));
     check('富讲解失败：本次仍交付了 Markdown 讲解（不是空白）',
       !!(doneBadRich && doneBadRich.message.content.length > 200) && !doneBadRich.message.richDoc,
@@ -811,11 +1026,14 @@ async function main() {
     const wsSoft = (await api('/api/workspace?convId=' + convSoft.id)).json;
     const trajSoft = (wsSoft.meta && wsSoft.meta.trajectory) || [];
     const docSoft = (doneSoft && doneSoft.message.richDoc) || '';
+    const resSoft = evSoft.filter((e) => e.type === 'toolResult').map((e) => (e.results || []).map((r) => r.summary)).flat();
     check('富讲解容错：图解写成 <div class="card"><svg> 也能交付（宽容计数，不回落）',
-      docSoft.length > 2000 && (docSoft.match(/<svg/gi) || []).length >= 2,
+      // 判据用"结构 + 图数量"而不是固定字数：这份夹具比标准文档短，卡字数会误判
+      docSoft.length > 1200 && (docSoft.match(/<svg/gi) || []).length >= 2 && /class="chapter"/.test(docSoft),
       { docLen: docSoft.length, svgs: (docSoft.match(/<svg/gi) || []).length });
+    // 末尾少 </div> → cf_doc 里先做一次**机械挽救**（净化 + 补齐闭合标签）再验一次，通过就交付
     check('富讲解容错：末尾少 </div> 由机械补齐修好（不再整份作废）',
-      trajSoft.some((t) => t.kind === 'richdoc-sanitized'), trajSoft.map((t) => t.kind));
+      resSoft.some((s) => /机械修正后交付|机械补齐后交付/.test(s)), resSoft.slice(-3));
     check('富讲解容错：没有回落 Markdown（richdoc-fallback 不出现）',
       !trajSoft.some((t) => t.kind === 'richdoc-fallback'), trajSoft.map((t) => t.kind));
     await api('/api/conversations/' + convSoft.id, { method: 'DELETE' });

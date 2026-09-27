@@ -451,8 +451,8 @@ async function main() {
       + '<section class="chapter"><h2><span class="num">1</span>题意</h2></section>'
       + '<section class="chapter"><h2><span class="num">2</span>思路</h2></section>'
       + '<section class="chapter"><h2><span class="num">3</span>复杂度</h2></section>'
-      + '<figure class="diagram"><svg viewBox="0 0 200 60"><text x="60" y="30">a</text></svg><figcaption>图1</figcaption></figure>'
-      + '<figure class="diagram"><svg viewBox="0 0 200 60"><text x="60" y="30">b</text></svg><figcaption>图2</figcaption></figure>'
+      + '<figure class="diagram"><svg viewBox="0 0 200 60"><line x1="10" y1="30" x2="190" y2="30"/><text x="60" y="30">a</text></svg><figcaption>图1</figcaption></figure>'
+      + '<figure class="diagram"><svg viewBox="0 0 200 60"><line x1="10" y1="30" x2="190" y2="30"/><text x="60" y="30">b</text></svg><figcaption>图2</figcaption></figure>'
       + '<div class="anim-box" data-anim="sequence"><span class="tok">1</span></div>'
       + '<div class="callout key"><span class="ttl">核心</span>要点</div></div>';
     const vGood = richdoc.validate(good);
@@ -475,8 +475,8 @@ async function main() {
      * 模型写图文文档最常犯的三类毛病，都不该让整份文档作废、回落到没有图的 Markdown：
      *   夹带 <script>/外链、末尾少 </div>、图解没写成 <figure class="diagram">（图其实画了）。 */
     const messy = '<div class="wrap"><section class="chapter"><h2>1</h2><p>x</p>'
-      + '<div class="card"><svg viewBox="0 0 760 300"><text x="10" y="20">a</text></svg></div>'
-      + '<div class="card"><svg viewBox="0 0 600 200"><text x="10" y="20">b</text></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 760 300"><line x1="10" y1="40" x2="700" y2="40"/><text x="10" y="20">a</text></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 600 200"><line x1="10" y1="40" x2="560" y2="40"/><text x="10" y="20">b</text></svg></div>'
       + '<div class="anim-box" data-anim="sequence"><span class="tok">1</span></div>'
       + '<script>alert(1)</script><img src="https://evil.example/x.png">'
       + '<a href="http://evil.example">外链</a><p onclick="steal()">带内联事件</p>';
@@ -493,8 +493,8 @@ async function main() {
       { errors: vMessy1.errors, stats: vMessy1.stats });
 
     const noClose = '<div class="wrap"><section class="chapter"><h2>1</h2><p>x</p>'
-      + '<figure class="diagram"><svg viewBox="0 0 500 200"><text x="10" y="20">a</text></svg></figure>'
-      + '<figure class="diagram"><svg viewBox="0 0 500 200"><text x="10" y="20">b</text></svg></figure>';
+      + '<figure class="diagram"><svg viewBox="0 0 500 200"><line x1="10" y1="60" x2="480" y2="60"/><text x="10" y="20">a</text></svg></figure>'
+      + '<figure class="diagram"><svg viewBox="0 0 500 200"><line x1="10" y1="60" x2="480" y2="60"/><text x="10" y="20">b</text></svg></figure>';
     const fixedClose = richdoc.sanitize(noClose);
     check('富文档：末尾缺闭合标签 → 机械补齐（而不是整份作废）',
       richdoc.validate(noClose).ok === false && richdoc.validate(fixedClose.html).ok === true
@@ -503,19 +503,31 @@ async function main() {
     // 图解没用 figure.diagram：模型常写成 <div class="card"><svg/></div> —— 图确实画了，不能判不合格
     const altMarkup = '<div class="wrap"><section class="chapter"><h2>1</h2></section>'
       + '<section class="chapter"><h2>2</h2></section><section class="chapter"><h2>3</h2></section>'
-      + '<div class="card"><svg viewBox="0 0 760 240"><text x="10" y="20">a</text></svg></div>'
-      + '<div class="card"><svg viewBox="0 0 760 240"><text x="10" y="20">b</text></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 760 240"><line x1="10" y1="40" x2="700" y2="40"/><text x="10" y="20">a</text></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 760 240"><line x1="10" y1="40" x2="700" y2="40"/><text x="10" y="20">b</text></svg></div>'
       + '<div class="anim-box" data-anim="bars"><div class="bars"></div></div></div>';
     const vAlt = richdoc.validate(altMarkup);
     check('富文档：图解写成 <div class="card"><svg> 也算数（宽容计数，不因 class 名而废掉图）',
       vAlt.ok === true && vAlt.stats.figures >= 2, { errors: vAlt.errors, stats: vAlt.stats });
 
-    // 真的没有图 → 仍然拦下（这时回落 Markdown 才是诚实的选择）
+    // 没有图 → **判失败**（图文讲解是核心形态，一张图都没有就不是"图文"）。
+    // 曾经的弯路：为了不逼模型凑图，把这条降级成提醒 —— 那是把问题修错了地方。
+    // 凑图是"必要性判断"的问题，解法是在提示词里教"哪里值得画"（见 lib/harness.js 的 richGuide），
+    // 而不是撤掉交付条件。所以这里恢复硬断言。
     const noFigure = '<div class="wrap"><section class="chapter"><h2>1</h2><p>只有文字</p></section></div>';
-    check('富文档：确实没有图 → still 拦下（避免交付"图文"却没有图）',
-      richdoc.validate(noFigure).ok === false
-      && richdoc.validate(noFigure).errors.some((e) => /没有任何 SVG 图解/.test(e)),
-      richdoc.validate(noFigure).errors);
+    const vNoFig = richdoc.validate(noFigure);
+    check('富文档：确实没有图 → 判失败（图文讲解不接受"一张图都没有"）',
+      vNoFig.ok === false && vNoFig.errors.some((e) => /没有任何真正的 SVG 图解/.test(e)),
+      { errors: vNoFig.errors, warnings: vNoFig.warnings });
+
+    // 只有 1 张图 → 通过，但要提醒"通常 2 张"（提醒不判失败：第二张只在真的还有一处说不清时才画）
+    const oneFigure = '<div class="wrap"><section class="chapter"><h2>1</h2><p>文字</p>'
+      + '<figure class="diagram"><svg viewBox="0 0 760 240"><line x1="10" y1="40" x2="700" y2="40"/><text x="10" y="20">a</text></svg>'
+      + '<figcaption><b>图 1</b>｜状态怎么变</figcaption></figure></section></div>';
+    const vOneFig = richdoc.validate(oneFigure);
+    check('富文档：只有 1 张图 → 通过，但提醒还可以有第二张（不强制凑图）',
+      vOneFig.ok === true && vOneFig.warnings.some((e) => /只有 1 张图解/.test(e)),
+      { errors: vOneFig.errors, warnings: vOneFig.warnings });
 
     // 小图标不算图解（16px 的箭头不该被当成"图"）
     const iconOnly = '<div class="wrap"><section class="chapter"><h2>1</h2></section>'
@@ -533,8 +545,8 @@ async function main() {
       + '<p>复杂度 $O(\\sum n)$，手算 $n=5,\\ s=\\texttt{"01"}$，下界 $\\lfloor n/2 \\rfloor \\le n$。</p>'
       + '<p>$$T(n)=\\sum_{i=1}^{n} a_i$$</p>'
       + '<p>```python print(1) ```</p>'
-      + '<div class="card"><svg viewBox="0 0 700 220"><text x="10" y="20">a</text></svg></div>'
-      + '<div class="card"><svg viewBox="0 0 640 200"></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 700 220"><line x1="10" y1="40" x2="680" y2="40"/><text x="10" y="20">a</text></svg></div>'
+      + '<div class="card"><svg viewBox="0 0 640 200"><line x1="10" y1="40" x2="600" y2="40"/></svg></div>'
       + '<div class="anim-box" data-anim="sequence"></div></section></div>';
     check('富文档：LaTeX 会被校验器点名（给出"改用 .formula"的修复提醒）',
       richdoc.validate(texDoc).warnings.some((w) => /LaTeX/.test(w)), richdoc.validate(texDoc).warnings);

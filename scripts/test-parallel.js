@@ -115,7 +115,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'parallel-test',
-    callAgent, tiers: [4, 6], perTier: 3, maxStressMs: 20000,
+    callAgent, tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   const elapsed = Date.now() - t0;
@@ -160,7 +160,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'parallel-test2',
-    callAgent: callAgent2, tiers: [4, 6], perTier: 3, maxStressMs: 20000,
+    callAgent: callAgent2, tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   ok('某一路 429 后自动重试，暴力解仍然拿到',
@@ -187,7 +187,7 @@ const callAgent = async (opts) => {
       samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
       workspace, wsKey: 'cancel-pre', signal: pre.signal,
       callAgent: async (o) => { preCalls++; return callAgent(o); },
-      tiers: [4, 6], perTier: 3, maxStressMs: 20000,
+      tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
       emit: () => {}, log: () => {}
     });
   } catch (e) { preErr = e; }
@@ -218,7 +218,7 @@ const callAgent = async (opts) => {
         if (!stoppedOnce) { stoppedOnce = true; mid.abort(); }
         return t;
       },
-      tiers: [4, 6], perTier: 3, maxStressMs: 20000,
+      tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
       emit: () => {}, log: () => {}
     });
   } catch (e) { midErr = e; }
@@ -241,10 +241,12 @@ const callAgent = async (opts) => {
     '<div class="wrap">',
     '  <div class="hero"><h1>牌堆贪心</h1></div>',
     '  <section class="chapter"><h2><span class="num">1</span>思路</h2><p>大根堆贪心。</p>',
-    '    <div class="card"><svg viewBox="0 0 700 220"><text x="20" y="40">正数入堆</text></svg><p>图 1｜扫描</p></div>',
+    // 图解要**真的是一张图**：richdoc 现在要求 svg 里有连线/箭头（"表格不算图"），
+    // 所以夹具里也得有 line —— 只放 rect+text 的那种网格已经不被算作图解了。
+    '    <div class="card"><svg viewBox="0 0 700 220"><line x1="20" y1="120" x2="660" y2="120" stroke="#6b7899"/><text x="20" y="40">正数入堆</text></svg><p>图 1｜扫描</p></div>',
     '  </section>',
     '  <section class="chapter"><h2><span class="num">2</span>复杂度</h2>',
-    '    <div class="card"><svg viewBox="0 0 640 200"><text x="20" y="40">O(n log n)</text></svg><p>图 2｜对比</p></div>',
+    '    <div class="card"><svg viewBox="0 0 640 200"><line x1="20" y1="120" x2="600" y2="120" stroke="#6b7899"/><text x="20" y="40">O(n log n)</text></svg><p>图 2｜对比</p></div>',
     '  </section>',
     '  <section class="chapter"><h2><span class="num">3</span>代码</h2><pre class="code">heapq</pre></section>'
     // 故意不写收尾的 </div>
@@ -259,7 +261,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', rich: true, statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'rich-soft',
-    callAgent: callAgentRich, tiers: [4, 6], perTier: 3, maxStressMs: 20000,
+    callAgent: callAgentRich, tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   const richSvgs = ((res3.richDoc || '').match(/<svg/gi) || []).length;
@@ -292,7 +294,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'chip-timing',
-    callAgent: callAgentChip, tiers: [4, 6], perTier: 2, maxStressMs: 15000,
+    callAgent: callAgentChip, tiers: [4, 6], perTier: 2,  bruteTimeoutMs: 5000,
     emit: (ev) => {
       if (ev.type !== 'toolResult') return;
       (ev.results || []).forEach((r) => {
@@ -357,7 +359,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'ruler-fault',
-    callAgent: callAgentRuler, tiers: [4, 6], perTier: 4, maxStressMs: 20000,
+    callAgent: callAgentRuler, tiers: [4, 6], perTier: 4,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   // 定位到"标尺有罪"有三条合法路径（都属机械/仲裁判定，而不是去改题解）：
@@ -426,7 +428,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'gen-big',
-    callAgent: callAgentBig, tiers: [4, 6], perTier: 3, maxStressMs: 15000,
+    callAgent: callAgentBig, tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   const bigTraj = (resBig.trajectory || []).map((t) => t.kind + ':' + String(t.note || '')).join(' | ');
@@ -465,7 +467,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'empty-storm',
-    callAgent: callAgentEmpty, tiers: [4, 6], perTier: 2, maxStressMs: 10000,
+    callAgent: callAgentEmpty, tiers: [4, 6], perTier: 2,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   ok('空回复：单次调用最多重试 1 次（题解 2 次调用就收手，不是 3 次）', emptyCalls <= 2, { emptyCalls });
@@ -506,7 +508,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: BIG_SAMPLE, output: '3\n1000000000' }],
     workspace, wsKey: 'evidence-gate',
-    callAgent: callAgentGate, tiers: [4, 6], perTier: 3, maxStressMs: 10000,
+    callAgent: callAgentGate, tiers: [4, 6], perTier: 3,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   const gateTraj = (resGate.trajectory || []).map((t) => t.kind).join(',');
@@ -568,7 +570,7 @@ const callAgent = async (opts) => {
     lang: 'python', intent: 'full', statement: STATEMENT,
     samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
     workspace, wsKey: 'trunc-fail',
-    callAgent: callAgentTruncated, tiers: [4, 6], perTier: 2, maxStressMs: 8000,
+    callAgent: callAgentTruncated, tiers: [4, 6], perTier: 2,  bruteTimeoutMs: 5000,
     emit: () => {}, log: () => {}
   });
   ok('截断：第一次按原问法，第二次换成"只要代码"的极简问法',

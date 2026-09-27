@@ -10,6 +10,68 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const MD = window.MD;
 
+  /**
+   * 对外的极简接口：给同页的独立模块（review.js 等）用。
+   *
+   * 为什么需要：app.js 整个包在 IIFE 里，switchView / openConversation 都是闭包内的函数，
+   * 外部模块没法调用。复盘页要在"生成 AI 复盘"之后**跳到会话视图**去追问，
+   * 所以这里只暴露这两个必要入口（函数声明会提升，写在这里也能引用到）。
+   */
+  window.CF_COACH = {
+    switchView: (v) => switchView(v),
+    openConversation: (id) => openConversation(id),
+    /**
+     * 重新拉取侧边栏列表（对话 + 文件夹）。
+     * 给外部模块 / 冒烟自检用：它们在页面里直接调接口建了对话之后，
+     * 需要让列表跟上，而不是整天刷新页面。
+     */
+    refreshList: () => refreshList(),
+    /**
+     * 让教练**对上一条用户消息**直接作答（不再要求用户再打字）。
+     *
+     * 为什么需要：复盘界面已经把整场比赛的材料装进了会话，如果只是把会话打开、
+     * 等用户自己再说一句，用户会觉得"材料都给我了还要我推一下"（真实反馈）。
+     * 服务端对 mode='continue' 的处理是：不加新的用户消息，直接以现有历史（含那份材料）起一轮。
+     * @returns {boolean} 是否成功触发
+     */
+    continueConversation: (id) => {
+      const conv = state.conv;
+      if (!conv || conv.id !== id) return false;
+      if (!state.config || !(state.config.providers || []).length) { toast('请先添加模型服务', 'error'); return false; }
+      if (!conv.model) { toast('请先选择模型', 'error'); return false; }
+      if (isStreaming(conv.id)) return false;
+      startStream({ conversationId: conv.id, mode: 'continue' });
+      scrollBottom(true);
+      return true;
+    },
+    /**
+     * 把一段文本**直接放进对话框**（走输入框，不走剪贴板）。
+     *
+     * 为什么需要：复盘页原本是"把材料复制到剪贴板、让用户自己粘进输入框"——
+     * 用户明确吐槽过这个多余的中转（"为什么要弄到我的剪贴板我还要手动粘，不能直接扔对话框里面吗"）。
+     * 文本本来就在这个应用里，就该一步到位落到输入框。
+     * @param {string} text 要放进去的文本
+     * @param {object} [opts] { newConversation: true } 强制开一个新会话再放
+     * @returns {Promise<boolean>} 是否成功放入
+     */
+    intoComposer: async (text, opts) => {      const t = String(text == null ? '' : text);
+      if (!t.trim()) return false;
+      if (!(opts && opts.newConversation) && state.conv && !state.conv.archived) {
+        switchView('coach');
+      } else {
+        await createConversation();
+        switchView('coach');
+      }
+      const input = $('#input');
+      if (!input) return false;
+      input.value = t;
+      autosizeInput();
+      scrollBottom(true);
+      input.focus();
+      return true;
+    }
+  };
+
   /* ---------------- 状态 ---------------- */
 
   const state = {
@@ -32,6 +94,29 @@
     profileHydrating: false,
     workspace: null      // 本题验证工作区（/api/workspace）
   };
+
+  /* ---------------- 侧边栏：文件夹 + 多选 ---------------- */
+
+  /** 文件夹清单（服务端 data/folders.json） */
+  state.folders = [];
+  /** 多选模式：{ on: bool, ids: string[] }。ids 用数组而不是 Set，方便直接 JSON/长度判断 */
+  state.sel = { on: false, ids: [] };
+  /** 折叠状态：文件夹 id → true 折叠（存 localStorage，刷新后保持） */
+  state.collapsed = {};
+  try { state.collapsed = JSON.parse(localStorage.getItem('folderCollapsed') || '{}') || {}; } catch (e) { state.collapsed = {}; }
+
+  function saveCollapsed() {
+    try { localStorage.setItem('folderCollapsed', JSON.stringify(state.collapsed)); } catch (e) { /* ignore */ }
+  }
+
+  function selHas(id) { return state.sel.ids.indexOf(id) >= 0; }
+  function selToggle(id) {
+    const i = state.sel.ids.indexOf(id);
+    if (i >= 0) state.sel.ids.splice(i, 1); else state.sel.ids.push(id);
+    renderList();
+  }
+  function selClear() { state.sel.ids = []; }
+  function selExit() { state.sel.on = false; selClear(); renderList(); }
 
   /* ---------------- 图标 ---------------- */
 
@@ -139,6 +224,14 @@
   async function refreshList() {
     const r = await api('/api/conversations');
     state.convs = r.conversations;
+    try {
+      const f = await api('/api/folders');
+      state.folders = f.folders || [];
+    } catch (e) { /* 文件夹拉不到不影响对话列表 */ }
+    // 选中项里可能有已经被删掉的会话，清掉避免"已选 3 项"却只操作成功 2 项
+    const alive = {};
+    state.convs.forEach(function (c) { alive[c.id] = true; });
+    state.sel.ids = state.sel.ids.filter(function (id) { return alive[id]; });
     renderList();
   }
 
@@ -217,7 +310,9 @@
       const m = openModal({
         title: opts.title || '确认操作',
         size: 'sm',
-        body: '<p style="font-size:13.5px;color:var(--text-secondary);line-height:1.7">' + MD.escapeHtml(opts.message || '') + '</p>',
+        // pre-line：调用方传多行文案（如"删除对话时顺带说明缓存也会删"）时能正常换行，
+        // 而不是把 \n 渲染成一个空格
+        body: '<p style="font-size:13.5px;color:var(--text-secondary);line-height:1.7;white-space:pre-line">' + MD.escapeHtml(opts.message || '') + '</p>',
         foot: '<button class="btn btn-default" data-no>取消</button>'
           + '<button class="btn ' + (opts.danger ? 'btn-danger' : 'btn-primary') + '" data-yes>' + (opts.okText || '确定') + '</button>'
       });
@@ -323,12 +418,56 @@
 
   /* ---------------- 侧边栏 ---------------- */
 
+  /** 单个对话条目（文件夹分组与"未分类"共用同一份渲染，避免两处样式漂移） */
+  function convItemHtml(c) {
+    const active = state.conv && state.conv.id === c.id;
+    // 正在生成：本地流 或 服务端报告的后台生成（并发/后台会话在列表里也能看出来）
+    const streaming = isStreaming(c.id) || !!c.active;
+    const pinIcon = c.pinned ? '<span class="conv-item-pin">' + icon('pin', 12) + '</span>' : '';
+    const runDot = streaming ? '<span class="conv-run-dot" title="正在生成"></span>' : '';
+    const meta = c.problemMeta || null;
+    const ratingChip = meta && meta.rating
+      ? '<span class="conv-rating ' + ratingColorClass(meta.rating) + '">' + meta.rating + '</span>'
+      : (meta ? '<span class="conv-rating cf-gray">?</span>' : '');
+    const knowledge = meta && meta.knowledge && meta.knowledge.length
+      ? '<span class="conv-knowledge">' + meta.knowledge.slice(0, 2).map(function (k) { return MD.escapeHtml(k); }).join(' · ') + '</span>'
+      : '';
+    const picked = selHas(c.id);
+    const box = state.sel.on
+      ? '<span class="conv-check' + (picked ? ' on' : '') + '">' + (picked ? icon('check', 12) : '') + '</span>'
+      : '';
+    return '<div class="conv-item' + (active ? ' active' : '') + (streaming ? ' streaming' : '')
+      + (state.sel.on ? ' selecting' : '') + (picked ? ' picked' : '') + '" data-id="' + c.id + '">'
+      + '<div class="conv-item-top">' + box + pinIcon + '<span class="conv-item-title">' + MD.escapeHtml(c.title) + '</span>' + runDot + ratingChip + '</div>'
+      + '<div class="conv-item-bottom"><span class="conv-item-preview">'
+      + MD.escapeHtml((meta && meta.summary) || c.preview || (c.messageCount ? '…' : '（空对话）')) + '</span>'
+      + '<span>' + MD.timeAgo(c.updatedAt) + '</span></div>'
+      + (knowledge ? '<div class="conv-item-knowledge">' + knowledge + '</div>' : '')
+      + '<div class="conv-item-actions">'
+      + '<button class="conv-item-action" data-act="folder" data-id="' + c.id + '" title="移动到文件夹">'
+      + '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>'
+      + '<button class="conv-item-action" data-act="pin" data-id="' + c.id + '" title="' + (c.pinned ? '取消置顶' : '置顶') + '">' + icon('pin', 13) + '</button>'
+      + (c.archived
+        ? '<button class="conv-item-action" data-act="restore" data-id="' + c.id + '" title="恢复对话">' + icon('restore', 13) + '</button>'
+        : '<button class="conv-item-action" data-act="archive" data-id="' + c.id + '" title="归档">' + icon('archive', 13) + '</button>')
+      + '<button class="conv-item-action danger" data-act="delete" data-id="' + c.id + '" title="删除">' + icon('trash', 13) + '</button>'
+      + '</div></div>';
+  }
+
   function renderList() {
     const listEl = $('#conv-list');
     const archivedCount = state.convs.filter(function (c) { return c.archived; }).length;
     const badge = $('#archive-count');
     badge.hidden = archivedCount === 0;
     badge.textContent = archivedCount;
+
+    // 批量操作条
+    const bulk = $('#sb-bulk');
+    const bulkCount = $('#sb-bulk-count');
+    if (bulk) bulk.hidden = !state.sel.on;
+    if (bulkCount) bulkCount.textContent = '已选 ' + state.sel.ids.length + ' 项';
+    const msBtn = $('#btn-multiselect');
+    if (msBtn) msBtn.classList.toggle('active', state.sel.on);
 
     let convs = state.convs.filter(function (c) { return c.archived === (state.tab === 'archive'); });
     if (state.query) {
@@ -345,14 +484,48 @@
       return;
     }
 
+    /**
+     * 分组规则（对话页）：
+     *   ① 置顶（跨文件夹，永远排最前）
+     *   ② 每个文件夹一块（没有的就跳过，但空文件夹也要显示 —— 否则"刚建好却看不见"）
+     *   ③ 未分类：沿用按时间分组（今天 / 昨天 / 7 天内 / …）
+     * 归档页不分组（文件夹只管"在用的对话"）。
+     */
+    const folderOf = function (c) { return c.folder || ''; };
+    const pinned = convs.filter(function (c) { return c.pinned; });
+    const rest = convs.filter(function (c) { return !c.pinned; });
+    let html = '';
+
+    if (pinned.length) {
+      html += '<div class="conv-group-label">置顶</div>';
+      pinned.forEach(function (c) { html += convItemHtml(c); });
+    }
+
+    if (state.tab === 'active') {
+      state.folders.forEach(function (f) {
+        const items = rest.filter(function (c) { return folderOf(c) === f.id; });
+        const open = !state.collapsed[f.id];
+        html += '<div class="conv-folder' + (open ? '' : ' collapsed') + '" data-folder="' + f.id + '">'
+          + '<button class="conv-folder-head" data-folder-toggle="' + f.id + '">'
+          + '<span class="conv-folder-arrow">' + (open ? '▾' : '▸') + '</span>'
+          + '<span class="conv-folder-name">' + MD.escapeHtml(f.name) + '</span>'
+          + '<span class="conv-folder-count">' + items.length + '</span>'
+          + '<span class="conv-folder-menu" data-folder-menu="' + f.id + '" title="文件夹操作">⋯</span>'
+          + '</button>'
+          + (open ? items.map(convItemHtml).join('') : '')
+          + '</div>';
+      });
+    }
+
+    const unfiled = rest.filter(function (c) { return !folderOf(c) || (state.tab !== 'active'); });
     const groups = [];
-    convs.forEach(function (c) {
-      const key = c.pinned ? '置顶' : MD.groupLabel(c.updatedAt);
+    unfiled.forEach(function (c) {
+      const key = MD.groupLabel(c.updatedAt);
       let g = groups.find(function (x) { return x.key === key; });
       if (!g) { g = { key: key, items: [] }; groups.push(g); }
       g.items.push(c);
     });
-    const order = ['置顶', '今天', '昨天', '7 天内'];
+    const order = ['今天', '昨天', '7 天内'];
     groups.sort(function (a, b) {
       const ia = order.indexOf(a.key), ib = order.indexOf(b.key);
       if (ia >= 0 && ib >= 0) return ia - ib;
@@ -360,45 +533,95 @@
       if (ib >= 0) return 1;
       return a.key.localeCompare(b.key, 'zh-CN');
     });
-
-    let html = '';
+    if (state.tab === 'active' && groups.length) html += '<div class="conv-group-label">未分类</div>';
     groups.forEach(function (g) {
-      html += '<div class="conv-group-label">' + MD.escapeHtml(g.key) + '</div>';
-      g.items.forEach(function (c) {
-        const active = state.conv && state.conv.id === c.id;
-        // 正在生成：本地流 或 服务端报告的后台生成（并发/后台会话在列表里也能看出来）
-        const streaming = isStreaming(c.id) || !!c.active;
-        const pinIcon = c.pinned ? '<span class="conv-item-pin">' + icon('pin', 12) + '</span>' : '';
-        const runDot = streaming ? '<span class="conv-run-dot" title="正在生成"></span>' : '';
-        const meta = c.problemMeta || null;
-        const ratingChip = meta && meta.rating
-          ? '<span class="conv-rating ' + ratingColorClass(meta.rating) + '">' + meta.rating + '</span>'
-          : (meta ? '<span class="conv-rating cf-gray">?</span>' : '');
-        const knowledge = meta && meta.knowledge && meta.knowledge.length
-          ? '<span class="conv-knowledge">' + meta.knowledge.slice(0, 2).map(function (k) { return MD.escapeHtml(k); }).join(' · ') + '</span>'
-          : '';
-        html += '<div class="conv-item' + (active ? ' active' : '') + (streaming ? ' streaming' : '') + '" data-id="' + c.id + '">'
-          + '<div class="conv-item-top">' + pinIcon + '<span class="conv-item-title">' + MD.escapeHtml(c.title) + '</span>' + runDot + ratingChip + '</div>'
-          + '<div class="conv-item-bottom"><span class="conv-item-preview">'
-          + MD.escapeHtml((meta && meta.summary) || c.preview || (c.messageCount ? '…' : '（空对话）')) + '</span>'
-          + '<span>' + MD.timeAgo(c.updatedAt) + '</span></div>'
-          + (knowledge ? '<div class="conv-item-knowledge">' + knowledge + '</div>' : '')
-          + '<div class="conv-item-actions">'
-          + '<button class="conv-item-action" data-act="pin" data-id="' + c.id + '" title="' + (c.pinned ? '取消置顶' : '置顶') + '">' + icon('pin', 13) + '</button>'
-          + (c.archived
-            ? '<button class="conv-item-action" data-act="restore" data-id="' + c.id + '" title="恢复对话">' + icon('restore', 13) + '</button>'
-            : '<button class="conv-item-action" data-act="archive" data-id="' + c.id + '" title="归档">' + icon('archive', 13) + '</button>')
-          + '<button class="conv-item-action danger" data-act="delete" data-id="' + c.id + '" title="删除">' + icon('trash', 13) + '</button>'
-          + '</div></div>';
-      });
+      if (state.tab !== 'active') html += '<div class="conv-group-label">' + MD.escapeHtml(g.key) + '</div>';
+      g.items.forEach(function (c) { html += convItemHtml(c); });
     });
+
     listEl.innerHTML = html;
+  }
+
+  /**
+   * 「移动到文件夹」菜单：列出现有文件夹 + 新建 + 移出文件夹。
+   * @param {Element} anchor 贴着哪个元素弹出
+   * @param {string[]} ids 要移动的对话（单条或多选）
+   */
+  function openFolderMenu(anchor, ids) {
+    const items = [];
+    items.push({ label: '未分类（移出文件夹）', icon: 'trash', onClick: function () { doBatchMove(ids, ''); } });
+    if (state.folders.length) items.push('-');
+    state.folders.forEach(function (f) {
+      items.push({ label: f.name, icon: 'archive', onClick: function () { doBatchMove(ids, f.id); } });
+    });
+    items.push('-');
+    items.push({
+      label: '＋ 新建文件夹…', icon: 'check',
+      onClick: async function () {
+        const name = await promptModal({ title: '新建文件夹', label: '文件夹名', placeholder: '例如：线段树 / 我的弱项' });
+        if (!name || !name.trim()) return;
+        try {
+          const r = await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+          await refreshList();
+          await doBatchMove(ids, r.folder.id);
+        } catch (e) { toast(e.message || '新建失败', 'error'); }
+      }
+    });
+    openMenu(anchor, items);
+  }
+
+  async function doBatchMove(ids, folder) {
+    await batchOp('move', ids, { folder: folder });
+  }
+
+  /**
+   * 批量操作。**逐条串行**在服务端做，这里只负责汇总结果并如实汇报
+   * （部分失败也要说清楚是哪几条，不能只报"操作完成"）。
+   */
+  async function batchOp(action, ids, extra) {
+    if (!ids.length) { toast('还没有选中对话', 'error'); return; }
+    try {
+      const r = await api('/api/conversations/batch', {
+        method: 'POST',
+        body: JSON.stringify(Object.assign({ ids: ids, action: action }, extra || {}))
+      });
+      const names = { archive: '归档', unarchive: '恢复', delete: '删除', move: '移动', pin: '置顶', unpin: '取消置顶' };
+      const what = names[action] || action;
+      if (r.failed && r.failed.length) {
+        toast('已' + what + ' ' + r.done + ' 个，' + r.failed.length + ' 个失败：' + (r.failed[0].reason || ''), 'error', 4200);
+      } else {
+        toast('已' + what + ' ' + r.done + ' 个对话', 'success');
+      }
+      // 当前会话被归档/删除时，界面要跟着走，不能停在一个已经不在列表里的会话上
+      if (state.conv && ids.indexOf(state.conv.id) >= 0 && (action === 'delete' || action === 'archive')) closeCurrent();
+      // 一批操作做完就退出多选：留着"已选 0 项"的批量条只会让人以为还能再点一次
+      state.sel.on = false;
+      selClear();
+      await refreshList();
+    } catch (e) {
+      toast(e.message || '批量操作失败', 'error');
+    }
+  }
+
+  /** 批量删除前的确认：把条数和"不可恢复"讲清楚 */
+  function confirmBatchDelete(ids) {
+    const preview = state.convs.filter(function (c) { return ids.indexOf(c.id) >= 0; })
+      .slice(0, 5).map(function (c) { return '「' + c.title + '」'; }).join('、');
+    confirmModal({
+      title: '删除 ' + ids.length + ' 个对话',
+      message: '将从本地永久删除：' + preview + (ids.length > 5 ? ' 等 ' + ids.length + ' 个对话' : '') + '。不可恢复。',
+      okText: '删除', danger: true
+    }).then(function (ok) { if (ok) batchOp('delete', ids); });
   }
 
   function listItemAction(act, id) {
     const c = state.convs.find(function (x) { return x.id === id; });
     if (!c) return;
-    if (act === 'pin') {
+    if (act === 'folder') {
+      // 单条移动：按钮就在条目上，菜单贴着它弹
+      const btn = document.querySelector('.conv-item[data-id="' + id + '"] [data-act="folder"]');
+      openFolderMenu(btn || $('#conv-list'), [id]);
+    } else if (act === 'pin') {
       patchConv(id, { pinned: !c.pinned });
     } else if (act === 'archive' || act === 'restore') {
       const archiving = act === 'archive';
@@ -416,15 +639,34 @@
         refreshList();
       });
     } else if (act === 'delete') {
-      confirmModal({ title: '删除对话', message: '确定删除「' + c.title + '」吗？对话文件将从本地永久删除，不可恢复。', okText: '删除', danger: true })
-        .then(async function (ok) {
-          if (!ok) return;
-          if (isStreaming(id)) stopStreaming(id, true);
-          await api('/api/conversations/' + id, { method: 'DELETE' });
-          if (state.conv && state.conv.id === id) closeCurrent();
-          await refreshList();
-          toast('已删除', 'success');
-        });
+      /**
+       * 删除对话：默认**把这道题的验证缓存也一起删**。
+       *
+       * 用户的原话："我删除肯定是全删啊"——缓存（按题号共享的工作区）不跟着删，
+       * 下次问同一题还会命中旧结论，既不符删除语义，也让人没法测"重新对拍"。
+       * 但缓存可能是几个对话共用的，所以这里说清楚，并把选择权交出去。
+       */
+      const hasWs = !!(c.cfProblem && (c.problemMeta || c.cfProblem.title));
+      confirmModal({
+        title: '删除对话',
+        message: '确定删除「' + c.title + '」吗？对话文件将从本地永久删除，不可恢复。'
+          + (hasWs ? '\n\n这道题的验证缓存（题解/暴力解/对拍结论）也会一起删掉：下次问同一题会从零重新对拍。' : ''),
+        okText: '删除',
+        danger: true
+      }).then(async function (ok) {
+        if (!ok) return;
+        if (isStreaming(id)) stopStreaming(id, true);
+        const r = await api('/api/conversations/' + id, { method: 'DELETE', body: JSON.stringify({ forceWorkspace: true }) });
+        if (state.conv && state.conv.id === id) closeCurrent();
+        await refreshList();
+        // 缓存被别的对话共用时服务端会保留它 —— 如实说明，别让用户以为删干净了
+        if (r && r.workspaceKept) {
+          toast('对话已删除；这道题的验证缓存被另外 ' + ((r.sharedWith || []).length)
+            + ' 个对话共用，已保留（需要清掉请在题目面板点「重新对拍」）', 'info', 7000);
+        } else {
+          toast(r && r.workspaceCleared ? '已删除（含本题验证缓存，下次问同题会重新对拍）' : '已删除', 'success');
+        }
+      });
     }
   }
 
@@ -1139,6 +1381,16 @@
       if (stream.assistantId && state.conv && state.conv.id === convId) {
         const m = state.conv.messages.find(function (x) { return x.id === stream.assistantId; });
         if (m && data.html) m.richDoc = data.html;
+        /**
+         * **立刻整条重画**，不要等 done。
+         *
+         * 真实反馈："到后面好像卡住了，没有报告出来而是大量文字，然后我暂停生成了之后报告又突然弹出来了。"
+         * 原因就是这个事件只改了数据、没有触发渲染：文档早就到了，界面上却什么都没有，
+         * 直到用户点停止（done 触发整屏重画）文档才冒出来 —— 看起来像卡住了。
+         * 注意必须用 renderMessages（整条消息重建）而不是 paintStream（只换气泡里的文字）：
+         * 文档的宿主节点 `.rich-host` 是渲染消息时创建的，只更新文字不会把它加进去。
+         */
+        renderMessages();
       }
       return;
     }
@@ -1534,10 +1786,38 @@
 
   /* ---------------- 输入框 ---------------- */
 
+  /** 浏览器是否支持 field-sizing（支持就完全不需要 JS 量高度） */
+  const FIELD_SIZING = typeof CSS !== 'undefined' && CSS.supports && CSS.supports('field-sizing', 'content');
+
+  /**
+   * 输入框自适应高度（**老内核兜底**）。
+   *
+   * 现代 Chromium 有 `field-sizing: content`，#input 的高度由浏览器跟着内容算，
+   * 与"哪个事件有没有触发"无关；只有不支持时才走这里量 scrollHeight。
+   * 量的时候上限**从 CSS 读**，不在这里再写死一个数字 —— 两边各写一份就会出现
+   * "改了 CSS 不改这里，框子卡在旧上限"。
+   */
   function autosizeInput() {
     const input = $('#input');
+    if (!input) return;
+    if (FIELD_SIZING) { input.style.height = ''; return; }   // 交给 CSS，别用内联高度顶掉它
     input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+    const cs = getComputedStyle(input);
+    const cap = parseFloat(cs.maxHeight);
+    // 全局 box-sizing: border-box → 设的高度包含内边距与边框，所以要把它们加回 scrollHeight，
+    // 否则内容总差那么几像素、textarea 会凭空多出一条滚动条（看起来像"还没显示完"）。
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const bd = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    input.style.height = Math.min(input.scrollHeight + pad + bd, cap > 0 ? cap : 400) + 'px';
+  }
+
+  /**
+   * 下一次绘制后再量一次。
+   * 有些路径（拖入文本、部分输入法）事件触发时新值还没进布局，同步量会得到旧高度。
+   */
+  function scheduleAutosize() {
+    autosizeInput();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(function () { autosizeInput(); });
   }
 
   function focusInput() {
@@ -1548,6 +1828,7 @@
 
   const LANG_NAMES = { cpp: 'C++23', python: 'Python 3' };
   const INTENT_NAMES = {
+    auto: '自动判断',
     full: '完整讲解',
     hint: '思路提示',
     explain: '题干解读',
@@ -1555,24 +1836,27 @@
   };
   /** 每种提问意图一个专属图标（菜单 / 工具栏都用它，别再全长一样） */
   const INTENT_ICONS = {
+    auto: 'compass',
     full: 'book',
     hint: 'bulb',
     explain: 'search',
     debug: 'bug'
   };
-  const INTENT_EMOJI = { full: '🎯', hint: '💡', explain: '📖', debug: '🐞' };
-  function intentIcon(intent, size) { return icon(INTENT_ICONS[intent] || 'book', size); }
+  const INTENT_EMOJI = { auto: '🤖', full: '🎯', hint: '💡', explain: '📖', debug: '🐞' };
+  function intentIcon(intent, size) { return icon(INTENT_ICONS[intent] || 'compass', size); }
   function langName(lang) { return LANG_NAMES[lang] || 'C++23'; }
-  function intentName(intent) { return INTENT_NAMES[intent] || '完整讲解'; }
+  function intentName(intent) { return INTENT_NAMES[intent] || '自动判断'; }
   function intentHintText(intent) {
     const texts = {
+      auto: '默认：教练自己看你这句在要什么（完整讲解 / 只给思路 / 解读题意 / 评估代码），并按对应技能去做——'
+        + '和你不用手点技能是一回事。想固定行为时再手动指定。',
       full: '标准流程：题面拆解 → 思路 → 复杂度分析 → 验证过的完整代码 → 逐行讲解。',
       hint: '只给方向与关键观察（L0–L2，含目标复杂度）；验证链路照样全量跑，你随时说"给答案"就能升级到完整代码。',
       explain: '只解释题意、样例推导与数据范围，不讲做法，不跑代码链路。',
       debug: '两种用法都走这条最重的链路：① 贴你的代码问为什么 WA/TLE → 先体检（编译/UB）再与暴力解、正解三方对拍，用最小反例定位到具体那一行；'
         + '② 只提一个做法问行不行（如"用 Floyd 能写吗"）→ 先做可行性评估，可行就用已验证的暴力解当标尺实测。两种都会对比复杂度。'
     };
-    return texts[intent] || texts.full;
+    return texts[intent] || texts.auto;
   }
 
   function updateComposer() {
@@ -1594,7 +1878,7 @@
     const lang = conv ? (conv.lang || (state.config && state.config.defaultCoachLang) || 'cpp') : ((state.config && state.config.defaultCoachLang) || 'cpp');
     const langLabel = $('#lang-select-label');
     if (langLabel) langLabel.textContent = langName(lang);
-    const intent = conv ? (INTENT_NAMES[conv.intent] ? conv.intent : 'full') : 'full';
+    const intent = conv ? (INTENT_NAMES[conv.intent] ? conv.intent : 'auto') : 'auto';
     const intentLabel = $('#intent-select-label');
     if (intentLabel) intentLabel.textContent = intentName(intent);
     const intentIconEl = $('#intent-select-icon');
@@ -1683,14 +1967,15 @@
       createConversation().then(function () { openIntentMenu(anchor); }).catch(function (e) { toast(e.message, 'error'); });
       return;
     }
-    const current = INTENT_NAMES[conv.intent] ? conv.intent : 'full';
-    const items = [{ label: '__note__', note: '选择本次提问的意图（教练会按意图控制输出）' }];
+    const current = INTENT_NAMES[conv.intent] ? conv.intent : 'auto';
+    const items = [{ label: '__note__', note: '默认「自动判断」——教练看你这句话要什么，自己选做法' }];
     Object.keys(INTENT_NAMES).forEach(function (key) {
       items.push({
-        label: INTENT_NAMES[key] + (current === key ? ' ✓' : ''),
+        label: INTENT_NAMES[key] + (key === 'auto' ? '（推荐）' : '') + (current === key ? ' ✓' : ''),
         icon: INTENT_ICONS[key],
         onClick: function () { applyIntent(key); }
       });
+      if (key === 'auto') items.push('-');   // 把"自动"和四个固定选项分开，表明它是默认档
     });
     openMenu(anchor, items);
   }
@@ -1934,6 +2219,7 @@
     html += '<div class="pp-actions">'
       + '<button class="pp-btn" data-pp-settings>这道题的设置</button>'
       + '<button class="pp-btn" data-pp-classify>' + (meta.knowledge && meta.knowledge.length ? '重新分类' : '立即分类') + '</button>'
+      + (problem ? '<button class="pp-btn" data-pp-purge title="清掉本题的验证缓存（题解/暴力解/对拍结论），下次从零重新对拍">🔄 重新对拍</button>' : '')
       + (problem ? '<button class="pp-btn" data-pp-open title="用系统浏览器打开，便于复制题面">🌐</button>' : '')
       + '</div>';
     html += '</div>';
@@ -1996,9 +2282,30 @@
     });
     const openBtn = body.querySelector('[data-pp-open]');
     if (openBtn) openBtn.addEventListener('click', function () {
-      const url = 'https://codeforces.com/problemset/problem/' + problem.contestId + '/' + problem.index;
+      const url = 'https://codeforces.com/contest/' + problem.contestId + '/problem/' + problem.index;
       if (window.chatbox && window.chatbox.openExternal) window.chatbox.openExternal(url);
       else window.open(url, '_blank');
+    });
+    /**
+     * 重新对拍：清掉本题的验证缓存（题解/暴力解/对拍结论与最小反例），下次从零跑一遍。
+     * 想验证"完整验证链还正常吗"时点它 —— 不用再靠"删对话"这种副作用。
+     */
+    const purgeBtn = body.querySelector('[data-pp-purge]');
+    if (purgeBtn) purgeBtn.addEventListener('click', async function () {
+      const ok = await confirmModal({
+        title: '重新对拍',
+        message: '清掉这道题的验证缓存（已验证的题解/暴力解/数据生成器/对拍结论）？\n\n'
+          + '清掉后，下次问这道题会**从零重新走一遍完整验证链**（会花几分钟）。对话记录不受影响。',
+        okText: '清掉并重跑',
+        danger: true
+      });
+      if (!ok) return;
+      try {
+        const r = await api('/api/workspace/purge', { method: 'POST', body: JSON.stringify({ convId: state.conv.id }) });
+        toast(r && r.removed ? '已清掉本题缓存：下次问这道题会重新对拍' : '本题还没有缓存可清', 'success', 4000);
+        state.workspace = null;
+        renderProblemPanel();
+      } catch (e) { toast('清理失败：' + e.message, 'error'); }
     });
     body.querySelector('[data-pp-classify]').addEventListener('click', async function () {
       const btn = body.querySelector('[data-pp-classify]');
@@ -2096,31 +2403,69 @@
         toast('已获取「' + p.title + '」，题面已填入输入框，直接发送即可（我会自动对拍验证后讲解）', 'success', 3200);
       }
     } catch (e) {
-      // 反爬兜底：题面抓不到，但题目元数据（难度/标签）走官方 API 仍可用
+      /**
+       * 抓取失败时**说准原因**。
+       *
+       * 真实事故：用户查 2269D（而 2269 只有 A/B 两题），界面上一律显示
+       * "题面被 Codeforces 反爬拦截" —— 于是他以为是 CF 封了应用，去折腾代理和登录，
+       * 而真正的原因是题号不存在。这里按服务端给的原因分类：
+       *   · 题号/比赛不存在 → 直接说清楚，并给出该比赛的正确题号（不让他粘贴题面白忙）
+       *   · 反爬拦截 → 才走"粘贴题面"这条路
+       */
+      const msg = String((e && e.message) || '');
+      const notFound = /没有题号|公开题表里没有|不存在|不可见/.test(msg);
+      const antiBot = /反爬|拦截|Cloudflare|挑战/.test(msg) && !notFound;
+      const pageUrl = 'https://codeforces.com/contest/' + parsed.contestId + '/problem/' + parsed.index;
+      let metaKnown = false;
       try {
         const m = await api('/api/cf/meta?contestId=' + encodeURIComponent(parsed.contestId) + '&index=' + encodeURIComponent(parsed.index));
-        await patchConv(conv.id, {
-          mode: 'coach',
-          cfProblem: { contestId: m.contestId, index: m.index, title: m.title },
-          problemMeta: {
-            rating: m.rating || null, tags: m.tags || [], contest: String(m.contestId),
-            source: 'cf', title: m.title, knowledge: []
-          }
-        });
+        // 元数据兜底也查不到题目（服务端明说 notFound）时，不要伪造"题目已登记"
+        metaKnown = !!(m && !m.notFound && (m.rating || (m.tags && m.tags.length) || /^[A-Z]\d?\.\s/.test(String(m.title || ''))));
+        if (metaKnown) {
+          await patchConv(conv.id, {
+            mode: 'coach',
+            cfProblem: { contestId: m.contestId, index: m.index, title: m.title },
+            problemMeta: {
+              rating: m.rating || null, tags: m.tags || [], contest: String(m.contestId),
+              source: 'cf', title: m.title, knowledge: []
+            }
+          });
+          renderHeader();
+          renderProblemPanel();
+        }
+      } catch (e2) { /* 元数据只是增强 */ }
+
+      /**
+       * 取不到题面时**开一个明确的对话框**，把原因和出路摆出来。
+       *
+       * 为什么不再"偷偷往输入框塞一句模板"：那样用户看到的是**一个没变化的空对话框**，
+       * 既看不到题面、也看不到原因（原因只在一闪而过的 toast 里）——真实反馈就是
+       * "扒题面之后对话框还是原样，导致我无法看到粘贴的题面信息"。
+       * 现在：说清是哪一类失败，并让用户自己选择"去浏览器看"还是"我自己粘贴题面"。
+       */
+      const dlg = openModal({
+        title: notFound ? '没有这道题' : (antiBot ? '题面被反爬拦截' : '题面没能取到'),
+        size: 'sm',
+        body: '<p style="font-size:13.5px;color:var(--text-secondary);line-height:1.7;margin:0 0 10px">'
+            + MD.escapeHtml(msg || '未知原因') + '</p>'
+          + (metaKnown ? '<p style="font-size:12.5px;color:var(--text-tertiary);margin:0">题目难度与标签已登记，仍然可用。</p>' : ''),
+        foot: '<button class="btn btn-default" data-cf-open>在浏览器打开这道题</button>'
+          + '<button class="btn btn-primary" data-cf-paste>我自己粘贴题面</button>'
+      });
+      dlg.modal.querySelector('[data-cf-open]').addEventListener('click', function () {
+        dlg.close();
+        if (window.chatbox && window.chatbox.openExternal) window.chatbox.openExternal(pageUrl);
+        else window.open(pageUrl, '_blank');
+      });
+      dlg.modal.querySelector('[data-cf-paste]').addEventListener('click', function () {
+        dlg.close();
         const input = $('#input');
-        input.value = '【Codeforces ' + m.contestId + m.index + '】' + m.title + '\n'
-          + (m.rating ? '难度：' + m.rating + ' 分' : '难度：未知')
-          + (m.tags && m.tags.length ? ' · 标签：' + m.tags.join(', ') : '') + '\n\n'
-          + '（题面自动抓取被 Codeforces 反爬拦截，请把题面正文粘贴到下面这一行 ↓）\n\n';
+        input.value = '【Codeforces ' + parsed.contestId + parsed.index + '】\n'
+          + '（题面没取到，下面粘贴题面正文 ↓）\n\n';
         autosizeInput();
         updateComposer();
-        renderHeader();
-        renderProblemPanel();
         focusInput();
-        toast('题面被 Codeforces 反爬拦截：已填入题目信息与难度标签，请粘贴题面正文后发送', 'error', 6000);
-      } catch (e2) {
-        toast('获取失败：' + e.message, 'error', 4200);
-      }
+      });
     }
   }
 
@@ -3622,6 +3967,42 @@
     }, 250));
 
     $('#conv-list').addEventListener('click', function (e) {
+      // 文件夹折叠 / 文件夹菜单
+      const fmenu = e.target.closest('[data-folder-menu]');
+      if (fmenu) {
+        e.stopPropagation();
+        const fid = fmenu.getAttribute('data-folder-menu');
+        const f = state.folders.find(function (x) { return x.id === fid; });
+        if (!f) return;
+        openMenu(fmenu, [
+          { label: '重命名…', icon: 'edit', onClick: async function () {
+            const name = await promptModal({ title: '重命名文件夹', label: '文件夹名', value: f.name });
+            if (!name || !name.trim()) return;
+            try {
+              await api('/api/folders/' + fid, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
+              await refreshList();
+            } catch (err) { toast(err.message || '重命名失败', 'error'); }
+          } },
+          { label: '删除文件夹（对话保留为未分类）', icon: 'trash', danger: true, onClick: function () {
+            confirmModal({ title: '删除文件夹', message: '删除「' + f.name + '」？里面的对话不会被删除，会回到「未分类」。', okText: '删除', danger: true })
+              .then(async function (ok) {
+                if (!ok) return;
+                await api('/api/folders/' + fid, { method: 'DELETE' });
+                await refreshList();
+                toast('已删除文件夹', 'success');
+              });
+          } }
+        ]);
+        return;
+      }
+      const ftoggle = e.target.closest('[data-folder-toggle]');
+      if (ftoggle) {
+        const fid = ftoggle.getAttribute('data-folder-toggle');
+        state.collapsed[fid] = !state.collapsed[fid];
+        saveCollapsed();
+        renderList();
+        return;
+      }
       const actionBtn = e.target.closest('[data-act]');
       if (actionBtn) {
         e.stopPropagation();
@@ -3629,7 +4010,50 @@
         return;
       }
       const item = e.target.closest('.conv-item');
-      if (item) openConversation(item.getAttribute('data-id')).catch(function (err) { toast(err.message, 'error'); });
+      if (item) {
+        const id = item.getAttribute('data-id');
+        // 多选模式下点条目 = 勾选/取消，而不是打开会话（否则一边选一边跳走，很难用）
+        if (state.sel.on) { selToggle(id); return; }
+        openConversation(id).catch(function (err) { toast(err.message, 'error'); });
+      }
+    });
+
+    // 多选开关 + 批量操作条
+    $('#btn-multiselect').addEventListener('click', function () {
+      state.sel.on = !state.sel.on;
+      if (!state.sel.on) selClear();
+      renderList();
+    });
+    $('#btn-new-folder').addEventListener('click', async function () {
+      const name = await promptModal({ title: '新建文件夹', label: '文件夹名', placeholder: '例如：线段树 / 我的弱项' });
+      if (!name || !name.trim()) return;
+      try {
+        await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: name.trim() }) });
+        await refreshList();
+        toast('已新建文件夹', 'success');
+      } catch (e) { toast(e.message || '新建失败', 'error'); }
+    });
+    $('#sb-bulk').addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-bulk]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-bulk');
+      if (act === 'exit') { selExit(); return; }
+      if (act === 'all') {
+        // 全选**当前可见**的对话（跟搜索/标签页一致，不会把看不到的也选进来）
+        const visible = state.convs.filter(function (c) { return c.archived === (state.tab === 'archive'); })
+          .filter(function (c) {
+            if (!state.query) return true;
+            const q = state.query.toLowerCase();
+            return (c.title + ' ' + c.preview).toLowerCase().indexOf(q) >= 0;
+          }).map(function (c) { return c.id; });
+        const allPicked = visible.length && visible.every(selHas);
+        state.sel.ids = allPicked ? [] : visible;
+        renderList();
+        return;
+      }
+      if (act === 'move') { openFolderMenu(btn, state.sel.ids); return; }
+      if (act === 'delete') { confirmBatchDelete(state.sel.ids); return; }
+      if (act === 'archive') { batchOp('archive', state.sel.ids); return; }
     });
 
     // 主题 / 页面导航（再次点击当前页面按钮 → 返回教练视图）
@@ -3737,9 +4161,18 @@
     // 输入框
     const input = $('#input');
     input.addEventListener('input', function () {
-      autosizeInput();
+      scheduleAutosize();
       updateComposer();
     });
+    /**
+     * 多绑几个事件是有意的：拖入文本（drop）、鼠标右键粘贴、输入法上屏…
+     * 都不保证走 input。真实反馈"粘贴之后框子还是一行"就是这么来的。
+     * 加上 field-sizing 兜底后，即便这些事件全都不触发，框子也会跟着内容长。
+     */
+    ['change', 'paste', 'drop', 'cut'].forEach(function (ev) {
+      input.addEventListener(ev, function () { scheduleAutosize(); });
+    });
+    window.addEventListener('resize', function () { autosizeInput(); });
     input.addEventListener('keydown', function (e) {
       const isEnter = e.key === 'Enter';
       if (!isEnter) return;
