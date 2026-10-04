@@ -104,6 +104,27 @@ async function main() {
   });
   check('样例检测 WA', r5.ok && !r5.allPass && r5.results[0].verdict === 'WA', r5);
 
+  console.log('\n== 超时参数归一化（假 TLE 事故的回归） ==');
+  check('normTimeLimit(0) 用内置默认值（不是 0 毫秒）', runner.normTimeLimit(0) === runner.RUN_TIMEOUT_MS, runner.normTimeLimit(0));
+  check('normTimeLimit(undefined/NaN/负数) 同样回落', runner.normTimeLimit(undefined) === runner.RUN_TIMEOUT_MS
+    && runner.normTimeLimit(NaN) === runner.RUN_TIMEOUT_MS && runner.normTimeLimit(-5) === runner.RUN_TIMEOUT_MS);
+  check('normTimeLimit(800) 原样保留', runner.normTimeLimit(800) === 800);
+  // 这条是"130ms 判 TLE"的直接回归：0 毫秒跑一个正常程序，必须 AC 而不是 TLE
+  const rZ = await runner.runSamples({ lang: 'js', code: SOL_OK, samples: [{ input: '1\n3\n1 2 3\n', output: '6\n' }], timeLimitMs: 0 });
+  check('timeLimitMs=0 不再制造假 TLE', rZ.ok && rZ.allPass && rZ.results[0].verdict === 'AC', rZ.results && rZ.results[0]);
+
+  console.log('\n== 语言按本机事实选择（无 g++ 机器的回归） ==');
+  check('没注入探测结果 → 一律当可用（保持老行为）',
+    runner.pickLang('cpp', null).lang === 'cpp' && runner.pickLang('cpp', null).unavailable === false);
+  check('请求可用语言 → 不改动',
+    runner.pickLang('python', { cpp: false, python: true, js: true }).lang === 'python'
+      && runner.pickLang('python', { cpp: false, python: true, js: true }).changed === false);
+  const pk = runner.pickLang('cpp', { cpp: false, python: true, js: true });
+  check('无 g++ 时退到 python 并标记 changed', pk.lang === 'python' && pk.changed === true && pk.requested === 'cpp', pk);
+  const pk2 = runner.pickLang('cpp', { cpp: false, python: false, js: false });
+  check('一个运行时都没有 → unavailable（绝不假装跑过）', pk2.unavailable === true, pk2);
+  check('只有 Node 时退到 js', runner.pickLang('cpp', { cpp: false, python: false, js: true }).lang === 'js');
+
   console.log('\n== C++ 编译运行 ==');
   const runtimes = await runner.availableRuntimes();
   console.log('  运行环境:', JSON.stringify(runtimes));

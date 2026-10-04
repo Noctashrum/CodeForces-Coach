@@ -225,6 +225,23 @@ npm run app       # 启动桌面应用
 
 ---
 
+## 多题并行：同时问好几道题
+
+**可以。** 每个对话各有自己的生成流（右侧「Agent 工作台」按对话显示），服务端没有"同时只能跑一个"的限制：
+在 A 对话里问 1800C、切到 B 对话问 2264D，两轮会真的同时跑完，互不干扰（各自的工作区、各自的停止按钮）。
+
+只有两处必须排队，都是**同一份共享资源**造成的，不是限流：
+
+| 共享资源 | 怎么处理 | 你会看到什么 |
+| --- | --- | --- |
+| 取题用的内嵌浏览器窗口（全局只有一个，靠它过 Cloudflare） | 抓取排队：一次只放一个抓取进去，前一个失败不卡后面的 | 后一轮的控制台/日志里有「抓取排队中（前面还有 N 个抓取）」；题面照常取到 |
+| 同一道题的工作区（`workspace/cf-<题号>`，按题号跨对话共享） | 同题加锁：同一道题的验证链串行 | 第二个对话要么排队后直接**复用**第一个的对拍结论，要么在它跑完后接着跑；绝不会两边同时改同一批文件 |
+
+**不同题 = 不同锁**：并行度不受影响。同一道题第二次问命中已验证结论时，本来就不会重跑链路（见
+「删除对话 = 连这道题的验证缓存一起删」）。
+
+---
+
 ## 讲解形式
 
 **完整讲解 / 代码评估 → 图文文档（默认）**；**思路提示 / 题干解读 → 轻量文字**（这两类只给方向，文档范式用不上）。
@@ -346,29 +363,36 @@ scripts/             mock 服务、单元与端到端测试、探针、打包、
 ## 开发与测试
 
 ```bash
-npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，386 项检查
+npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，258 项检查
 npm run test:units        # 单元测试全家桶（9 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / harness / runner
 npm run test:harness      # 编排器单测（契约切片、样例隔离、工作区、证据门、富文档）
 npm run test:runner       # 运行器单测（编译 / 输出归一化比对 / 超时 / C++23）
-npm run test:parallel     # 并发生成、停止退栈、预算护栏、生成器数据不变量、标尺降档
+npm run test:parallel     # 并发生成、停止退栈、预算护栏、生成器数据不变量、标尺降档、串行队列/工作区锁
 npm run test:agentruns    # 并发下 Agent 工作台的事件归属
 node scripts/run-smoke.js --packaged   # 桌面冒烟自检（打包版的真实界面；建议设 CHATBOX_SMOKE_TIMEOUT=240000）
 npm run mock              # 单独启动模拟 LLM（:3999）
 npm run mock-cf           # 单独启动模拟 Codeforces（:3998）
 npm run pack              # 打包便携目录版 dist/CFCoach-win32-x64（保留 exe 旁 data/）
-npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（33 个文件）
-npm run test:skills       # 技能系统与工具层单测（不联网，70 条）
+npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（34 个文件）
+npm run test:skills       # 技能系统与工具层单测（不联网，78 条）
 node scripts/probe-review-session.js <handle> <比赛号>   # 真机验证：装复盘材料（题解 + 多份源码）
 node scripts/probe-review-bundle.js  <handle> <比赛号>   # 真机验证：打包给对话框的那份材料
 node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证：抓提交源码
 ```
+
+推送与发布（三条命令、push 前自检、常见报错对照）：见 [docs/PUSHING.md](docs/PUSHING.md)。
 
 改**教练工具循环**（`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`）时，`.probe/` 下有两个省时间的工具：
 
 ```bash
 node .probe/dump-coach-events.js  "CF 1800C 讲解一下" mock-gpt-4      # 打一轮真实事件流（工具 / Agent / 文档）
 node .probe/probe-e2e-cases.js    debug|badrich|hint|doc|soft|rethink # 定点复现 e2e 里的某条用例
+node .probe/probe-no-runtime.js                                        # 复现"没有编译器的电脑"（自己拉起 mock + server）
 ```
+
+`probe-no-runtime.js` 用的是诊断开关 `CFCOACH_FAKE_RUNTIMES=none|python|cpp,js`：本机明明装了 g++/Python
+时，也能把"运行时探测结果"压成指定的那几种，用来跑通"没有编译器的机器"这条路（它是一等公民的降级路径，
+在开发机上复现不了就只能靠这个开关守回归）。
 
 它们要连一个正在跑的开发服务（`PORT=3210 CF_BASE=http://127.0.0.1:3998 CHATBOX_DATA_DIR=… node server.js`）
 加一个 mock 上游（`node scripts/mock-llm.js`，`MOCK_DEBUG=1` 会让它打印"我收到了什么"）。
@@ -388,6 +412,18 @@ node .probe/probe-e2e-cases.js    debug|badrich|hint|doc|soft|rethink # 定点�
   - 排查线索两份：`data/cf-fetch.log`（每次抓取的成败与原因）与
     `%APPDATA%\codeforces-coach\cf-diag.log`（浏览器通道每一步的落地页、是否遇到挑战；**失败一定会写**，不需要开开关）。
 - **为什么回答里说"我没能验证通过"？** 验证是承诺而不是装饰：预算内没收敛就如实说，并列出试过什么。
+- **我的电脑没装 g++ / Python，还能用吗？** 能，但交付形态会如实降级（这是刻意的，不是故障）：
+  - 应用**每次**都探测本机运行时（30 秒缓存），工具描述与系统提示词里写的就是"你这台机器上有什么"；
+  - 只有 Python → 验证链**自动改用 Python** 跑，并在结论里注明"本机没有 cpp 运行时，已改用 python"；
+  - **一个都没有** → `cf_verify` 直接回 `NO-RUNTIME` 并明确要求"不要再重试"，讲解按**纯推理**交付：
+    第一句如实说明"本机没有编译器，这道题没能用程序验证"，但思路、正确性论证、复杂度、图文文档照常给。
+    装好 Python 3（或 g++）后 30 秒内自动重新探测，不需要重启应用。
+- **答案里出现过一坨带尖括号、`DSML` 字样的怪东西？** 那是**上游模型把内部工具调用标记泄漏成了正文**
+  （不是编码问题，也不是你的操作问题），已在三处堵住：
+  ① 步数用尽时不再省略工具声明（改为 `tool_choice: none` + 明确指令——省略声明正是触发泄漏的条件）；
+  ② 正文里的标记优先**回收**成真正的工具调用继续干活，收不回来就剥掉，**绝不**当讲解显示；
+  剥完为空则如实说明这一轮没产出正文，再要一次；
+  ③ 打开旧会话时顺手清理历史里已经存下的标记并写回文件（老会话不用手动删）。
 - **为什么有时又慢又贵？** 推理型模型单次调用可能 5 分钟；预算把单轮限制在 40 次调用 / 20 分钟。
   最有效的省钱手段是给角色分别配模型（生成器用便宜的、题解用强的）。
 - **什么都没生成出来？** 你会拿到一段机械摘要：卡在哪、已经跑了什么、可以怎么办，外加完整的决策轨迹——

@@ -690,12 +690,92 @@ async function runLoopCases() {
     } finally { stub.restore(); }
   });
 
-  await tAsync('步数用尽：最后一轮禁用工具，避免把中间过程当答案', async () => {
-    const stub = stubModel([{ toolCalls: [{ id: 'loop', name: 'cf_probe', args: '{"q":"loop"}' }], finishReason: 'tool_calls' }]);
+  await tAsync('步数用尽：保留工具声明 + tool_choice=none（不再省略 tools —— 那正是上游泄漏标记的触发条件）', async () => {
+    const stub = stubModel([
+      { toolCalls: [{ id: 'loop', name: 'cf_probe', args: '{"q":"loop"}' }], finishReason: 'tool_calls' },
+      { toolCalls: [{ id: 'loop2', name: 'cf_probe', args: '{"q":"loop2"}' }], finishReason: 'tool_calls' },
+      { content: '这是最终正文' }
+    ]);
     try {
       const r = await agentloop.runTurn({ provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools, maxSteps: 2 });
       assert.ok(r.usage.truncatedSteps, '应标记步数用尽');
-      assert.deepStrictEqual(stub.calls[stub.calls.length - 1].tools, [], '最后一轮必须禁用工具');
+      const last = stub.calls[stub.calls.length - 1];
+      /**
+       * ⚠️ 这里原来是 `assert.deepStrictEqual(last.tools, [])`（"最后一轮禁用工具"）。
+       * 那条断言固化的正是本次线上事故的根因：**省略 tools 声明、历史里却带着 tool_calls** 时，
+       * 上游会把内部工具标记（DSML）直接吐进 content，我们又把 content 当"最终回答"存下来显示
+       * —— 用户看到的就是那坨"乱码"。现在改为：声明保留、用 tool_choice='none' 表达"别调工具"。
+       */
+      assert.strictEqual(last.tools.length, stubTools.length, '不能省略工具声明（会触发上游标记泄漏）');
+      assert.strictEqual(last.toolChoice, 'none', '应当用 tool_choice=none 表达"这一轮只写答案"');
+      assert.ok(String(last.messages[last.messages.length - 1].content).includes('最后一步'),
+        '缺少"最后一步"系统指令：' + JSON.stringify(last.messages[last.messages.length - 1]));
+      assert.ok(r.text.includes('loop') || r.text.length > 0, '最终正文不该为空');
+    } finally { stub.restore(); }
+  });
+
+  /* ---------- 上游标记泄漏（DSML）：回收 + 净化 ---------- */
+  // 标记字面量用拼装方式写，避免把上游特殊标记直接写进源码（可读性差且容易看错形态）
+  const P = '\uFF5C';   // 全角竖线（上游实际用的那种）
+  const mark = (tag, attrs) => '<' + P + P + 'DSML' + P + P + tag + (attrs ? ' ' + attrs : '') + '>';
+  const leakedCall = (name, param, value) => [
+    mark('calls'),
+    mark('invoke', 'name="' + name + '"'),
+    mark('parameter', 'name="' + param + '" string="true"') + value + mark('parameter'),
+    mark('invoke'),
+    mark('calls')
+  ].join('\n');
+
+  await tAsync('工具标记泄漏：hasLeakMarkup/stripLeakMarkup 认得出、剥得掉、不伤正文', async () => {
+    const s = '先讲一句正常的话。\n' + leakedCall('cf.run', 'q', 'x') + '\n后面还有正常的话。';
+    assert.ok(agentloop.hasLeakMarkup(s), '应识别出标记');
+    const cleaned = agentloop.stripLeakMarkup(s);
+    assert.ok(!agentloop.hasLeakMarkup(cleaned), '剥完不该还有标记');
+    assert.ok(cleaned.includes('先讲一句正常的话') && cleaned.includes('后面还有正常的话'), '正文不能被吃掉：' + cleaned);
+    assert.ok(!cleaned.includes('parameter'), '标记属性不该残留：' + cleaned);
+  });
+
+  await tAsync('工具标记泄漏：回收成真实调用并执行（cf.run → cf_probe 这种写歪的名字也要对回）', async () => {
+    const stub = stubModel([
+      { content: leakedCall('cf.probe', 'q', 'leak') },
+      { content: '回收后正常收尾' }
+    ]);
+    const seen = [];
+    try {
+      const r = await agentloop.runTurn({
+        provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools,
+        onToolEnd: (c, ok, out) => seen.push(c.name + '|' + ok + '|' + String(out))
+      });
+      assert.ok(seen.length === 1, '泄漏的调用应当被执行一次，实际：' + JSON.stringify(seen));
+      assert.ok(seen[0].startsWith('cf_probe|true|'), '应回收成 cf_probe 并成功执行：' + seen[0]);
+      assert.ok(seen[0].includes('PROBE_RESULT:leak'), '参数要从标记里解析出来：' + seen[0]);
+      assert.strictEqual(r.text, '回收后正常收尾');
+      assert.deepStrictEqual(r.toolsUsed, ['cf_probe']);
+    } finally { stub.restore(); }
+  });
+
+  await tAsync('工具标记泄漏：无法回收时也不进正文（如实提示，不显示标记）', async () => {
+    const stub = stubModel([{ content: leakedCall('cf_nowhere_tool', 'q', 'x') }]);
+    try {
+      const r = await agentloop.runTurn({ provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools });
+      assert.ok(!agentloop.hasLeakMarkup(r.text), '标记不能出现在正文里：' + r.text);
+      assert.ok(r.text.includes('标记'), '应有一句如实说明：' + r.text);
+    } finally { stub.restore(); }
+  });
+
+  await tAsync('步数用尽且上游仍只吐标记：剥掉 + 一次干净重试 → 拿到真正文', async () => {
+    const stub = stubModel([
+      { toolCalls: [{ id: 'loop', name: 'cf_probe', args: '{"q":"loop"}' }], finishReason: 'tool_calls' },
+      { toolCalls: [{ id: 'loop2', name: 'cf_probe', args: '{"q":"loop2"}' }], finishReason: 'tool_calls' },
+      { content: leakedCall('cf.probe', 'q', 'again') },      // 最后一步：仍然只吐标记
+      { content: '干净重试拿到的正文' }                        // 净化后为空 → 无历史工具痕迹再要一次
+    ]);
+    try {
+      const r = await agentloop.runTurn({ provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools, maxSteps: 2 });
+      assert.strictEqual(r.text, '干净重试拿到的正文');
+      const retry = stub.calls[stub.calls.length - 1];
+      assert.deepStrictEqual(retry.tools, [], '干净重试是唯一允许不带工具声明的请求');
+      assert.ok(!retry.messages.some((m) => m.toolCalls), '干净重试的历史里不能带 tool_calls（会再次触发泄漏）');
     } finally { stub.restore(); }
   });
 
@@ -794,6 +874,55 @@ async function runToolCases() {
 
   await tAsync('cf_run 缺 code 时抛错（runtimes 探测要 spawn，本套件刻意不碰）', async () => {
     await assert.rejects(() => byName.get('cf_run').execute({}), /缺少 code/);
+  });
+
+  /* ---------- 本机运行时事实 → 工具行为（朋友那台"没有 g++"的机器的回归） ---------- */
+
+  await tAsync('无 g++ 机器：cf_verify 自动改用 python，并把降级如实说出来', async () => {
+    let seen = null;
+    const t5 = toolsLib.createTools(Object.assign({}, hooks, {
+      runtimeFlags: { cpp: false, python: true, js: true },
+      conv: { id: 'c-runtime', cfProblem: null, statementText: '题面（测试用，长度足够触发）', cfProblemSamples: [] },
+      runVerify: async (vo) => {
+        seen = vo;
+        return { verification: { status: 'ok', samples: 1, iterations: 10, tiers: [8], bruteFrozen: true }, solCode: 'print(1)' };
+      }
+    }));
+    const out = await t5.find((x) => x.name === 'cf_verify').execute({});
+    assert.ok(seen && seen.lang === 'python', '验证链应当改用 python，实际：' + (seen && seen.lang));
+    assert.ok(seen.langSwitched && seen.langSwitched.from === 'cpp' && seen.langSwitched.to === 'python', '缺少 langSwitched：' + JSON.stringify(seen && seen.langSwitched));
+    assert.ok(/没有 cpp 运行时/.test(out), '降级必须如实说明：' + out.slice(0, 200));
+  });
+
+  await tAsync('一个运行时都没有：cf_verify 直接 NO-RUNTIME、不跑链、不假装验证过', async () => {
+    let ran = false;
+    const t6 = toolsLib.createTools(Object.assign({}, hooks, {
+      runtimeFlags: { cpp: false, python: false, js: false },
+      conv: { id: 'c-noruntime', cfProblem: null, statementText: '题面（测试用）', cfProblemSamples: [] },
+      runVerify: async () => { ran = true; return { verification: { status: 'ok' } }; }
+    }));
+    const out = await t6.find((x) => x.name === 'cf_verify').execute({});
+    assert.strictEqual(ran, false, '没有运行时就不该跑验证链');
+    assert.ok(out.includes('NO-RUNTIME'), '结论要不是 NO-RUNTIME：' + out.slice(0, 120));
+    assert.ok(out.includes('纯推理') && out.includes('没有经过运行验证'), '缺少"纯推理 + 如实说明"口径：' + out.slice(0, 300));
+    assert.ok(out.includes('不要再重试'), '要明确拦住模型反复重试：' + out.slice(0, 200));
+  });
+
+  await tAsync('语言不可用时 cf_run 如实拒绝（不拿别的语言去跑这份源码）', async () => {
+    const t7 = toolsLib.createTools(Object.assign({}, hooks, { runtimeFlags: { cpp: false, python: true, js: true } }));
+    const out = await t7.find((x) => x.name === 'cf_run').execute({ lang: 'cpp', code: 'int main(){}' });
+    assert.ok(out.includes('运行失败'), '应当是如实失败：' + out.slice(0, 160));
+    assert.ok(out.includes('python'), '要指出可用语言：' + out.slice(0, 200));
+  });
+
+  await tAsync('工具描述随本机事实变化（没有 g++ 时描述里就写"请用 python"）', async () => {
+    const t8 = toolsLib.createTools(Object.assign({}, hooks, { runtimeFlags: { cpp: false, python: true, js: false } }));
+    const verify = t8.find((x) => x.name === 'cf_verify');
+    assert.ok(/python/.test(verify.description) && /没有 g\+\+/.test(verify.description),
+      '描述没有反映本机事实：' + verify.description.slice(-120));
+    const t9 = toolsLib.createTools(Object.assign({}, hooks, { runtimeFlags: { cpp: true, python: true, js: true } }));
+    assert.ok(!/没有 g\+\+/.test(t9.find((x) => x.name === 'cf_verify').description),
+      '有 g++ 时不该出现降级提示');
   });
 }
 

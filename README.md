@@ -244,6 +244,25 @@ are sharing it — and a **🔄 re-run the verification** button in the problem 
 
 ---
 
+## Asking several problems at once (parallel rounds)
+
+**Yes, that works.** Every conversation owns its own generation stream (the Agent bench on the right is per
+conversation) and the server imposes no global "one round at a time" limit: ask 1800C in conversation A, switch to
+conversation B and ask 2264D, and both rounds really run at the same time, each with its own workspace, its own
+stop button and its own cost line.
+
+Only two things queue up, and only because they are a single shared resource — this is not throttling:
+
+| Shared resource | What happens | What you see |
+| --- | --- | --- |
+| The embedded browser window used to fetch statements (there is exactly one, it is what gets past Cloudflare) | Fetches are queued: one at a time, a failure never blocks the ones behind it | Log line `抓取排队中（前面还有 N 个抓取）`; statements still arrive normally |
+| The workspace of **one specific problem** (`workspace/cf-<id><index>`, shared across conversations) | Per-problem lock: the verification chain of one problem is serial | The second conversation either waits and then **reuses** the first one's stress-test conclusion, or runs after it — never writing the same files concurrently |
+
+**Different problems are different locks**, so parallelism is not reduced. And the second question about the same
+problem normally hits the cached verdict anyway (see "Deleting a conversation also deletes its verification cache").
+
+---
+
 ## Explanations
 
 **Rich document by default** for a *full explanation* and *code review*; *hints* and *statement reading* stay
@@ -373,7 +392,7 @@ electron/            desktop shell: window, tray, menu, smoke self-test, CF fetc
 ## Development and tests
 
 ```bash
-npm test                  # end-to-end: boots mock services with an isolated data dir, 386 checks
+npm test                  # end-to-end: boots mock services with an isolated data dir, 258 checks
 npm run test:units        # 9 unit suites (includes the harness / evidence-gate suites)
 npm run test:harness      # orchestrator unit tests (contract slicing, sample isolation, workspace, rich docs)
 npm run test:runner       # runner unit tests (compile / compare / timeout / C++23); also test:parallel | test:agentruns
@@ -382,12 +401,14 @@ node scripts/run-smoke.js --packaged   # same, driving the packaged app's real U
 npm run mock              # mock LLM endpoint on :3999
 npm run mock-cf           # mock Codeforces on :3998
 npm run pack              # build the portable folder dist/CFCoach-win32-x64 (keeps data/ next to the exe)
-npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (33 files)
-npm run test:skills       # 70 skill checks (skill system + tool layer, no network)
+npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (34 files)
+npm run test:skills       # 78 skill checks (skill system + tool layer, no network)
 node scripts/probe-review-session.js <handle> <contestId>   # live: assemble review material (editorials + sources)
 node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle that goes into the composer
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
 ```
+
+Pushing and releasing (three commands, a pre-push checklist, common errors): see [docs/PUSHING.md](docs/PUSHING.md).
 
 When working on the **coach tool loop** (`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`),
 two probes under `.probe/` save a lot of time:
@@ -395,9 +416,14 @@ two probes under `.probe/` save a lot of time:
 ```bash
 node .probe/dump-coach-events.js  "CF 1800C 讲解一下" mock-gpt-4      # dump one real event stream (tools / agents / doc)
 node .probe/probe-e2e-cases.js    debug|badrich|hint|doc|soft|rethink # reproduce one e2e case in isolation
+node .probe/probe-no-runtime.js                                        # reproduce "a machine with no compilers" (boots its own mocks)
 ```
 
-Both need a running dev server (`PORT=3210 CF_BASE=http://127.0.0.1:3998 CHATBOX_DATA_DIR=… node server.js`) plus a
+`probe-no-runtime.js` uses the diagnostic switch `CFCOACH_FAKE_RUNTIMES=none|python|cpp,js`, which overrides the
+runtime probe — the only way to exercise the "no compiler installed" path on a dev box that has g++ and Python.
+That path is a first-class degradation, so it needs a guard too.
+
+Both (the first two) need a running dev server (`PORT=3210 CF_BASE=http://127.0.0.1:3998 CHATBOX_DATA_DIR=… node server.js`) plus a
 mock upstream (`node scripts/mock-llm.js`; `MOCK_DEBUG=1` prints what it received). All tests use isolated
 `.test-data/` directories, so your real data is never touched; frontend deps (marked, highlight.js, KaTeX) are
 vendored under `public/vendor/` — no CDN requests.
@@ -410,6 +436,20 @@ vendored under `public/vendor/` — no CDN requests.
   proxy, or paste the statement — pasting always works and goes through exactly the same pipeline.
 - **Why did the answer say "I could not verify this"?** Verification is a promise, not decoration: if stress
   testing does not converge within the budget, the coach says so, and lists what it tried.
+- **My machine has no g++ / Python — is that fatal?** No, but the delivery degrades honestly on purpose:
+  - the app probes the local runtimes on every turn (30 s cache); the tool descriptions and the system prompt
+    state exactly what *this* machine can run;
+  - Python only → the verification chain **switches to Python** and says so in its conclusion;
+  - nothing at all → `cf_verify` returns `NO-RUNTIME` immediately (and tells the model not to retry), and the
+    explanation is delivered by **pure reasoning**: the first sentence states that nothing was executed, while
+    the reasoning, correctness argument, complexity and the illustrated document are still produced.
+    Install Python 3 (or g++) and it is picked up within 30 seconds — no restart.
+- **I saw a blob of angle brackets / `DSML` in an answer?** That is the upstream model **leaking its internal
+  tool-call markup into the message body** (not an encoding problem, not something you did). It is blocked in
+  three layers: ① the final step no longer drops the tool declarations (`tool_choice: none` + an explicit
+  instruction instead — omitting them is what triggered the leak); ② markup in the body is first **recovered**
+  into real tool calls, otherwise stripped — it is never shown as an explanation, and if nothing is left the app
+  says so honestly and asks again; ③ opening an old conversation repairs already-saved markup and writes it back.
 - **Why is a round expensive/slow sometimes?** Reasoning models can spend 5 minutes per call. Budgets cap a round
   at 40 calls / 20 minutes; giving roles their own models (cheap generator, strong solution) is the biggest lever.
 - **Nothing was generated?** You still get a mechanical summary (where it stopped, what ran, what to try), plus the

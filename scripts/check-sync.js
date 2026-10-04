@@ -27,6 +27,8 @@ const FILES = [
   'lib/cfreview.js', 'lib/harness.js', 'lib/richdoc.js', 'lib/cf.js', 'lib/runner.js',
   'lib/workspace.js', 'lib/explaindoc.js', 'lib/anticheat.js', 'lib/statement.js',
   'lib/profile.js', 'lib/pricing.js', 'lib/sandbox.js',
+  // 多题并行的两个底座：串行队列（CF 抓取窗口）+ 工作区锁（同题串行）
+  'lib/serialqueue.js',
   'public/index.html', 'public/styles.css', 'public/js/app.js', 'public/js/review.js',
   'public/js/md.js', 'public/js/agentruns.js',
   'electron/main.js', 'electron/preload.js',

@@ -28,6 +28,10 @@ profile-log.jsonl
 .cf-dump/
 smoke.png
 
+# Ablation experiment output: raw model answers, transcripts and the token bill.
+# Inputs (problem list, prompts, harness code) are tracked; results are not.
+ablation/out/
+
 # Python bytecode caches. The sandbox helper (lib/sandbox/sitecustomize.py) is
 # compiled on first run, and a .pyc embeds the absolute path of the machine that
 # compiled it — i.e. it can carry local directory names into a public repo.

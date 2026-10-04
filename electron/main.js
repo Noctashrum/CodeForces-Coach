@@ -68,6 +68,7 @@ process.env.HOST = '127.0.0.1';
 // 必须在窗口创建前引入服务（server.js 顶部会读取 CHATBOX_DATA_DIR）
 const { startServer, setSubmissionBrowserFetch, setEditorialBrowserFetch, setChallengeWindowOpener, setCfLoginOpener, setCfWarmOpener } = require(path.join(ROOT_DIR, 'server.js'));
 const cfClient = require(path.join(ROOT_DIR, 'lib', 'cf.js'));
+const { createSerialQueue } = require(path.join(ROOT_DIR, 'lib', 'serialqueue.js'));
 
 app.setAppUserModelId('com.local.cfcoach');
 
@@ -101,7 +102,29 @@ function applyCfProxy(session) {
   }
 }
 
+/**
+ * 抓取窗口的**串行队列**（多题并行的关键）。
+ *
+ * 为什么必须排队：整个应用只有一个 cfWindow。它靠 webContents 的
+ * did-finish-load / did-fail-load 事件 + 轮询判断"这一页是不是题面"，
+ * 两个抓取同时进行时，双方会挂上同一组监听、互相抢占同一个 webContents 的导航 ——
+ * A 的回调看到的是 B 的页面（判成"被重定向"），B 可能读到 A 的 HTML，
+ * 于是"两个会话同时问两道题"会退化成随机失败或抓错题面。
+ *
+ * 串行化的只是**共享窗口这一段**（一次抓取本身也就几秒，包含挑战等待）：
+ * 两轮对话的模型调用、编译、对拍、文档生成仍然各跑各的。
+ * 队列里前一个抓取失败不会卡住后面的（见 lib/serialqueue.js）。
+ */
+const cfFetchQueue = createSerialQueue();
+
+/** 排队抓取（对外入口，保持原来的函数签名） */
 function fetchHtmlViaBrowser(url, opts) {
+  const ahead = cfFetchQueue.pending;
+  if (ahead > 0) console.log('[cf] 抓取排队中（前面还有 ' + ahead + ' 个抓取）: ' + url);
+  return cfFetchQueue.push(() => fetchHtmlViaBrowserNow(url, opts));
+}
+
+function fetchHtmlViaBrowserNow(url, opts) {
   const o = opts || {};
   return new Promise((resolve, reject) => {
     if (!CF_HOST_RE.test(url)) { reject(new Error('仅允许抓取 codeforces.com 页面')); return; }

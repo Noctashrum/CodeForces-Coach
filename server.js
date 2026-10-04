@@ -304,6 +304,27 @@ function repairStaleStreaming(conv) {
   return dirty;
 }
 
+/**
+ * 清理历史消息里被写进去的**上游工具调用标记**（线上事故：模型把内部 DSML 标记当正文吐出来，
+ * 应用又当成"讲解"存了下来）。服务端已经不会再产出这种正文（见 lib/agentloop.js 的泄漏处理），
+ * 但用户文件里可能已经存着被污染的那一条：打开会话时顺手修掉，返回改动条数。
+ *
+ * ⚠️ 只动 content（正文），不碰 richDoc / 工具链 / reasoning。
+ */
+function repairLeakedMarkup(conv) {
+  if (!conv || !Array.isArray(conv.messages)) return 0;
+  let n = 0;
+  for (const m of conv.messages) {
+    if (!m || typeof m.content !== 'string' || !agentloop.hasLeakMarkup(m.content)) continue;
+    const cleaned = agentloop.stripLeakMarkup(m.content).trim();
+    m.content = cleaned || '（这条消息的正文全是模型内部工具标记，已清理：它没有真正回答你的问题，可以点"重新生成"。）';
+    if (!m.leakRepaired) m.leakRepaired = true;
+    n++;
+  }
+  if (n) conv.leakRepairedCount = (conv.leakRepairedCount || 0) + n;
+  return n;
+}
+
 /* ---------------- 内容工具 ---------------- */
 
 function contentText(content) {
@@ -980,17 +1001,46 @@ function detectCfRef(text) {
   return null;
 }
 
-/** 本机运行环境（缓存一次） */
+/**
+ * 本机运行环境（带短 TTL 的缓存）。
+ *
+ * 为什么要 TTL：原来缓存一次就永远不再探测 —— 用户按提示装好 Python/g++ 之后，
+ * 应用仍按"不可用"走（工具描述、验证链语言选择都按旧结果），体验上是"装了也没用"。
+ * 30 秒足够挡住高频调用，又能在用户装完运行时后很快自愈。
+ */
+const RUNTIMES_TTL_MS = 30 * 1000;
 let runtimesCache = null;
+let runtimesAt = 0;
 async function getRuntimes() {
-  if (!runtimesCache) runtimesCache = await runner.availableRuntimes();
+  if (!runtimesCache || Date.now() - runtimesAt > RUNTIMES_TTL_MS) {
+    runtimesCache = await runner.availableRuntimes();
+    runtimesAt = Date.now();
+  }
   return runtimesCache;
 }
 function runtimesText(r) {
-  return ['C++ (g++17)', 'Python 3', 'Node.js'].map((label, i) => {
+  const text = ['C++ (g++17)', 'Python 3', 'Node.js'].map((label, i) => {
     const ok = i === 0 ? r.cpp : (i === 1 ? r.python : r.js);
     return label + (ok ? '可用' : '不可用');
   }).join('；');
+  return text + runtimesAdvice(r);
+}
+/**
+ * 运行环境给出的**行动建议**（写进系统提示词）。
+ * 真实事故：朋友的电脑没有 g++ —— 模型照样按 C++ 交代码，验证链按 cpp 编译失败 → NO-BRULER，
+ * 又反复重跑，最后连讲解都没交付。这里把"本机事实 → 该怎么做"直接写清楚。
+ */
+function runtimesAdvice(r) {
+  if (!r || (!r.cpp && !r.python && !r.js)) {
+    return '。⚠ 本机没有任何可用运行时：验证链跑不了（不要反复重试 cf_verify），'
+      + '请直接按"纯推理 + 如实说明未验证"交付讲解（首句说明未在本机验证、用手算小样例与静态推理讲清楚、'
+      + '并告诉用户装 Python 3 或 g++ 后可以自动跑对拍）。';
+  }
+  if (!r.cpp) {
+    return '。⚠ 本机没有 g++：写代码一律用 Python（cf_verify/cf_run 的语言请传 python），'
+      + '不要交 C++ 代码，也不要因为 C++ 跑不了就反复重试验证。';
+  }
+  return '。';
 }
 
 /** 教练模式的上游请求骨架 */
@@ -1645,7 +1695,8 @@ async function handleChat(req, res) {
         if (cfHandle) {
           try { userInfo = await cf.fetchUser(cfHandle); } catch (e) { /* 查询失败不阻塞 */ }
         }
-        const rt = runtimesText(await getRuntimes());
+        const rtFlags = await getRuntimes();
+        const rt = runtimesText(rtFlags);
 
         // 工具调用在界面上的"步骤 chip"（取题 / 对拍 / 复盘…每步都让学员看见）
         const runToolChips = [];
@@ -1694,6 +1745,8 @@ async function handleChat(req, res) {
         let autoIntent = '';
         /** 本轮有没有试过产出文档（试过就不再催第二次） */
         let docTried = false;
+        /** 是否已经补过"如实交付"那一轮（只补一次，避免死循环） */
+        let honestTried = false;
         /** 本轮已经验证过的题目（同题不重复跑全链路）+ 那次的结果 */
         let turnVerifyKey = '';
         let turnVerifyResult = null;
@@ -1745,12 +1798,17 @@ async function handleChat(req, res) {
           .filter((m) => m.id !== assistantMsgId && (m.role === 'user' || m.role === 'assistant'))
           .filter((m) => m.status !== 'streaming')
           .map((m) => ({ role: m.role, content: contentText(m.content) }))
+          // 历史里若残留上游工具标记（旧版本存下的污染消息），绝不原样回灌给模型：
+          // 把工具调用标记当上下文回灌，正是上游再吐一次标记的诱因（见 lib/agentloop.js 泄漏说明）
+          .map((m) => (agentloop.hasLeakMarkup(m.content) ? { role: m.role, content: agentloop.stripLeakMarkup(m.content) } : m))
           .filter((m) => String(m.content || '').trim())
           .filter((m, i, arr) => !(i === arr.length - 1 && m.role === 'user'
             && m.content.trim() === userTextFull.trim()));
 
         const tools = toolsLib.createTools({
           conv, cfg, lang, userInfo, profile, runtimes: rt,
+          // 结构化运行时标志：工具描述与语言选择按本机事实走（没有 g++ 的机器不再交 C++）
+          runtimeFlags: rtFlags,
           saveConv: () => saveConv(conv),
           signal: () => ctrl.signal,
           wsKey: () => workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem }),
@@ -1999,6 +2057,42 @@ async function handleChat(req, res) {
           });
         }
 
+        /**
+         * **验证不可用 / 正文太薄时的交付兜底**（无运行时机器上的真实事故）。
+         *
+         * 场景：朋友的电脑没有 g++ —— 验证链按 cpp 编译失败 → NO-BRULER，模型反复重跑，
+         * 步数用尽时只吐了一坨上游标记（见 lib/agentloop.js 的泄漏说明），最后**什么都没交付**：
+         * 用户看到的是"没报告"。这里补一轮"必须给出正文"的提醒：
+         * 有验证结论就把结论讲清楚，没有就按诚实降级交付（首句说明未验证）——
+         * 但**绝不能什么都不说**。只补一次（honestTried），避免死循环。
+         */
+        const verifyBad = !!(turnVerification && turnVerification.status && turnVerification.status !== 'ok');
+        // 正文太薄的判据刻意保守：只有在"这一轮真的调过工具"时才补（避免"谢谢"这类短消息被多花一轮钱）
+        const thinBody = String(streamState.content || '').trim().length < 80 && runToolChips.length > 0;
+        const truncated = !!(result && result.truncatedSteps);
+        if (!honestTried && !ctrl.signal.aborted && !askedForHint
+            && !(assistantTarget && assistantTarget.richDoc)
+            && (verifyBad || truncated || thinBody)) {
+          honestTried = true;
+          console.log('[coach] 验证不可用或正文太薄 → 补一轮"如实交付"提醒'
+            + '（verify=' + (turnVerification && turnVerification.status) + ' truncated=' + truncated + ' thin=' + thinBody + '）');
+          const before = streamState.content;
+          result = await agentloop.runTurn({
+            provider, model,
+            system: buildCoachSystem({ conv, profile, userInfo, runtimes: rt, lang, intent: conv.intent }),
+            history: history.concat(before ? [{ role: 'assistant', content: before }] : []),
+            userText: '【系统提醒·接着上一段继续】这一轮你必须给出**给用户的正文**，不允许只调工具或输出任何内部标记。'
+              + (verifyBad ? '本机验证没能通过（' + turnVerification.status + '）或不可用：请在开头用一句如实说明'
+                + '（例如"本机没有 g++，这道题没能用程序验证"），然后仍然把思路、正确性论证与复杂度讲清楚，'
+                + '该出的图解/文档照常出。' : '把已经拿到的结论讲清楚，别把中间过程堆给用户。'),
+            tools,
+            signal: ctrl.signal,
+            maxTokens: (cfg.maxOutputTokens > 0) ? cfg.maxOutputTokens : 0,
+            maxSteps: 6,
+            ...runTurnHooks
+          });
+        }
+
         if (result && result.text) streamState.content = result.text;
         content = streamState.content;
         reasoning = streamState.reasoning;
@@ -2047,7 +2141,8 @@ async function handleChat(req, res) {
         // 说明：这段代码永远不会执行（`else if (false)`），保留原因是它对拍的诚实性保证
         // （标尺隔离 / 只重写有罪的一方 / 反例不得来自失信标尺）是 `verifyOnly` 路径的直接来源，
         // 想对照旧行为时可以直接读它。
-        const rt = runtimesText(await getRuntimes());
+        const rtFlags = await getRuntimes();
+        const rt = runtimesText(rtFlags);
         let userInfo = null;
         const handle = (cfg.cfHandle || '').trim();
         if (handle) {
@@ -3319,7 +3414,10 @@ const server = http.createServer(async (req, res) => {
           const conv = loadConv(id);
           if (!conv) throw new HttpError(404, '会话不存在');
           // 自愈：上次异常退出/中断遗留的 streaming 状态在这里统一清理（正在生成的不动）
-          if (repairStaleStreaming(conv)) saveConv(conv);
+          const fixedStream = repairStaleStreaming(conv);
+          // 自愈：历史里被写进正文的上游工具调用标记也在这里清掉（只读打开一次就修好，落盘一次）
+          const fixedLeak = repairLeakedMarkup(conv);
+          if (fixedStream || fixedLeak) saveConv(conv);
           conv.active = activeGenerations.has(id);   // 是否正在后台生成（前端据此轮询/显示"生成中"）
           sendJSON(res, 200, conv);
           return;

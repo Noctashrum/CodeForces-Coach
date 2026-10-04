@@ -1163,6 +1163,130 @@ async function main() {
     await api('/api/conversations/' + c.id, { method: 'DELETE' });
   }
 
+  /* ---- 15. 历史正文里的上游工具标记：打开会话即自愈 ---- */
+  console.log('\n== 15. 上游标记泄漏的历史自愈 ==');
+  {
+    // 真实事故：模型把内部工具调用标记当正文吐出来，应用当成"讲解"存了下来。
+    // 标记字面量用拼装生成（全角竖线），避免把上游标记直接写进源码。
+    const P = '\uFF5C';
+    const wrap = (inner) => P + P + 'DSML' + P + P + inner + P + P;
+    const tag = (name, attrs) => '<' + wrap(name + (attrs ? ' ' + attrs : '')) + '>';
+    const closeTag = (name) => '</' + wrap(name) + '>';
+    const polluted = '好的，我先看一下工作区。\n'
+      + tag('calls') + '\n'
+      + tag('invoke', 'name="cf_workspace"') + '\n'
+      + tag('parameter', 'name="action" string="true"') + 'list\n' + closeTag('parameter') + '\n'
+      + closeTag('invoke') + '\n'
+      + closeTag('calls');
+    const c = (await api('/api/conversations', { method: 'POST', body: JSON.stringify({ title: '泄漏自愈' }) })).json;
+    await api('/api/conversations/' + c.id + '/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        messages: [
+          { id: 'm_l1', role: 'user', content: 'CF 1800C 讲一下', createdAt: Date.now() },
+          { id: 'm_l2', role: 'assistant', content: polluted, createdAt: Date.now() },
+          { id: 'm_l3', role: 'assistant', content: tag('calls') + tag('invoke', 'name="cf_run"') + closeTag('invoke') + closeTag('calls'), createdAt: Date.now() }
+        ]
+      })
+    });
+    const reopened = (await api('/api/conversations/' + c.id)).json;
+    const msg = (reopened.messages || []).find((m) => m.id === 'm_l2');
+    check('打开会话时清掉了正文里的上游标记', !!msg && msg.content.indexOf(P) < 0 && !/DSML|invoke/.test(msg.content),
+      msg && msg.content.slice(0, 80));
+    check('自愈保留标记之外的人话', !!msg && msg.content.indexOf('我先看一下工作区') >= 0, msg && msg.content);
+    const only = (reopened.messages || []).find((m) => m.id === 'm_l3');
+    check('整条都是标记的消息给出如实说明（不显示空白也不显示标记）',
+      !!only && only.content.length > 5 && only.content.indexOf(P) < 0, only && only.content);
+    // 落盘检查：第二次打开读到的应该已经是干净内容（自愈写回，不是只改内存）
+    const again = (await api('/api/conversations/' + c.id)).json;
+    const againMsg = (again.messages || []).find((m) => m.id === 'm_l2');
+    check('自愈结果已写回文件', !!againMsg && againMsg.content === (msg && msg.content), againMsg && againMsg.content.slice(0, 40));
+    await api('/api/conversations/' + c.id, { method: 'DELETE' });
+  }
+
+  /* ---- 16. 多题并行：不同题真并发 + 同一道题串行 ---- */
+  console.log('\n== 16. 多题并行（不同题并发、同题串行） ==');
+  {
+    const info = (await api('/api/info')).json;
+    const wsDir = (key) => path.join(info.dataDir, 'workspace', key);
+    const mkConv = async () => {
+      const c = (await api('/api/conversations', { method: 'POST', body: '{}' })).json;
+      await api('/api/conversations/' + c.id, { method: 'PATCH', body: JSON.stringify({ mode: 'coach', lang: 'python', model: 'mock-delay' }) });
+      return c;
+    };
+    const lastBody = async (id) => {
+      const cc = (await api('/api/conversations/' + id)).json;
+      const m = (cc.messages || []).filter((x) => x.role === 'assistant').pop();
+      return (m && m.content) || '';
+    };
+    const CHAIN_ROLES = ['solution', 'brute', 'gen'];
+    /** 记录某个会话这一轮里"验证链 Agent"的时间窗（相对 t0，毫秒） */
+    const spanWatcher = (into, tag, t0) => (ev) => {
+      const s = into[tag] || (into[tag] = { spans: [], first: null, doneAt: null });
+      if (ev.type === 'agentStart' && CHAIN_ROLES.indexOf(ev.role) >= 0) {
+        const t = Date.now() - t0;
+        if (s.first == null) s.first = t;
+        s.spans.push({ role: ev.role, start: t, end: null });
+      }
+      if (ev.type === 'agentEnd' && CHAIN_ROLES.indexOf(ev.role) >= 0) {
+        const open = s.spans.filter((x) => x.role === ev.role && x.end == null);
+        if (open.length) open[open.length - 1].end = Date.now() - t0;
+      }
+      if (ev.type === 'done') s.doneAt = Date.now() - t0;
+    };
+    // 两道题的工作区都清掉：不清就走"已验证"快路径，压根不跑链路，测不出并发
+    ['cf-1800C', 'cf-2264D'].forEach((k) => fs.rmSync(wsDir(k), { recursive: true, force: true }));
+
+    // (1) 两个会话**同时**问**两道不同的题** → 必须真并发（各自的工作区与链路互不相干）
+    const cA = await mkConv();
+    const cB = await mkConv();
+    const t0 = Date.now();
+    const P = {};
+    await Promise.all([
+      sseChat({ conversationId: cA.id, mode: 'send', userContent: 'CF 1800C 讲解一下' }, { onEvent: spanWatcher(P, 'A', t0) }),
+      sseChat({ conversationId: cB.id, mode: 'send', userContent: 'CF 2264D 讲解一下' }, { onEvent: spanWatcher(P, 'B', t0) })
+    ]);
+    const bodyA = await lastBody(cA.id);
+    const bodyB = await lastBody(cB.id);
+    const sA = P.A || { first: null, doneAt: null, spans: [] };
+    const sB = P.B || { first: null, doneAt: null, spans: [] };
+    check('并行：两道不同的题同时提问，两轮都跑完并给出正文',
+      bodyA.length > 50 && bodyB.length > 50, { A: bodyA.length, B: bodyB.length });
+    check('并行：两道题各自的工作区（不同题 = 不同目录，互不干扰）',
+      fs.existsSync(wsDir('cf-1800C')) && fs.existsSync(wsDir('cf-2264D')),
+      { a: fs.existsSync(wsDir('cf-1800C')), b: fs.existsSync(wsDir('cf-2264D')) });
+    check('并行：两轮的时间窗互相重叠（是真并发，不是"一条跑完再跑另一条"）',
+      sA.first != null && sB.first != null && sA.doneAt != null && sB.doneAt != null
+      && sA.first < sB.doneAt && sB.first < sA.doneAt, { A: sA, B: sB });
+
+    // (2) 两个会话**同时**问**同一道题** → 工作区锁必须把它们串起来（绝不并发改同一批文件）
+    fs.rmSync(wsDir('cf-1800C'), { recursive: true, force: true });
+    const cC = await mkConv();
+    const cD = await mkConv();
+    const t1 = Date.now();
+    const Q = {};
+    await Promise.all([
+      sseChat({ conversationId: cC.id, mode: 'send', userContent: 'CF 1800C 讲解一下' }, { onEvent: spanWatcher(Q, 'C', t1) }),
+      sseChat({ conversationId: cD.id, mode: 'send', userContent: 'CF 1800C 讲解一下' }, { onEvent: spanWatcher(Q, 'D', t1) })
+    ]);
+    const bodyC = await lastBody(cC.id);
+    const bodyD = await lastBody(cD.id);
+    const runsC = ((Q.C && Q.C.spans) || []).filter((x) => x.end != null);
+    const runsD = ((Q.D && Q.D.spans) || []).filter((x) => x.end != null);
+    check('同题并行：两个会话都拿到正文（排队的一方不会被饿死）',
+      bodyC.length > 50 && bodyD.length > 50, { C: bodyC.length, D: bodyD.length });
+    check('同题并行：至少有一边真的跑了验证链（否则本用例没有意义）',
+      runsC.length + runsD.length >= 1, { runsC, runsD });
+    let crossed = null;
+    runsC.forEach((a) => runsD.forEach((b) => {
+      if (a.start < b.end && b.start < a.end) crossed = { a, b };
+    }));
+    check('同题并行：两边的工作区链路时间窗绝不重叠（同题串行，不会并发改同一批文件）',
+      !crossed, { crossed, runsC, runsD });
+
+    for (const id of [cA.id, cB.id, cC.id, cD.id]) await api('/api/conversations/' + id, { method: 'DELETE' });
+  }
+
   console.log('\n========================================');
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
   if (fails.length) {

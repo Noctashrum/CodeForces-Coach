@@ -105,6 +105,8 @@ async function main() {
       /^\/\.electron-cache($|\/)/,
       /^\/\.npm-cache($|\/)/,
       /^\/scripts($|\/)/,
+      /^\/docs($|\/)/,
+      /^\/ablation($|\/)/,
       /^\/\.edge-tmp($|\/)/,
       /^\/node_modules\/\.cache($|\/)/,
       /^\/README\.md$/,

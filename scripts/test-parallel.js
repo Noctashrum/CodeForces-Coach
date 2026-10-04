@@ -589,5 +589,54 @@ const callAgent = async (opts) => {
     /没有额外调用模型/.test(String(resTrunc.explainerText || '')));
 
 
+  /**
+   * 多题并行 = 不同题号真的同时跑 + 同一道题绝不并发改同一批文件。
+   * 这两条由两个底座保证：lib/serialqueue.js（串行队列）与 workspace.withKeyLock（按 key 分链）。
+   */
+  console.log('\nparallel: 串行队列（CF 抓取窗口与工作区锁的底座）');
+  {
+    const { createSerialQueue } = require('../lib/serialqueue');
+    const q = createSerialQueue();
+    let running = 0;
+    let maxRunning = 0;
+    const order = [];
+    const mk = (id, ms, boom) => () => new Promise((res, rej) => {
+      running++; maxRunning = Math.max(maxRunning, running);
+      order.push('start' + id);
+      setTimeout(() => {
+        running--; order.push('end' + id);
+        if (boom) rej(new Error('boom' + id)); else res(id);
+      }, ms);
+    });
+    const r = await Promise.allSettled([q.push(mk(1, 60)), q.push(mk(2, 20, true)), q.push(mk(3, 10))]);
+    ok('串行队列：严格按入队顺序执行、绝不重叠（共享窗口的前提）',
+      maxRunning === 1 && order.join(',') === 'start1,end1,start2,end2,start3,end3', { maxRunning, order });
+    ok('串行队列：返回值按各自的 promise 交给调用方', r[0].value === 1 && r[2].value === 3,
+      r.map((x) => x.status));
+    ok('串行队列：中间一个抛错原样上报，且不卡住后面的任务',
+      r[1].status === 'rejected' && /boom2/.test(String((r[1].reason && r[1].reason.message) || '')),
+      r.map((x) => x.status));
+    ok('串行队列：排空后 pending 归零', q.pending === 0, q.pending);
+
+    // 工作区锁：同一道题（同 key）串行、不同题（不同 key）并行
+    let same = 0;
+    let maxSame = 0;
+    let all = 0;
+    let maxAll = 0;
+    const task = (key, id, ms) => workspace.withKeyLock(key, async () => {
+      all++; maxAll = Math.max(maxAll, all);
+      if (key === 'cf-1000A') { same++; maxSame = Math.max(maxSame, same); }
+      await new Promise((res) => setTimeout(res, ms));
+      all--; if (key === 'cf-1000A') same--;
+      return id;
+    });
+    const got = await Promise.all([task('cf-1000A', 'a', 80), task('cf-1000A', 'b', 20), task('cf-1000B', 'c', 60)]);
+    ok('工作区锁：同一道题串行（两个会话不会同时改同一批文件）', maxSame === 1, { maxSame });
+    ok('工作区锁：不同的题并行（另一道题不被前一道题挡住）', maxAll >= 2, { maxAll });
+    ok('工作区锁：返回值原样透传', got.join(',') === 'a,b,c', got);
+    ok('工作区锁：排空后不留下残留队列（不留内存增长）', workspace.lockedKeys().length === 0, workspace.lockedKeys());
+  }
+
+
   console.log('\nparallel: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));
 })().catch((e) => { console.error('并行测试异常: ' + (e && e.stack || e)); process.exit(1); });
