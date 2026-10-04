@@ -19,6 +19,8 @@ const path = require('path');
 const env = require('./lib/env');
 const record = require('./lib/record');
 const levels = require('./lib/levels');
+const l2 = require('./lib/l2');
+const compareLib = require('./lib/compare');
 const problemsLib = require('./lib/problems');
 const judge = require('./judge');
 const { startMockLlm } = require('./mockllm');
@@ -86,10 +88,58 @@ async function main() {
     const vBad = await judge.judgeRecord({ level: 'L0', problem: problem.id, code: tricky, codeLang: 'python', codeSource: 'selftest' }, problem, { iterations: 30, maxTotalMs: 60000 });
     check('判分：样例过得去但差分抓到错', vBad.sampleVerdict === 'AC' && vBad.diffVerdict === 'WA', JSON.stringify([vBad.sampleVerdict, vBad.diffVerdict, vBad.detail]));
 
-    // ⑤ 记录与汇总
+    // ⑤ L2（cf-coach 本体无头跑）：验证链要真的跑起来并给出可判分的交付物
+    const rec2 = await l2.runL2({
+      problem, statement: problem.statement, target, params, run, name: 'L2-example-ab',
+      iterations: 5, lang: 'python', depth: 'L3', maxStressMs: 60000
+    });
+    check('L2 出代码', rec2.ok && !!rec2.code, rec2.error || '');
+    check('L2 交付物取自工作区文件', /^workspace:/.test(String(rec2.codeSource)), rec2.codeSource || '');
+    check('L2 内部多角色都跑到了', ['solution', 'brute', 'gen'].every((r) => (rec2.roles || {})[r] > 0), JSON.stringify(rec2.roles));
+    check('L2 验证状态 ok 且链声称已验证', rec2.verificationStatus === 'ok' && rec2.assertedVerified === true, String(rec2.verificationStatus));
+    check('L2 验证报告带覆盖范围（可自证边界）', !!rec2.scopeNote && rec2.scopeComplete === true, rec2.scopeNote || '');
+    const v2 = await judge.judgeRecord(rec2, problem, { iterations: 20, maxTotalMs: 60000 });
+    check('判分：L2 正解 → 样例+差分 AC', v2.sampleVerdict === 'AC' && v2.diffVerdict === 'AC', JSON.stringify([v2.sampleVerdict, v2.diffVerdict, v2.detail]));
+
+    // ⑥ P0 闸门：题解本身是错的（题面里埋「错解」让假模型吐错代码）
+    //    期望：链**不许**声称已验证；重写版没过官方样例 → 被拒并保留原版；判分判它 WA。
+    const wrongStatement = '（自测用）题面里故意写「错解」两个字，让假模型吐一份错代码。\n\n输入两个整数 a、b，输出它们的和。';
+    const wrongProblem = Object.assign({}, problem, {
+      id: 'wrong-ab', statement: wrongStatement, statementSha: env.sha256(wrongStatement), statementFile: null
+    });
+    const recW = await l2.runL2({
+      problem: wrongProblem, statement: wrongStatement, target, params, run, name: 'L2-wrong-ab',
+      iterations: 5, lang: 'python', depth: 'L3', maxStressMs: 60000
+    });
+    check('L2 错解时不声称已验证（P0：收紧"已验证"）', recW.assertedVerified === false && recW.verificationStatus !== 'ok', String(recW.verificationStatus));
+    check('L2 错解时如实标注交付的是第一版', recW.delivered === 'model-first', String(recW.delivered));
+    check('L2 拒绝没过官方样例的重写（P0 闸门留痕）', (recW.trajectory || []).some((t) => t.kind === 'sol-rewrite-sample-fail'));
+    const vW = await judge.judgeRecord(recW, wrongProblem, { iterations: 20, maxTotalMs: 60000 });
+    check('判分：L2 错解 → 差分 WA（判据有鉴别力）', vW.diffVerdict === 'WA', JSON.stringify([vW.sampleVerdict, vW.diffVerdict]));
+
+    // ⑦ 配对比较（用户口径：合格线 = 不差于 L0）
+    //    错解那题也真跑一遍 L0（不能拿"对的 L0 判分明细"冒充）——否则配对比的是两个不同的东西
+    const rec0W = await levels.runL0({ problem: wrongProblem, statement: wrongStatement, target, params, run, name: 'L0-wrong-ab' });
+    const v0W = await judge.judgeRecord(rec0W, wrongProblem, { iterations: 20, maxTotalMs: 60000 });
+    check('判分：错解那题的 L0 也是错的（两边都错才是"打平"）', v0W.diffVerdict === 'WA', JSON.stringify([v0W.sampleVerdict, v0W.diffVerdict]));
+    const cmp = compareLib.compare([rec0, rec1, rec2, rec0W, recW], [v0, v1, v2, v0W, vW], { base: 'L0', cand: 'L2' });
+    check('配对比较：只统计跑齐两档的题', cmp.n === 2, 'n=' + cmp.n);
+    check('配对比较：正解那题打平、错解那题也打平 → 不差于 L0 = 100%', cmp.notWorse === 2 && cmp.tie === 2, JSON.stringify([cmp.win, cmp.tie, cmp.loss]));
+    check('配对比较：假自信率（只有 L2 会"声称已验证"，错的那题没声称）',
+      cmp.falseConfidence.asserted === 1 && cmp.falseConfidence.assertedWrong === 0, JSON.stringify(cmp.falseConfidence));
+    check('配对比较：没有 oracle 的题只算样例级证据（不冒充差分 AC）',
+      compareLib.acOf({ diffVerdict: 'no-oracle', sampleVerdict: 'AC' }).strength === 'samples'
+      && compareLib.acOf({ diffVerdict: 'WA', sampleVerdict: 'AC' }).ac === false);
+    check('配对比较：McNemar 精确检验的已知值正确',
+      Math.abs(compareLib.exactBinomialTwoSided(0, 5) - 0.0625) < 1e-9
+      && Math.abs(compareLib.exactBinomialTwoSided(1, 9) - (22 / 1024)) < 1e-9
+      && compareLib.exactBinomialTwoSided(0, 0) === 1
+      && Math.abs(compareLib.exactBinomialTwoSided(3, 3) - 1) < 1e-9);
+
+    // ⑧ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
-    check('records.jsonl 写出两条记录', lines.length === 2, 'lines=' + lines.length);
+    check('records.jsonl 写出五条记录', lines.length === 5, 'lines=' + lines.length);
     check('summary.json 写出分档汇总', fs.existsSync(path.join(run.outDir, 'summary.json')));
     const r0 = JSON.parse(lines[0]);
     check('记录里有题面 sha（三档同题面可审计）', !!r0.statementSha, String(r0.statementSha));

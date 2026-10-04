@@ -21,16 +21,17 @@ const path = require('path');
 const env = require('./lib/env');
 const record = require('./lib/record');
 const levels = require('./lib/levels');
+const l2 = require('./lib/l2');
 const problemsLib = require('./lib/problems');
 const agentloop = require('../lib/agentloop');
 
-const LEVELS = ['L0', 'L1'];
+const LEVELS = ['L0', 'L1', 'L2'];
 
 function usage() {
   console.log([
     '消融实验跑分：node ablation/run.js [选项]',
     '',
-    '  --level L0,L1        跑哪些档（默认 L0,L1）',
+    '  --level L0,L1,L2     跑哪些档（默认 L0,L1；L2 = cf-coach 本体无头跑）',
     '  --problems all|1800C,1800D   跑哪些题（默认 all）',
     '  --problems-file PATH 题库清单（默认 ablation/problems.json，缺则用 example）',
     '  --limit N            只跑前 N 题（先做 pilot 用）',
@@ -43,6 +44,10 @@ function usage() {
     '  --max-steps N        L1 工具循环上限（默认 20）',
     '  --iterations N       L1 对拍默认组数（默认 30）',
     '  --jobs N             并行跑几个 (题×档)（默认 1）',
+    '  --lang python|cpp    L2 用哪种语言交题解（默认 python；L0/L1 由模型自己决定）',
+    '  --rich               L2 生成图文文档（更贵；默认关，判分不需要它）',
+    '  --depth L1|L2|L3     L2 的讲解深度（默认 L3 = 与产品默认一致；L3 会多一次提纲 Agent）',
+    '  --max-stress-ms N    L2 单次对拍时长上限（默认 90000）',
     '  --out DIR            输出目录（默认 ablation/out/<时间戳>）',
     '  --dry-run            只打印计划，不调模型'
   ].join('\n'));
@@ -110,11 +115,18 @@ async function main() {
   console.log('待跑：' + jobsList.length + ' 个 (模型×题×档)，并发 ' + jobs + '\n');
 
   let done = 0;
+  const l2opts = {
+    lang: args.lang === 'cpp' ? 'cpp' : 'python',
+    rich: env.bool(args.rich, false),
+    depth: args.depth ? String(args.depth).toUpperCase() : 'L3',
+    maxStressMs: env.num(args.maxStressMs, 90000)
+  };
   await pool(jobsList, jobs, async (j) => {
     const name = j.level + '-' + j.problem.id + (targets.length > 1 ? '-' + j.target.model : '');
     const ctx = { problem: j.problem, statement: j.problem.statement, target: j.target, params, run, name, maxSteps, iterations };
     const t0 = Date.now();
-    const rec = j.level === 'L0' ? await levels.runL0(ctx) : await levels.runL1(ctx);
+    const rec = j.level === 'L0' ? await levels.runL0(ctx)
+      : (j.level === 'L1' ? await levels.runL1(ctx) : await l2.runL2(Object.assign({}, ctx, l2opts)));
     const cost = record.costOf(cfg, j.target.providerId, j.target.model, rec.usage);
     rec.cost = cost;
     rec.statementSha = j.problem.statementSha;

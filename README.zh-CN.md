@@ -375,8 +375,10 @@ npm run mock-cf           # 单独启动模拟 Codeforces（:3998）
 npm run pack              # 打包便携目录版 dist/CFCoach-win32-x64（保留 exe 旁 data/）
 npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（34 个文件）
 npm run test:skills       # 技能系统与工具层单测（不联网，78 条）
-npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/判分全链路）
+npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/L2/判分/配对比较全链路）
 npm run probe:ablation    # 消融实验四个入口的真跑探针（零 token：run/judge/import-l2/selftest）
+npm run probe:ui          # 人工测试台端到端探针（零 token：加题→跑分→判分→人工判定→导出）
+npm run ablation:serve    # 人工测试台（http://127.0.0.1:4311）：加题 → 跑 L0/L2 → 左右对比 → 打分
 node scripts/probe-review-session.js <handle> <比赛号>   # 真机验证：装复盘材料（题解 + 多份源码）
 node scripts/probe-review-bundle.js  <handle> <比赛号>   # 真机验证：打包给对话框的那份材料
 node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证：抓提交源码
@@ -387,6 +389,11 @@ node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证�
 **消融实验（怎么证明比裸模型强）**：`ablation/` 下有 L0（裸模型，无工具）、L1（裸 agent + 通用工具 + 明确要求对拍）
 两个档位的跑分脚本，L2 就是 cf-coach 本体；判分用官方样例 + **外部 AC 提交**做差分对拍。
 协议、判分纪律（oracle 绝不能用 cf-coach 自己的产出）、成本估算与结论模板见 [ablation/README.md](ablation/README.md)。
+
+这一轮的验收线刻意保守：**"不差于 L0"的比例**（`notWorseRate`）+ 配对胜平负与 McNemar 精确 p +
+每档 tokens/花费 + **假自信率**（链自己声称"已验证"、却被外部 oracle 判 WA）。
+`npm run ablation:serve` 打开一页人工测试台：粘贴题面（样例自动解析）、指定自己的 oracle 与生成器、
+左右对比 L0 原文与 L2 的图文文档、逐题记人工判定。
 
 改**教练工具循环**（`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`）时，`.probe/` 下有两个省时间的工具：
 

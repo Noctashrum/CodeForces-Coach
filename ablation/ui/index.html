@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人工消融测试台 · cf-coach(L2) vs 裸模型(L0)</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --fg:#e6e8ee; --dim:#9aa3b2; --line:#2a2f3a; --ok:#3fb950; --bad:#f85149; --warn:#d29922; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 "Segoe UI",system-ui,sans-serif; }
+  a { color:var(--acc); }
+  header { position:sticky; top:0; z-index:5; background:var(--panel); border-bottom:1px solid var(--line); padding:10px 14px; }
+  h1 { font-size:16px; margin:0 0 8px; }
+  h2 { font-size:14px; margin:0 0 8px; color:var(--dim); font-weight:600; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; }
+  .toolbar label { color:var(--dim); display:flex; gap:4px; align-items:center; }
+  input,select,textarea,button { background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font:inherit; }
+  textarea { width:100%; min-height:120px; font-family:Consolas,monospace; font-size:12px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.primary { background:#1f6feb; border-color:#1f6feb; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  main { padding:14px; display:grid; grid-template-columns:1fr 320px; gap:14px; }
+  @media (max-width:1100px) { main { grid-template-columns:1fr; } }
+  section, .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:14px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:600; }
+  tr.sel { background:#1b2434; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .b-ok { color:var(--ok); border-color:#1f4d26; } .b-bad { color:var(--bad); border-color:#5a1f1c; }
+  .b-warn { color:var(--warn); border-color:#5a451a; } .b-dim { color:var(--dim); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:1100px) { .grid2 { grid-template-columns:1fr; } }
+  pre { background:#0b0e12; border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; max-height:420px; font-size:12px; margin:6px 0; }
+  iframe { width:100%; height:520px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  .dim { color:var(--dim); } .small { font-size:12px; }
+  .kpi { display:flex; flex-wrap:wrap; gap:10px; }
+  .kpi div { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-width:120px; }
+  .kpi b { display:block; font-size:18px; }
+  #log { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px; height:calc(100vh - 200px); overflow:auto; font-family:Consolas,monospace; font-size:12px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  dialog { width:min(900px,94vw); background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  .choice button.on { background:#1f6feb; border-color:#1f6feb; }
+</style>
+</head>
+<body>
+<header>
+  <h1>人工消融测试台 —— 同一道题：<span style="color:var(--acc)">L0 裸模型</span> vs <span style="color:var(--ok)">L2 cf-coach</span>（合格线 = 不差于 L0）</h1>
+  <div class="toolbar">
+    <span id="modelInfo" class="dim small"></span>
+    <label>对拍组数 <input id="it" type="number" min="1" max="2000" value="60" style="width:70px"></label>
+    <label>L2 语言 <select id="lang"><option value="python">python</option><option value="cpp">cpp</option></select></label>
+    <label>讲解深度 <select id="depth"><option>L3</option><option>L2</option><option>L1</option></select></label>
+    <label><input id="rich" type="checkbox" checked> 生成图文文档</label>
+    <label><input id="withL1" type="checkbox"> 也跑 L1（工具 agent 档）</label>
+    <button id="btnAdd">＋ 加题</button>
+    <button id="btnRunSel" class="primary">跑选中题</button>
+    <button id="btnRunAll">跑全部（缺的档）</button>
+    <button id="btnJudge">判分 + 配对比较</button>
+    <button id="btnExport">导出 JSON</button>
+    <button id="btnCancel">取消</button>
+  </div>
+  <div id="progress" class="small dim" style="margin-top:6px"></div>
+</header>
+
+<main>
+  <div>
+    <section id="summary"></section>
+    <section>
+      <h2>题目（勾选 → 跑 / 点标题 → 看对比）</h2>
+      <div id="problems"></div>
+    </section>
+    <section id="detailSection" style="display:none">
+      <h2 id="detailTitle"></h2>
+      <div id="detail"></div>
+    </section>
+  </div>
+  <div>
+    <h2>事件</h2>
+    <div id="log"></div>
+  </div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <h2 id="dlgTitle">加题</h2>
+    <div class="grid2">
+      <div>
+        <div class="row"><label style="width:70px">题号</label><input id="f_id" placeholder="1800C" style="flex:1"></div>
+        <div class="row"><label style="width:70px">标题</label><input id="f_title" style="flex:1"></div>
+        <div class="row"><label style="width:70px">rating</label><input id="f_rating" type="number" style="width:90px">
+          <label style="width:60px">链接</label><input id="f_url" style="flex:1"></div>
+        <div class="row"><label style="width:70px">题面</label><span class="small dim">直接粘 CF 题面全文；官方样例留空会自动解析</span></div>
+        <textarea id="f_statement" style="min-height:220px" placeholder="把题面粘这里（含 Input/Output/Examples 就能自动抽出样例）"></textarea>
+        <div class="row"><label style="width:70px">样例</label><span class="small dim">（自动解析；也可手填 JSON 数组 [{"input":"1 2","output":"3"}]）</span></div>
+        <textarea id="f_samples" style="min-height:70px" placeholder='留空 = 从题面自动解析'></textarea>
+      </div>
+      <div>
+        <div class="row"><label style="width:70px">oracle</label><span class="small dim">外部 AC 题解（<b>绝不能</b>用 L2 自己产的）</span>
+          <select id="f_oracleLang"><option>python</option><option>cpp</option></select></div>
+        <textarea id="f_oracleCode" style="min-height:150px" placeholder="题解代码（CF 上 AC 的提交 / 题解博客的代码 / 你验证过的实现）"></textarea>
+        <div class="row"><label style="width:70px">生成器</label><span class="small dim">随机数据，按 argv 控制规模</span>
+          <select id="f_genLang"><option>python</option><option>cpp</option></select></div>
+        <textarea id="f_genCode" style="min-height:120px" placeholder="gen：读 argv[1]=组数/规模，argv[2]=数值上限；没有生成器就只能判样例"></textarea>
+        <div class="row"><label style="width:70px">备注</label><input id="f_note" style="flex:1"></div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end">
+      <button value="cancel">取消</button>
+      <button id="btnSave" value="save" class="primary">保存</button>
+      <button id="btnDelete" value="delete" style="color:var(--bad)">删除这道题</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let S = null;              // /api/state
+let sel = new Set();       // 勾选要跑的题
+let detailId = null;       // 正在看的题
+const dlg = $('dlg');
+let editing = null;
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function pct(x) { return x == null ? '—' : Math.round(x * 100) + '%'; }
+function money(x) { return x == null ? '' : '¥' + (Math.round(x * 10000) / 10000); }
+
+function logLine(s) {
+  const el = $('log'); const at = new Date().toLocaleTimeString();
+  el.insertAdjacentHTML('beforeend', '<div class="small"><span class="dim">' + at + '</span> ' + esc(s) + '</div>');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? undefined : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+function recOf(level, id) { return (S.records || []).find((r) => r.level === level && r.problem === id) || null; }
+function verdictOf(level, id) { return (S.verdicts || []).find((v) => v.level === level && v.problem === id) || null; }
+function humanOf(id) { const h = (S.human || []).filter((x) => x.problem === id); return h.length ? h[h.length - 1] : null; }
+
+function verdictBadge(v) {
+  if (!v) return '<span class="badge b-dim">未判分</span>';
+  const map = {
+    AC: ['b-ok', '差分 AC'], WA: ['b-bad', '差分 WA'], 'no-oracle': ['b-warn', '缺 oracle'],
+    'run-error': ['b-warn', '运行错误'], 'no-code': ['b-dim', '没抽到代码'], unknown: ['b-dim', '未知'], skipped: ['b-dim', '未判分']
+  };
+  const m = map[v.diffVerdict] || ['b-dim', v.diffVerdict];
+  let s = '<span class="badge ' + m[0] + '">' + esc(m[1]) + '</span>';
+  if (v.sampleVerdict === 'WA') s += ' <span class="badge b-bad">样例 WA</span>';
+  if (v.falseConfidence) s += ' <span class="badge b-bad">假自信</span>';
+  return s;
+}
+
+function renderSummary() {
+  const c = S.compare;
+  const d = S.defaults;
+  let html = '<h2>总览（合格线 = 不差于 L0）</h2>';
+  if (!c || !c.n) {
+    html += '<div class="dim">还没有配对结论：对同一批题跑齐 <b>L0</b> 与 <b>L2</b>，再点"判分 + 配对比较"。</div>';
+  } else {
+    html += '<div class="kpi">'
+      + '<div>配对题数<b>' + c.n + '</b></div>'
+      + '<div>L2 更好<b style="color:var(--ok)">' + c.win + '</b></div>'
+      + '<div>打平<b>' + c.tie + '</b></div>'
+      + '<div>L0 更好<b style="color:var(--bad)">' + c.loss + '</b></div>'
+      + '<div>不差于 L0<b style="color:' + (c.notWorseRate >= 0.5 ? 'var(--ok)' : 'var(--bad)') + '">' + pct(c.notWorseRate) + '</b></div>'
+      + '<div>McNemar p<b>' + (c.p == null ? '—' : c.p.toFixed(3)) + '</b></div>'
+      + '<div>假自信率<b>' + (c.falseConfidence.asserted ? pct(c.falseConfidence.rate) + '<span class="small dim"> ' + c.falseConfidence.assertedWrong + '/' + c.falseConfidence.asserted + '</span>' : '—') + '</b></div>'
+      + '<div>人工判定<b class="small">' + c.quality.total + ' 题</b></div>'
+      + '</div>';
+    if ((c.discordant.candBetter + c.discordant.baseBetter) < 6) {
+      html += '<div class="small dim" style="margin-top:6px">不一致格子只有 ' + (c.discordant.candBetter + c.discordant.baseBetter) + ' 个：p 值此时没有判别力（只是"没发现差异"，不是"证明相等"）。要下结论至少 6 个不一致格子。</div>';
+    }
+    html += '<div class="small dim" style="margin-top:6px">成本：' + Object.entries(c.byLevel).map(([lv, g]) => lv + ' 平均 ' + g.avgTokens + ' tok' + (g.avgCost != null ? ' / ' + money(g.avgCost) : '') + '（n=' + g.runs + '）').join('　') + '</div>';
+    html += '<div class="small dim">人工判定（讲解质量）：L2 更好 ' + c.quality.coach + '，打平 ' + c.quality.tie + '，L0 更好 ' + c.quality.l0 + (c.quality.other ? '，其他 ' + c.quality.other : '') + '</div>';
+  }
+  html += '<div class="small dim" style="margin-top:6px">当前设置：对拍 ' + d.iterations + ' 组，L2 语言 ' + d.lang + '，深度 ' + d.depth + '，图文文档 ' + (d.rich ? '开' : '关') + '；数据目录 ' + esc(S.root) + '</div>';
+  if (S.problems.some((p) => !p.hasOracle)) html += '<div class="small" style="color:var(--warn);margin-top:4px">⚠️ 有题缺 oracle：只能算样例级证据（不冒充差分 AC）。用题解当 oracle 时记得把题解代码贴上。</div>';
+  $('summary').innerHTML = html;
+}
+
+function renderProblems() {
+  const rows = (S.problems || []).map((p) => {
+    const r0 = recOf('L0', p.id); const r2 = recOf('L2', p.id); const r1 = recOf('L1', p.id);
+    const v0 = verdictOf('L0', p.id); const v2 = verdictOf('L2', p.id);
+    const h = humanOf(p.id);
+    const choiceTxt = h ? ({ coach: 'L2 更好', l2: 'L2 更好', tie: '打平', l0: 'L0 更好', base: 'L0 更好', 'both-bad': '两个都不行', 'both-good': '两个都好' }[String(h.choice).toLowerCase()] || h.choice) : '';
+    return '<tr class="' + (detailId === p.id ? 'sel' : '') + '">'
+      + '<td><input type="checkbox" data-id="' + esc(p.id) + '"' + (sel.has(p.id) ? ' checked' : '') + '></td>'
+      + '<td><b>' + esc(p.id) + '</b>' + (p.rating ? '<div class="small dim">' + esc(p.rating) + '</div>' : '') + '</td>'
+      + '<td><a href="#" data-open="' + esc(p.id) + '">' + esc(p.title || '') + '</a>'
+      + (p.url ? ' <a class="small" href="' + esc(p.url) + '" target="_blank">CF</a>' : '')
+      + '<div class="small dim">' + (p.samples || []).length + ' 组样例 · ' + (p.hasOracle ? 'oracle ' + esc(p.oracleLang) : '<span style="color:var(--warn)">无 oracle</span>') + (p.hasGen ? ' · 有生成器' : ' · <span style="color:var(--warn)">无生成器</span>') + (p.note ? ' · ' + esc(p.note) : '') + '</div></td>'
+      + '<td>' + (r0 ? verdictBadge(v0) : '<span class="badge b-dim">未跑</span>') + '</td>'
+      + '<td>' + (r2 ? verdictBadge(v2) + (r2.assertedVerified ? '<div class="small"><span class="badge ' + (r2.verificationStatus === 'ok' && r2.scopeComplete ? 'b-ok' : 'b-warn') + '">' + esc(r2.verificationStatus || '') + (r2.scopeComplete ? '（完整）' : '（不完整）') + '</span></div>' : '') : '<span class="badge b-dim">未跑</span>') + '</td>'
+      + '<td class="small">' + (choiceTxt ? esc(choiceTxt) : '<span class="dim">—</span>') + (h && h.note ? '<div class="dim">' + esc(h.note) + '</div>' : '') + '</td>'
+      + '<td><button data-edit="' + esc(p.id) + '">编辑</button></td>'
+      + '</tr>';
+  }).join('');
+  $('problems').innerHTML = '<table><thead><tr><th style="width:28px"></th><th>题号</th><th>标题 / 素材</th><th>L0</th><th>L2（cf-coach）</th><th>人工判定</th><th></th></tr></thead><tbody>' + (rows || '<tr><td colspan="7" class="dim">还没有题：点右上角「＋ 加题」，粘题面 + 贴一份题解当 oracle。</td></tr>') + '</tbody></table>';
+  document.querySelectorAll('input[data-id]').forEach((cb) => cb.addEventListener('change', () => { cb.checked ? sel.add(cb.dataset.id) : sel.delete(cb.dataset.id); }));
+  document.querySelectorAll('[data-open]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openDetail(a.dataset.open); }));
+  document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => openEdit(b.dataset.edit)));
+}
+
+function render() { if (!S) return; $('modelInfo').textContent = (S.targets || []).map((t) => t.providerId + '::' + t.model).join('　'); renderSummary(); renderProblems(); if (detailId) openDetail(detailId); }
+
+async function openDetail(id) {
+  detailId = id;
+  const p = (S.problems || []).find((x) => x.id === id);
+  if (!p) return;
+  const r0 = recOf('L0', id); const r2 = recOf('L2', id); const v0 = verdictOf('L0', id); const v2 = verdictOf('L2', id);
+  const h = humanOf(id);
+  $('detailSection').style.display = 'block';
+  $('detailTitle').innerHTML = '对比：' + esc(id) + ' ' + esc(p.title || '') + ' <span class="small dim">（' + (p.samples || []).length + ' 组样例）</span>';
+  const ansCell = (r, level) => {
+    if (!r) return '<div class="dim">这一档还没跑（勾选这道题 → 跑选中题）</div>';
+    let s = '';
+    if (r.error) s += '<div class="badge b-bad">错误：' + esc(r.error) + '</div>';
+    s += '<div class="small dim">' + (r.ms ? (r.ms / 1000).toFixed(1) + 's · ' : '') + ((r.usage && (r.usage.promptTokens + '+' + r.usage.completionTokens + ' tok')) || '') + ' ' + (r.cost ? '· ' + money(r.cost.amount) : '') + ' · 来源 ' + esc(r.codeSource || '—') + '</div>';
+    if (level === 'L2' && r.verificationStatus) {
+      const ok = r.verificationStatus === 'ok' && r.scopeComplete;
+      s += '<div class="row"><span class="badge ' + (ok ? 'b-ok' : (r.verificationStatus === 'ok' ? 'b-warn' : 'b-dim')) + '">链自评：' + esc(r.verificationStatus) + (r.scopeComplete ? '（完整）' : '（不完整）') + '</span>'
+        + '<span class="badge b-dim">交付：' + esc(r.delivered || '—') + '</span></div>';
+      if (r.scopeNote) s += '<div class="small dim">覆盖范围：' + esc(r.scopeNote) + '</div>';
+      if (r.docFile) s += '<iframe src="/api/doc/' + encodeURIComponent(r.docFile) + '"></iframe>';
+      const traj = (r.trajectory || []).map((t) => '· ' + esc(t.kind) + (t.note ? '：' + esc(t.note) : '')).join('<br>');
+      if (traj) s += '<details><summary class="small dim">验证过程中发生了什么（' + (r.trajectory || []).length + ' 步）</summary><div class="small">' + traj + '</div></details>';
+    }
+    if (r.code) s += '<div class="small dim">最终代码（' + esc(r.codeLang || '') + '）</div><pre>' + esc(r.code) + '</pre>';
+    if (level === 'L0' && r.answerName) s += '<details><summary class="small dim">模型原文回答</summary><pre id="ans-' + level + '">加载中…</pre></details>';
+    return s;
+  };
+  const verdictLine = (v, level) => {
+    if (!v) return '<span class="badge b-dim">' + level + ' 未判分</span>';
+    return '<span class="badge b-dim">' + level + '</span> ' + verdictBadge(v)
+      + (v.assertedVerified != null ? ' <span class="badge ' + (v.assertedVerified ? (v.falseConfidence ? 'b-bad' : 'b-ok') : 'b-dim') + '">' + (v.assertedVerified ? (v.falseConfidence ? '声称已验证但被 oracle 判错（假自信）' : '声称已验证且确实对') : '没有声称已验证') + '</span>' : '')
+      + (v.detail ? '<div class="small dim">' + esc(v.detail) + '</div>' : '');
+  };
+  const choices = [['coach', 'L2 更好'], ['tie', '打平'], ['l0', 'L0 更好'], ['both-bad', '两个都不行'], ['both-good', '两个都好']];
+  $('detail').innerHTML = '<div class="grid2">'
+    + '<div class="card"><h2>L0 裸模型（一次调用，无工具）</h2>' + ansCell(r0, 'L0') + '</div>'
+    + '<div class="card"><h2>L2 cf-coach（工具链 + 验证 + 图文）</h2>' + ansCell(r2, 'L2') + '</div>'
+    + '</div>'
+    + '<div class="card"><h2>判分（外部 oracle 差分 = 硬指标）</h2>' + verdictLine(v0, 'L0') + '<div style="height:6px"></div>' + verdictLine(v2, 'L2') + '</div>'
+    + '<div class="card"><h2>人工判定（讲解质量 = 真正的轴）</h2>'
+    + '<div class="row choice">' + choices.map(([v, t]) => '<button data-choice="' + v + '" class="' + (h && String(h.choice).toLowerCase() === v ? 'on' : '') + '">' + t + '</button>').join('') + '</div>'
+    + '<div class="row"><input id="h_note" placeholder="为什么（哪个更容易学会？哪里卡住？）" style="flex:1" value="' + esc(h && h.note || '') + '">'
+    + '<button id="btnHSave">保存人工判定</button>'
+    + '<span class="small dim">已判 ' + (S.human || []).length + ' 次</span></div></div>';
+  document.querySelectorAll('[data-choice]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-choice]').forEach((x) => x.classList.remove('on')); b.classList.add('on');
+  }));
+  $('btnHSave').addEventListener('click', async () => {
+    const on = document.querySelector('[data-choice].on');
+    if (!on) return logLine('先选一个判定（谁更好）');
+    try {
+      await api('/api/human', { problem: id, choice: on.dataset.choice, note: $('h_note').value });
+      logLine('记下人工判定：' + id + ' → ' + on.textContent);
+      await refresh();
+    } catch (e) { logLine('保存失败：' + e.message); }
+  });
+  const a0 = document.getElementById('ans-L0');
+  if (a0 && r0 && r0.answerName) {
+    fetch('/api/answer/' + encodeURIComponent(r0.answerName)).then((x) => x.text()).then((t) => { a0.textContent = t; }).catch(() => { a0.textContent = '读不到'; });
+  }
+}
+
+function openEdit(id) {
+  editing = id || null;
+  const p = id ? (S.problems || []).find((x) => x.id === id) : null;
+  $('dlgTitle').textContent = p ? ('编辑 ' + p.id) : '加题';
+  $('btnDelete').style.display = p ? '' : 'none';
+  ['f_id', 'f_title', 'f_rating', 'f_url', 'f_statement', 'f_samples', 'f_oracleCode', 'f_genCode', 'f_note'].forEach((k) => { $(k).value = ''; });
+  if (p) {
+    $('f_id').value = p.id; $('f_title').value = p.title || ''; $('f_rating').value = p.rating || '';
+    $('f_url').value = p.url || ''; $('f_statement').value = p.statement || '';
+    $('f_samples').value = (p.samples || []).length ? JSON.stringify(p.samples, null, 1) : '';
+    $('f_oracleCode').value = p.oracleCode || ''; $('f_genCode').value = p.genCode || '';
+    $('f_oracleLang').value = p.oracleLang || 'python'; $('f_genLang').value = p.genLang || 'python';
+    $('f_note').value = p.note || '';
+  }
+  dlg.showModal();
+}
+
+$('form').addEventListener('submit', async (e) => {
+  const action = (e.submitter && e.submitter.value) || 'cancel';
+  if (action === 'cancel') return;   // method=dialog 自己关
+  e.preventDefault();
+  const id = $('f_id').value.trim();
+  if (action === 'delete') {
+    if (!editing) return;
+    await api('/api/problems/delete', { id: editing }); logLine('删掉题目 ' + editing); dlg.close(); return refresh();
+  }
+  if (!id) return logLine('题号不能空');
+  let samples = null;
+  const raw = $('f_samples').value.trim();
+  if (raw) { try { samples = JSON.parse(raw); } catch (err) { return logLine('样例 JSON 解析失败：' + err.message); } }
+  const body = {
+    problem: {
+      id, title: $('f_title').value, rating: $('f_rating').value, url: $('f_url').value,
+      statement: $('f_statement').value, note: $('f_note').value,
+      oracleLang: $('f_oracleLang').value, oracleCode: $('f_oracleCode').value,
+      genLang: $('f_genLang').value, genCode: $('f_genCode').value
+    }
+  };
+  // samples：留空 → 交给服务端从题面自动解析；填了 → 按填的走
+  body.problem.samples = samples && samples.length ? samples : [];
+  try {
+    const r = await api('/api/problems', body);
+    logLine('保存 ' + id + '：样例 ' + r.problem.samples + ' 组，oracle ' + (r.problem.hasOracle ? '有' : '无') + '，生成器 ' + (r.problem.hasGen ? '有' : '无'));
+    sel.add(id); dlg.close(); await refresh();
+  } catch (err) { logLine('保存失败：' + err.message); }
+});
+
+$('btnAdd').addEventListener('click', () => openEdit(null));
+$('btnRunSel').addEventListener('click', () => startRun(Array.from(sel), false));
+$('btnRunAll').addEventListener('click', () => startRun(Array.from(sel).length ? Array.from(sel) : (S.problems || []).map((p) => p.id), false));
+$('btnJudge').addEventListener('click', async () => {
+  try { await api('/api/judge', { iterations: Number($('it').value) || 60 }); logLine('开始判分…'); } catch (e) { logLine('判分失败：' + e.message); }
+});
+$('btnCancel').addEventListener('click', async () => { try { await api('/api/cancel', {}); logLine('已请求取消'); } catch (e) { logLine(e.message); } });
+$('btnExport').addEventListener('click', async () => {
+  const d = await (await fetch('/api/export')).json();
+  const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'ablation-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json'; a.click();
+});
+
+async function startRun(ids, all) {
+  if (!ids.length) return logLine('先勾选要跑的题（或点「跑全部」）');
+  const levels = ['L0', 'L2'].concat($('withL1').checked ? ['L1'] : []);
+  try {
+    await api('/api/run', { ids, levels, iterations: Number($('it').value) || 60, lang: $('lang').value, depth: $('depth').value, rich: $('rich').checked });
+    logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/'));
+  } catch (e) { logLine('启动失败：' + e.message); }
+}
+
+async function refresh() { S = await (await fetch('/api/state')).json(); render(); }
+
+const es = new EventSource('/api/events');
+const seen = new Set();
+es.onmessage = (ev) => {
+  let e; try { e = JSON.parse(ev.data); } catch { return; }
+  const key = e.type + '|' + (e.name || '') + '|' + (e.done != null ? e.done : '') + '|' + e.at;
+  if (seen.has(key)) return; seen.add(key);
+  if (e.type === 'log') logLine(e.text);
+  else if (e.type === 'jobStart') { $('progress').textContent = '跑 ' + e.name + '（' + e.done + '/' + e.total + '）…'; logLine('▶ ' + e.name); }
+  else if (e.type === 'jobDone') {
+    logLine((e.ok ? '✓' : '✗') + ' ' + e.name + '  ' + Math.round((e.ms || 0) / 1000) + 's' + (e.error ? '  ' + e.error : '') + (e.verification ? '  链自评 ' + (e.verification.status || '') : ''));
+    refresh().catch(() => {});
+  }
+  else if (e.type === 'runEnd') { $('progress').textContent = '跑完了：' + e.done + '/' + e.total + (e.cancelled ? '（已取消）' : ''); logLine('跑分结束'); refresh().catch(() => {}); }
+  else if (e.type === 'verdict') { $('progress').textContent = '判分 ' + e.done + '/' + e.total + '　' + e.verdict.problem + ' ' + e.verdict.level + ' → ' + e.verdict.diffVerdict; }
+  else if (e.type === 'judgeStart') { $('progress').textContent = '判分中（每题最多 ' + e.iterations + ' 组对拍）…'; }
+  else if (e.type === 'judgeEnd') { $('progress').textContent = '判分完成'; logLine('判分完成：配对 ' + (e.compare && e.compare.n || 0) + ' 题'); refresh().catch(() => {}); }
+  else if (e.type === 'error') logLine('⚠️ ' + e.error);
+};
+
+refresh().then(() => { if ((S.problems || []).length) sel = new Set(S.problems.map((p) => p.id)); render(); }).catch((e) => logLine('加载失败：' + e.message));
+</script>
+</body>
+</html>

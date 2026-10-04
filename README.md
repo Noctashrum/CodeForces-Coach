@@ -403,8 +403,10 @@ npm run mock-cf           # mock Codeforces on :3998
 npm run pack              # build the portable folder dist/CFCoach-win32-x64 (keeps data/ next to the exe)
 npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (34 files)
 npm run test:skills       # 78 skill checks (skill system + tool layer, no network)
-npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/judging)
+npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/L2/judging/paired compare)
 npm run probe:ablation    # ablation probes: run / judge / import-l2 / selftest, all zero-token
+npm run probe:ui          # end-to-end probe of the manual ablation workbench (zero tokens)
+npm run ablation:serve    # manual workbench UI on http://127.0.0.1:4311 (add problems → run → compare L0 vs L2)
 node scripts/probe-review-session.js <handle> <contestId>   # live: assemble review material (editorials + sources)
 node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle that goes into the composer
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
@@ -417,6 +419,12 @@ L1 (bare agent + generic tools + an explicit "stress-test it yourself" prompt); 
 official samples plus differential testing against an **external accepted submission**. Protocol, judging discipline
 (the oracle must never come from cf-coach's own output), cost estimates and a results template:
 see [ablation/README.md](ablation/README.md).
+
+The acceptance bar for this round is deliberately conservative — **"not worse than L0"** (`notWorseRate`), plus a
+paired win/tie/loss count with an exact McNemar p-value, the per-level token cost, and a **false-confidence rate**
+(the chain claimed "verified" while an external oracle says WA). `npm run ablation:serve` opens a one-page workbench
+for the manual pass: paste a statement (samples are parsed automatically), point at your own oracle + generator, run
+L0/L2 side by side, read the L2 rich document next to the raw L0 answer, and record a human verdict per problem.
 
 When working on the **coach tool loop** (`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`),
 two probes under `.probe/` save a lot of time:
