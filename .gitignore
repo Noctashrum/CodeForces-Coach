@@ -32,6 +32,15 @@ smoke.png
 # Inputs (problem list, prompts, harness code) are tracked; results are not.
 ablation/out/
 
+# Ablation experiment INPUTS that are other people's content or machine-specific:
+#   · statements/*.txt  — Codeforces problem texts (CF's copyright, not ours)
+#   · oracle/           — accepted submissions used as the judging standard
+#   · problems.json     — your real problem list (keep the example committed instead)
+# The protocol, the example problem and all the code stay tracked.
+ablation/statements/*.txt
+ablation/oracle/
+ablation/problems.json
+
 # Python bytecode caches. The sandbox helper (lib/sandbox/sitecustomize.py) is
 # compiled on first run, and a .pyc embeds the absolute path of the machine that
 # compiled it — i.e. it can carry local directory names into a public repo.

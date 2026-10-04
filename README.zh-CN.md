@@ -364,7 +364,7 @@ scripts/             mock 服务、单元与端到端测试、探针、打包、
 
 ```bash
 npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，258 项检查
-npm run test:units        # 单元测试全家桶（9 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / harness / runner
+npm run test:units        # 单元测试全家桶（10 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / harness / runner / ablation
 npm run test:harness      # 编排器单测（契约切片、样例隔离、工作区、证据门、富文档）
 npm run test:runner       # 运行器单测（编译 / 输出归一化比对 / 超时 / C++23）
 npm run test:parallel     # 并发生成、停止退栈、预算护栏、生成器数据不变量、标尺降档、串行队列/工作区锁
@@ -375,12 +375,18 @@ npm run mock-cf           # 单独启动模拟 Codeforces（:3998）
 npm run pack              # 打包便携目录版 dist/CFCoach-win32-x64（保留 exe 旁 data/）
 npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（34 个文件）
 npm run test:skills       # 技能系统与工具层单测（不联网，78 条）
+npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/判分全链路）
+npm run probe:ablation    # 消融实验四个入口的真跑探针（零 token：run/judge/import-l2/selftest）
 node scripts/probe-review-session.js <handle> <比赛号>   # 真机验证：装复盘材料（题解 + 多份源码）
 node scripts/probe-review-bundle.js  <handle> <比赛号>   # 真机验证：打包给对话框的那份材料
 node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证：抓提交源码
 ```
 
 推送与发布（三条命令、push 前自检、常见报错对照）：见 [docs/PUSHING.md](docs/PUSHING.md)。
+
+**消融实验（怎么证明比裸模型强）**：`ablation/` 下有 L0（裸模型，无工具）、L1（裸 agent + 通用工具 + 明确要求对拍）
+两个档位的跑分脚本，L2 就是 cf-coach 本体；判分用官方样例 + **外部 AC 提交**做差分对拍。
+协议、判分纪律（oracle 绝不能用 cf-coach 自己的产出）、成本估算与结论模板见 [ablation/README.md](ablation/README.md)。
 
 改**教练工具循环**（`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`）时，`.probe/` 下有两个省时间的工具：
 

@@ -1,0 +1,33 @@
+{
+  "_note": "题库清单示例。复制成 problems.json 再填自己的题（problems.json 不会进 git）。三档（L0/L1/L2）共用同一份 statement 文本，判据用同一个 samples + oracle。",
+  "problems": [
+    {
+      "id": "example-ab",
+      "contestId": null,
+      "index": null,
+      "name": "示例 A+B（自编，零成本跑通管线用）",
+      "rating": null,
+      "statement": "example/statement-ab.txt",
+      "samples": [
+        { "input": "1 2\n", "output": "3\n" },
+        { "input": "7 5\n", "output": "12\n" }
+      ],
+      "oracle": { "lang": "python", "file": "example/oracle-ab.py" },
+      "gen": { "lang": "python", "file": "example/gen-ab.py" }
+    },
+    {
+      "_comment": "真实题目长这样（题面自己从 cf-coach 会话里导出，oracle 必须是外部 AC 提交，绝不能是 cf-coach 自己产出的）",
+      "id": "1800C",
+      "contestId": 1800,
+      "index": "C",
+      "name": "Powering the Hero (hard version)",
+      "rating": 1100,
+      "statement": "statements/1800C.txt",
+      "samples": [
+        { "input": "5\n4\n3 0 0 0\n...", "output": "...\n" }
+      ],
+      "oracle": { "lang": "cpp", "file": "oracle/1800C.cpp" },
+      "gen": { "lang": "cpp", "file": "oracle/1800C.gen.cpp" }
+    }
+  ]
+}

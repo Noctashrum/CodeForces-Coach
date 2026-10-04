@@ -393,7 +393,7 @@ electron/            desktop shell: window, tray, menu, smoke self-test, CF fetc
 
 ```bash
 npm test                  # end-to-end: boots mock services with an isolated data dir, 258 checks
-npm run test:units        # 9 unit suites (includes the harness / evidence-gate suites)
+npm run test:units        # 10 unit suites (harness / evidence gate / runner / ablation, …)
 npm run test:harness      # orchestrator unit tests (contract slicing, sample isolation, workspace, rich docs)
 npm run test:runner       # runner unit tests (compile / compare / timeout / C++23); also test:parallel | test:agentruns
 node scripts/run-smoke.js # desktop smoke test (hidden window; prints SMOKE_OVERALL PASS)
@@ -403,12 +403,20 @@ npm run mock-cf           # mock Codeforces on :3998
 npm run pack              # build the portable folder dist/CFCoach-win32-x64 (keeps data/ next to the exe)
 npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (34 files)
 npm run test:skills       # 78 skill checks (skill system + tool layer, no network)
+npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/judging)
+npm run probe:ablation    # ablation probes: run / judge / import-l2 / selftest, all zero-token
 node scripts/probe-review-session.js <handle> <contestId>   # live: assemble review material (editorials + sources)
 node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle that goes into the composer
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
 ```
 
 Pushing and releasing (three commands, a pre-push checklist, common errors): see [docs/PUSHING.md](docs/PUSHING.md).
+
+**Ablation study (how we show it beats a bare model)**: `ablation/` ships runners for L0 (bare model, no tools) and
+L1 (bare agent + generic tools + an explicit "stress-test it yourself" prompt); L2 is cf-coach itself. Judging uses the
+official samples plus differential testing against an **external accepted submission**. Protocol, judging discipline
+(the oracle must never come from cf-coach's own output), cost estimates and a results template:
+see [ablation/README.md](ablation/README.md).
 
 When working on the **coach tool loop** (`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`),
 two probes under `.probe/` save a lot of time:

@@ -1,0 +1,200 @@
+/**
+ * 消融实验的两个档位（L2 = cf-coach 本体，由主程序自己跑，不在本目录）。
+ *
+ *  L0 裸模型      ：一次调用，没有工具、没有循环、没有验证。题面进去，回答出来。
+ *  L1 裸 agent    ：同一个模型接口 + 同一个工具循环（复用 lib/agentloop.js），
+ *                   工具只有"写文件/读文件/编译运行/对拍"；提示词明确要求它对拍。
+ *
+ * 为什么 L1 复用主程序的 agentloop：**为了把"循环实现"这个混淆变量消掉**。
+ * 三档的差别被压到两件事上——① 有没有工具与循环；② 有没有 cf-coach 的 harness
+ * （题面整理 agent、正解/暴力/生成器三件套、判据归一化、证据门、图文文档）。
+ * 这样 L2 - L1 才是"harness 的净贡献"，而不是"谁的循环写得好"。
+ */
+'use strict';
+
+const path = require('path');
+const agentloop = require('../../lib/agentloop');
+const llm = require('../../lib/llm');
+const env = require('./env');
+const record = require('./record');
+const { createL1Tools, runtimeHint } = require('./tools');
+const runner = require('../../lib/runner');
+
+/** 三个档位共用的题面投喂格式（同一份文本、同一个问法） */
+function userPrompt(problem, statement) {
+  const title = [problem.contestId && problem.index ? problem.contestId + problem.index : problem.id,
+    problem.name ? '· ' + problem.name : ''].join(' ').trim();
+  return '题目：' + title + '\n\n' + '【题面】\n' + String(statement || '').trim()
+    + '\n\n【要求】请给出解题思路，并在最后给出**一份完整、可直接编译运行的代码**（放在 ```cpp 或 ```python 代码块里）。';
+}
+
+const SYSTEM_L0 = [
+  '你是一位算法竞赛选手。',
+  '你只能凭自己的推理作答：没有任何工具、不能运行代码、不能对拍。',
+  '请给出解题思路与最终代码，用中文说明。'
+].join('\n');
+
+async function systemL1() {
+  return [
+    '你是一位算法竞赛选手。',
+    '你可以使用工具：把代码写成文件、读文件、编译运行、以及对拍（stress_test）。',
+    await runtimeHint(),
+    '【硬要求】',
+    '1. 你必须**自己**写一份暴力解（brute）与一份随机数据生成器（gen），用 stress_test 对拍，直到通过为止；',
+    '   对拍发现不一致就修代码，然后重新对拍。不要跳过这一步。',
+    '2. 最后把最终正解写入工作目录的 solution.py（或 solution.cpp，取决于本机可用运行时），',
+    '   并在回答里给出这份最终代码（放在 ``` 代码块里）+ 思路 + 复杂度。',
+    '不要输出与解题无关的内容。'
+  ].join('\n');
+}
+
+/** 从运行目录里取模型最终落盘的正解（L1 用它；没有就回落到从正文抽代码块） */
+function readSolutionFile(dir, preferLang) {
+  const fs = require('fs');
+  const names = preferLang === 'python'
+    ? ['solution.py', 'sol.py', 'main.py', 'solution.cpp', 'sol.cpp', 'main.cpp']
+    : ['solution.cpp', 'sol.cpp', 'main.cpp', 'solution.py', 'sol.py', 'main.py'];
+  for (const n of names) {
+    const p = path.join(dir, n);
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).size > 0) {
+        return { lang: /\.py$/.test(n) ? 'python' : 'cpp', code: fs.readFileSync(p, 'utf8'), source: 'file:' + n };
+      }
+    } catch { /* 忽略 */ }
+  }
+  return null;
+}
+
+/**
+ * L0：一次调用，不提供任何工具。
+ * @param {{problem:object, statement:string, target:object, params:object, run:object, name:string}} ctx
+ */
+async function runL0(ctx) {
+  const { problem, statement, target, params, run, name } = ctx;
+  const t0 = Date.now();
+  const rec = {
+    level: 'L0', problem: problem.id, model: target.model, providerId: target.providerId,
+    startedAt: new Date(t0).toISOString(), system: SYSTEM_L0, tools: [],
+    statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
+    request: { stream: true, maxTokens: params.maxTokens || null, hasTools: false }
+  };
+  try {
+    const res = await llm.callModel({
+      provider: target.provider,
+      model: target.model,
+      system: SYSTEM_L0,
+      messages: [{ role: 'user', content: userPrompt(problem, statement) }],
+      maxTokens: params.maxTokens || undefined,
+      stream: true
+    });
+    const text = String(res.content || '');
+    rec.ok = !!text.trim();
+    rec.error = rec.ok ? null : '模型没有返回正文' + (res.finishReason ? '（finish_reason=' + res.finishReason + '）' : '');
+    rec.usage = res.usage || null;
+    rec.steps = 1;
+    rec.calls = 1;
+    rec.toolsUsed = [];
+    if (agentloop.hasLeakMarkup(text)) rec.leakMarkup = true;
+    const clean = agentloop.stripLeakMarkup(text);
+    const code = record.extractFinalCode(clean);
+    rec.code = code ? code.code : null;
+    rec.codeLang = code ? code.lang : null;
+    rec.codeSource = code ? (code.blockIndex >= 0 ? 'answer-block#' + code.blockIndex : 'answer-inline') : null;
+    if (!code) rec.ok = false, rec.error = '回答里没有可用的代码块';
+    rec.answerFile = run.saveAnswer(name, clean);
+    rec.transcriptFile = null;
+    rec.ms = Date.now() - t0;
+    return run.add(rec);
+  } catch (e) {
+    rec.ok = false;
+    rec.error = (e && e.message) || String(e);
+    rec.ms = Date.now() - t0;
+    return run.add(rec);
+  }
+}
+
+/**
+ * L1：同一个工具循环 + 通用工具面（写文件/运行/对拍）。
+ */
+async function runL1(ctx) {
+  const { problem, statement, target, params, run, name, maxSteps, iterations } = ctx;
+  const t0 = Date.now();
+  const dir = run.sandboxDir(name);
+  const tools = await createL1Tools({ dir, iterations });
+  const system = await systemL1();
+  const events = [];
+  const rec = {
+    level: 'L1', problem: problem.id, model: target.model, providerId: target.providerId,
+    startedAt: new Date(t0).toISOString(), system,
+    tools: tools.map((t) => t.name),
+    statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
+    request: { stream: true, maxTokens: params.maxTokens || null, hasTools: true, maxSteps: maxSteps || 20 }
+  };
+  const usage = { promptTokens: 0, completionTokens: 0, calls: 0 };
+  try {
+    const res = await agentloop.runTurn({
+      provider: target.provider,
+      model: target.model,
+      system,
+      history: [],
+      userText: userPrompt(problem, statement),
+      tools,
+      maxSteps: maxSteps || 20,
+      maxTokens: params.maxTokens || undefined,
+      onUsage: (u) => {
+        if (u && u.promptTokens != null) usage.promptTokens += u.promptTokens;
+        if (u && u.completionTokens != null) usage.completionTokens += u.completionTokens;
+        usage.calls++;
+      },
+      onToolStart: (call) => events.push({ t: Date.now() - t0, kind: 'toolStart', name: call && call.name }),
+      onToolEnd: (call, ok, out, ms) => events.push({
+        t: Date.now() - t0, kind: 'toolEnd', name: call && call.name, ok: !!ok, ms,
+        args: clipArgs(call && call.args), result: clipText(out, 1500)
+      }),
+      onReasoning: () => {}
+    });
+    const text = String(res.text || '');
+    rec.steps = res.steps;
+    rec.calls = usage.calls || (res.usage && res.usage.calls) || null;
+    rec.toolsUsed = res.toolsUsed || [];
+    rec.usage = { promptTokens: usage.promptTokens || (res.usage && res.usage.promptTokens) || 0,
+      completionTokens: usage.completionTokens || (res.usage && res.usage.completionTokens) || 0,
+      calls: rec.calls, estimated: !!(res.usage && res.usage.estimated) };
+    const rt = await runner.availableRuntimes();
+    const fromFile = readSolutionFile(dir, rt.python ? 'python' : 'cpp');
+    const clean = agentloop.stripLeakMarkup(text);
+    const fromText = record.extractFinalCode(clean);
+    if (fromFile) {
+      rec.code = fromFile.code; rec.codeLang = fromFile.lang; rec.codeSource = fromFile.source;
+    } else if (fromText) {
+      rec.code = fromText.code; rec.codeLang = fromText.lang; rec.codeSource = 'answer';
+    } else {
+      rec.code = null; rec.codeLang = null; rec.codeSource = null;
+    }
+    rec.ok = !!rec.code;
+    rec.error = rec.ok ? null : '既没有落盘的正解文件，回答里也没有代码块';
+    rec.answerFile = run.saveAnswer(name, clean);
+    rec.transcriptFile = run.saveTranscript(name, events);
+    rec.ms = Date.now() - t0;
+    return run.add(rec);
+  } catch (e) {
+    rec.ok = false;
+    rec.error = (e && e.message) || String(e);
+    rec.usage = usage;
+    rec.ms = Date.now() - t0;
+    rec.transcriptFile = run.saveTranscript(name, events);
+    return run.add(rec);
+  }
+}
+
+function clipText(s, n) {
+  const t = String(s == null ? '' : s);
+  return t.length > n ? t.slice(0, n) + '…' : t;
+}
+
+function clipArgs(args) {
+  const t = String(args == null ? '' : args);
+  return t.length > 500 ? t.slice(0, 500) + '…' : t;
+}
+
+module.exports = { SYSTEM_L0, systemL1, userPrompt, runL0, runL1, readSolutionFile };
