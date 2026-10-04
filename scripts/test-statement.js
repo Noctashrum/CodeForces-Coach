@@ -90,6 +90,19 @@ ok('多组样例各归各（不把后一组吞进前一组）', () => {
   assert.strictEqual(s[1].input.trim(), '2\n2 2');
 });
 
+ok('带编号的多组样例 + 结尾「说明」段：第 1 组输出不许吞掉后面几组', () => {
+  const s = st.extractSamples([
+    '输入格式', '一行两个整数 a 和 b。', '输出格式', '输出 a+b。',
+    '样例输入 1', '1 2', '', '样例输出 1', '3', '',
+    '样例输入 2', '7 5', '', '样例输出 2', '12', '',
+    '说明', '本题样例由自己编的，请勿当成 CF 原题。'
+  ].join('\n'));
+  assert.strictEqual(s.length, 2, JSON.stringify(s));
+  assert.strictEqual(s[0].output.trim(), '3', JSON.stringify(s[0]));
+  assert.strictEqual(s[1].input.trim(), '7 5');
+  assert.strictEqual(s[1].output.trim(), '12');
+});
+
 console.log('statement: 整理结果校验（宁可失败走兜底，也不喂编造的样例）');
 
 const GOOD_NORM = {

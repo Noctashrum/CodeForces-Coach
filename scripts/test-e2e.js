@@ -565,9 +565,11 @@ async function main() {
       wsF.verification && wsF.verification.solRewrites);
     check('熔断：模型调用总数受预算约束（≤40 次）', !!(wsF.verification && wsF.verification.agentCalls <= 40),
       wsF.verification && wsF.verification.agentCalls);
+    // 口径是"必须是一句人话"，而不是某个固定句式；P0 新增的两条闸门（重写版没过样例就停手）
+    // 用的是"没有通过官方样例"，一并接受。
     check('熔断：失败原因如实可读（不是空话）',
       !!(wsF.verification && wsF.verification.reason && wsF.verification.reason.length > 8
-        && /轮仍未与暴力解一致|重写 \d+ 次仍不收敛|已完成：|尚未完成有效验证|未通过官方样例|不可用|证据不足以判定/.test(wsF.verification.reason)),
+        && /轮仍未与暴力解一致|重写 \d+ 次仍不收敛|已完成：|尚未完成有效验证|未通过官方样例|没有通过官方样例|拒绝采信|不可用|证据不足以判定/.test(wsF.verification.reason)),
       wsF.verification && wsF.verification.reason);
     check('熔断：如实记录整轮墙钟与调用数（诊断成本用）',
       !!(wsF.verification && typeof wsF.verification.wallMs === 'number' && wsF.verification.wallMs >= 0),

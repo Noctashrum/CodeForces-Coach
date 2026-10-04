@@ -2050,6 +2050,8 @@
       error: ['bad', '✕ 运行出错']
     };
     const st = v ? (statusMap[v.status] || ['warn', v.status || '未知']) : null;
+    // P0：对拍被截断 / 题解没过样例时不许显示成"✓ 对拍通过"——部分验证必须看得见。
+    if (v && v.status === 'ok' && v.scopeComplete === false) st[1] = '◐ 部分验证';
     let html = '<div class="pp-card" data-pp-ws><div class="pp-sec-title">🧪 验证工作区'
       + (st ? '<span class="pp-ws-status ' + st[0] + '">' + MD.escapeHtml(st[1]) + '</span>' : '')
       + '</div>';
@@ -2069,6 +2071,12 @@
       if (v.iterations) html += '<div class="pp-kv"><span>对拍组数</span><b>' + v.iterations + '</b></div>';
       if (v.tiers && v.tiers.length) html += '<div class="pp-kv"><span>规模档</span><b>' + v.tiers.join(' / ') + '</b></div>';
       html += '<div class="pp-kv"><span>暴力解标尺</span><b>' + (v.bruteFrozen ? '已冻结' : '未校准') + '</b></div>';
+      if (v.scopeNote) {
+        html += '<div class="pp-kv"><span>覆盖范围</span><b>' + MD.escapeHtml(String(v.scopeNote).slice(0, 220)) + '</b></div>';
+      }
+      if (v.solRollback) {
+        html += '<div class="pp-ws-hint">⚠ 交付的是模型**第一版**题解：验证链中途改过它但没收敛，修改版已丢弃。</div>';
+      }
       if (v.status === 'mismatch' || v.status === 'brute-failed') {
         html += '<div class="pp-ws-hint">教练正在根据反例修代码，修完会重新对拍。</div>';
       }
