@@ -515,13 +515,16 @@ const callAgent = async (opts) => {
    *   ② 修正轮数：原来 8–16 轮 → 现在硬顶 3 轮
    *   ③ 题解过了官方样例、标尺却没校准/大数值跑不动时，仲裁说"题解错"也不改题解（止损） */
   console.log('parallel: 成本止血（重试额度 / 轮数上限 / 证据不足不改题解）');
-  ok('轮数上限：任何难度都不超过 3 轮（原来 8–16 轮 × 每次数分钟）',
-    harness.solFixBudget(1200) <= 3 && harness.solFixBudget(2000) <= 3
-    && harness.solFixBudget(2600) <= 3 && harness.solFixBudget(3400) <= 3,
+  ok('轮数上限：按难度分档封顶（低难度 3 / 2000+ 4 / 2400+ 5 / 2800+ 6，不再"一刀切 3 轮"）',
+    harness.solFixBudget(1200) === 3 && harness.solFixBudget(2000) === 4
+    && harness.solFixBudget(2600) === 5 && harness.solFixBudget(3400) === 6,
     [harness.solFixBudget(1200), harness.solFixBudget(2000), harness.solFixBudget(2600), harness.solFixBudget(3400)]);
   const bud = harness.makeBudget(2400);
-  ok('预算：调用上限 40 次 / 时长 20 分钟（推理型模型单次 3–5 分钟，45 分钟等于没上限）',
-    bud.maxAgentCalls === 40 && bud.maxWallMs === 20 * 60 * 1000, { calls: bud.maxAgentCalls, wall: bud.maxWallMs });
+  ok('预算：2400+ 放宽到 80 次调用 / 40 分钟（2000+ 60 次/30 分钟；低难度仍是 40 次/20 分钟）',
+    bud.maxAgentCalls === 80 && bud.maxWallMs === 40 * 60 * 1000
+    && harness.makeBudget(2100).maxAgentCalls === 60 && harness.makeBudget(2100).maxWallMs === 30 * 60 * 1000
+    && harness.makeBudget(1200).maxAgentCalls === 40 && harness.makeBudget(1200).maxWallMs === 20 * 60 * 1000,
+    { calls: bud.maxAgentCalls, wall: bud.maxWallMs });
 
   // 空回复风暴：每次都返回空 → 必须很快停下来（不是 2 次/调用 × N 个调用地烧）
   let emptyCalls = 0;

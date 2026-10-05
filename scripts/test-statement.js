@@ -229,6 +229,38 @@ ok('中文：答案不唯一 / 多解 / 输出任意 → 多解题', () => {
   assert.strictEqual(st.looksSpecialJudge('输出字典序最小的方案。'), false);
 });
 
+console.log('statement: 假样例识别与清理（旧会话里存着"题面格式段被当成样例 1"的污染）');
+
+ok('假样例：输入格式段落 + 输出格式段落（2026-10 事故原样）→ 判定为假', () => {
+  // 2258B1 真实存下来的那两组（另一台机器的 data.zip）
+  assert.strictEqual(st.isBogusSample({
+    input: 'Each test contains multiple test cases. The first line contains the number of test cases $t$ ($1 \\le t \\le 10^4$).',
+    output: 'For each test case, output a single integer — the answer for $k=1$.\n\n样例：'
+  }), true);
+  assert.strictEqual(st.isBogusSample({ input: '', output: '' }), true);
+});
+
+ok('真样例：数据形态（多行数字 / 合并的 test case）→ 不许误判', () => {
+  assert.strictEqual(st.isBogusSample({ input: '6\n5 4\n1 2 3 4 4', output: '6 14 14 14' }), false);
+  assert.strictEqual(st.isBogusSample({ input: '3\n1000000000 1000000000', output: '2000000000' }), false);
+  assert.strictEqual(st.isBogusSample({ input: '1\nabc', output: 'abc' }), false);
+  assert.strictEqual(st.isBogusSample({ input: '1 2', output: '3' }), false);
+});
+
+ok('sanitizeSamples：混着假样例时只丢假的，顺序不变；没有假的就不动（同一个引用）', () => {
+  const a = { input: '1 2', output: '3' };
+  const bad = { input: 'The first line contains $n$.', output: 'Print one integer.\n样例：' };
+  const b = { input: '2\n1 1', output: '2' };
+  const r = st.sanitizeSamples([a, bad, b]);
+  assert.strictEqual(r.samples.length, 2);
+  assert.strictEqual(r.samples[0], a);
+  assert.strictEqual(r.samples[1], b);
+  assert.strictEqual(r.dropped.length, 1);
+  const clean = [a, b];
+  assert.strictEqual(st.sanitizeSamples(clean).samples, clean, '没有假样例时不该换数组');
+  assert.strictEqual(st.sanitizeSamples(null).samples.length, 0);
+});
+
 console.log('profile: 证据闸门（没有学员侧证据就不更新）');
 
 ok('只贴了个题号：没有学员侧证据 → 直接跳过', () => {

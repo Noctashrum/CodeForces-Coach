@@ -11,6 +11,7 @@ const path = require('path');
 const workspace = require('../lib/workspace.js');
 const runner = require('../lib/runner.js');
 const harness = require('../lib/harness.js');
+const agentloop = require('../lib/agentloop.js');
 const cf = require('../lib/cf.js');
 
 let pass = 0, fail = 0;
@@ -250,15 +251,36 @@ async function main() {
   /* ---------- 5. 熔断预算 / 追问路由 / 诚实降级提示词 ---------- */
   console.log('\n== 5. 熔断预算与路由 ==');
   {
-    // 预算：**硬性封顶 3 轮**。真实事故（2026-09-22）：按难度给到 8–16 轮，配推理型强模型
-    // （单次 4–5 分钟）跑成 42 分钟 / 56 万 token，而真正需要修的只有 1–2 轮。
-    check('预算：修正轮数任何难度都 ≤ 3（不再按难度给到 8–16 轮）',
-      harness.solFixBudget(1500) <= 3 && harness.solFixBudget(2000) <= 3
-      && harness.solFixBudget(2500) <= 3 && harness.solFixBudget(3200) <= 3,
+    // 预算：**难度分档**（2026-10-05 修正）。原来"任何难度都封顶 3 轮 / 20 分钟 / 40 次"，
+    // 但另一台机器交上来的 19 轮真实数据显示 2000+ 的题全被这个天花板卡死（8 轮正好停在 12 步、
+    // 多次撞墙钟），用户的要求是"题目难，超预算是正常的，光降级不够" → 改成按难度放宽。
+    // 纪律：低难度档**保持原值**（只放宽不收紧）。
+    check('预算：修正轮数按难度分档封顶（低难度 3 / 2000+ 4 / 2400+ 5 / 2800+ 6）',
+      harness.solFixBudget(1500) === 3 && harness.solFixBudget(2000) === 4
+      && harness.solFixBudget(2500) === 5 && harness.solFixBudget(3200) === 6,
       [harness.solFixBudget(1500), harness.solFixBudget(2000), harness.solFixBudget(2500), harness.solFixBudget(3200)]);
     const b = harness.makeBudget(1500);
-    check('预算：调用数上限 40、总时长 20 分钟（推理型模型单次 3–5 分钟，45 分钟等于没上限）',
+    check('预算：低难度档维持原值（40 次调用 / 20 分钟），deadline 已设',
       b.maxAgentCalls === 40 && b.maxWallMs === 20 * 60 * 1000 && b.deadline > Date.now(), b);
+    const b2000 = harness.makeBudget(2100);
+    const b2400 = harness.makeBudget(2400);
+    const b2800 = harness.makeBudget(2800);
+    check('预算：2000+ 的题放宽（2000+ 60 次/30 分钟、2400+ 80 次/40 分钟、2800+ 100 次/50 分钟）',
+      b2000.maxAgentCalls === 60 && b2000.maxWallMs === 30 * 60 * 1000
+      && b2400.maxAgentCalls === 80 && b2400.maxWallMs === 40 * 60 * 1000
+      && b2800.maxAgentCalls === 100 && b2800.maxWallMs === 50 * 60 * 1000,
+      [b2000.maxAgentCalls, b2400.maxAgentCalls, b2800.maxAgentCalls]);
+    check('预算：对拍规模/运行时限也按难度放宽（2400+ 50 组/210 秒/10 秒；低难度 30 组/90 秒/5 秒）',
+      b2400.tier === 3 && harness.stressBudget(2400).perTier === 50
+      && harness.stressBudget(2400).maxStressMs === 210000 && harness.stressBudget(2400).runTimeLimitMs === 10000
+      && harness.stressBudget(1200).perTier === 30 && harness.stressBudget(1200).maxStressMs === 90000
+      && harness.stressBudget(1200).runTimeLimitMs === 5000,
+      [harness.stressBudget(2400), harness.stressBudget(1200)]);
+    check('预算：教练工具循环步数按难度放宽（1500 → 12 步；2000+ 18；2400+ 22；2800+ 26）',
+      agentloop.stepsForRating(1500) === 12 && agentloop.stepsForRating(2000) === 18
+      && agentloop.stepsForRating(2400) === 22 && agentloop.stepsForRating(2800) === 26
+      && agentloop.DEFAULT_MAX_STEPS === 12,
+      [agentloop.stepsForRating(1500), agentloop.stepsForRating(2000), agentloop.stepsForRating(2400), agentloop.stepsForRating(2800)]);
 
     const stub = (text) => async () => text;
     const rExplain = await harness.routeFollowUp({ callAgent: stub('{"mode":"explain","reason":"问某行"}'), hasVerified: true, question: '第 12 行为什么这么写' });

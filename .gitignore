@@ -5,6 +5,11 @@
 data/
 .test-data/
 
+# Data dumps handed over for review（另一台机器的整个 data/：真会话 + API 配置）。
+# 里面装着别的机器的真实数据与密钥，绝不入库。
+data.zip
+/*.zip
+
 # Build & packaging output
 dist/
 build/*.blockmap
