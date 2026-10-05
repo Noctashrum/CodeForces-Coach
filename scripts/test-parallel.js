@@ -512,19 +512,22 @@ const callAgent = async (opts) => {
   /* ---------------- 预算与反复跑：真实一轮跑了 42 分钟、56 万 token 的止血 ----------------
    * 三个止血点（都有真实数据支撑）：
    *   ① 空回复重试：原来 2 次/调用 × 每次 5 分钟 → 现在 1 次/调用 + 整轮 3 次封顶
-   *   ② 修正轮数：原来 8–16 轮 → 现在硬顶 3 轮
+   *   ② 修正轮数：原来 8–16 轮 → 现在按难度分档兜底（4/5/6/8 轮）；真正的停手条件是
+   *      lib/loopguard.js 的死循环特征（重复产物 / 来回震荡 / 连续无进展），次数只是兜底
    *   ③ 题解过了官方样例、标尺却没校准/大数值跑不动时，仲裁说"题解错"也不改题解（止损） */
   console.log('parallel: 成本止血（重试额度 / 轮数上限 / 证据不足不改题解）');
-  ok('轮数上限：按难度分档封顶（低难度 3 / 2000+ 4 / 2400+ 5 / 2800+ 6，不再"一刀切 3 轮"）',
-    harness.solFixBudget(1200) === 3 && harness.solFixBudget(2000) === 4
-    && harness.solFixBudget(2600) === 5 && harness.solFixBudget(3400) === 6,
+  ok('轮数上限：按难度分档封顶（低难度 4 / 2000+ 5 / 2400+ 6 / 2800+ 8，不再"一刀切 3 轮"）',
+    harness.solFixBudget(1200) === 4 && harness.solFixBudget(2000) === 5
+    && harness.solFixBudget(2600) === 6 && harness.solFixBudget(3400) === 8,
     [harness.solFixBudget(1200), harness.solFixBudget(2000), harness.solFixBudget(2600), harness.solFixBudget(3400)]);
   const bud = harness.makeBudget(2400);
-  ok('预算：2400+ 放宽到 80 次调用 / 40 分钟（2000+ 60 次/30 分钟；低难度仍是 40 次/20 分钟）',
-    bud.maxAgentCalls === 80 && bud.maxWallMs === 40 * 60 * 1000
-    && harness.makeBudget(2100).maxAgentCalls === 60 && harness.makeBudget(2100).maxWallMs === 30 * 60 * 1000
-    && harness.makeBudget(1200).maxAgentCalls === 40 && harness.makeBudget(1200).maxWallMs === 20 * 60 * 1000,
+  ok('预算：2400+ 100 次调用 / 55 分钟（2000+ 80 次/40 分钟；低难度 50 次/25 分钟）',
+    bud.maxAgentCalls === 100 && bud.maxWallMs === 55 * 60 * 1000
+    && harness.makeBudget(2100).maxAgentCalls === 80 && harness.makeBudget(2100).maxWallMs === 40 * 60 * 1000
+    && harness.makeBudget(1200).maxAgentCalls === 50 && harness.makeBudget(1200).maxWallMs === 25 * 60 * 1000,
     { calls: bud.maxAgentCalls, wall: bud.maxWallMs });
+  ok('暴力解重写：兜底次数是 2（策略停在 loopguard，不停在次数）',
+    harness.makeBudget(1200).maxBruteFix === 2, { maxBruteFix: harness.makeBudget(1200).maxBruteFix });
 
   // 空回复风暴：每次都返回空 → 必须很快停下来（不是 2 次/调用 × N 个调用地烧）
   let emptyCalls = 0;
@@ -545,6 +548,41 @@ const callAgent = async (opts) => {
   ok('空回复：留档如实（trace 里"空回复"条目不超过 2 条，不是每个调用都连发 3 次）',
     (resEmpty.trace || []).filter((t) => /空回复|被截断/.test(t.label || '')).length <= 2,
     (resEmpty.trace || []).map((t) => t.label));
+
+  /* ---------------- 死循环特征：同一版暴力解被反复"重写" → 特征检测先停手 ----------------
+   * 用户复盘点出的病根：真正贵的那条路不是"重写次数上限不够"，而是**重写本身没有新信息**
+   * （同一版代码又交一遍）。所以停手条件换成 lib/loopguard.js 的特征检测，次数/时间退回兜底：
+   * 这一条验的就是"特征检测比次数上限先到"。 */
+  console.log('parallel: 死循环特征检测（重写没有新信息就停，不烧到次数上限）');
+  {
+    const SAME_WRONG_BRUTE = ['import sys', 'print(0)'].join('\n');   // 永远不改的一个错解
+    let bruteRewriteCalls = 0;
+    const callAgentSameBrute = async (opts) => {
+      const sys = String(opts.system || '');
+      if (sys.indexOf('【暴力 Agent】') >= 0) {
+        bruteRewriteCalls++;
+        return '```python\n' + SAME_WRONG_BRUTE + '\n```';
+      }
+      return callAgent(opts);
+    };
+    const resLoop = await harness.runPipeline({
+      conv: { id: 'loop-guard', title: '死循环特征' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: 'loop-guard',
+      callAgent: callAgentSameBrute, tiers: [4, 6], perTier: 2,  bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+    const loopTraj = (resLoop.trajectory || []).filter((t) => t.kind === 'loop-guard');
+    ok('死循环特征：同一版暴力解被重写 → 轨迹留档 loop-guard（写明是特征停手、不是次数上限）',
+      loopTraj.length >= 1 && /死循环特征/.test(String(loopTraj[0].note || '')),
+      { traj: (resLoop.trajectory || []).map((t) => t.kind).join(','), note: loopTraj[0] && loopTraj[0].note });
+    ok('死循环特征：比次数上限先到（暴力解只调了 2 次，不是 maxBruteFix+2 次）',
+      bruteRewriteCalls === 2 && harness.makeBudget(1500).maxBruteFix === 2,
+      { bruteRewriteCalls, maxBruteFix: harness.makeBudget(1500).maxBruteFix });
+    ok('死循环特征：提醒里也如实写了停手原因（不是静默放弃标尺）',
+      (resLoop.notes || []).some((n) => /停手/.test(String(n))), (resLoop.notes || []).slice(-4));
+  }
 
   // 证据不足不改题解：题解过样例 ✓；标尺**在样例的大数值上超时**、小数据上还算错
   // → 仲裁说"题解错"也不能拿它改题解（真实事故：这样连改 5 遍、28 分钟、56 万 token）

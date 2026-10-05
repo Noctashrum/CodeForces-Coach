@@ -251,35 +251,39 @@ async function main() {
   /* ---------- 5. 熔断预算 / 追问路由 / 诚实降级提示词 ---------- */
   console.log('\n== 5. 熔断预算与路由 ==');
   {
-    // 预算：**难度分档**（2026-10-05 修正）。原来"任何难度都封顶 3 轮 / 20 分钟 / 40 次"，
-    // 但另一台机器交上来的 19 轮真实数据显示 2000+ 的题全被这个天花板卡死（8 轮正好停在 12 步、
-    // 多次撞墙钟），用户的要求是"题目难，超预算是正常的，光降级不够" → 改成按难度放宽。
-    // 纪律：低难度档**保持原值**（只放宽不收紧）。
-    check('预算：修正轮数按难度分档封顶（低难度 3 / 2000+ 4 / 2400+ 5 / 2800+ 6）',
-      harness.solFixBudget(1500) === 3 && harness.solFixBudget(2000) === 4
-      && harness.solFixBudget(2500) === 5 && harness.solFixBudget(3200) === 6,
+    // 预算：**难度分档 + 特征检测**（2026-10 二次修正）。历史分两层：
+    // ① 原来"任何难度都封顶 3 轮 / 20 分钟 / 40 次"，另一台机器的 19 轮真实数据显示 2000+ 的题
+    //    被天花板卡死（8 轮正好停在 12 步、多次撞墙钟），用户要求"题目难，超预算是正常的"。
+    // ② 用户复盘指出更根本的问题：**上限在教模型作弊**（预算一紧，最优策略就变成打表 / 交最笨版本 /
+    //    正文写短），正确的停手条件是"死循环特征"（lib/loopguard.js）而不是掐表 → 数值整体再放宽一档。
+    // 纪律：分档**只放宽不收紧**（低难度档也从 3 轮/20 分钟/40 次放宽到 4 轮/25 分钟/50 次）。
+    check('预算：修正轮数按难度分档封顶（低难度 4 / 2000+ 5 / 2400+ 6 / 2800+ 8）',
+      harness.solFixBudget(1500) === 4 && harness.solFixBudget(2000) === 5
+      && harness.solFixBudget(2500) === 6 && harness.solFixBudget(3200) === 8,
       [harness.solFixBudget(1500), harness.solFixBudget(2000), harness.solFixBudget(2500), harness.solFixBudget(3200)]);
     const b = harness.makeBudget(1500);
-    check('预算：低难度档维持原值（40 次调用 / 20 分钟），deadline 已设',
-      b.maxAgentCalls === 40 && b.maxWallMs === 20 * 60 * 1000 && b.deadline > Date.now(), b);
+    check('预算：低难度档也放宽（50 次调用 / 25 分钟），deadline 已设',
+      b.maxAgentCalls === 50 && b.maxWallMs === 25 * 60 * 1000 && b.deadline > Date.now(), b);
     const b2000 = harness.makeBudget(2100);
     const b2400 = harness.makeBudget(2400);
     const b2800 = harness.makeBudget(2800);
-    check('预算：2000+ 的题放宽（2000+ 60 次/30 分钟、2400+ 80 次/40 分钟、2800+ 100 次/50 分钟）',
-      b2000.maxAgentCalls === 60 && b2000.maxWallMs === 30 * 60 * 1000
-      && b2400.maxAgentCalls === 80 && b2400.maxWallMs === 40 * 60 * 1000
-      && b2800.maxAgentCalls === 100 && b2800.maxWallMs === 50 * 60 * 1000,
+    check('预算：难度越高越宽（2000+ 80 次/40 分钟、2400+ 100 次/55 分钟、2800+ 130 次/70 分钟）',
+      b2000.maxAgentCalls === 80 && b2000.maxWallMs === 40 * 60 * 1000
+      && b2400.maxAgentCalls === 100 && b2400.maxWallMs === 55 * 60 * 1000
+      && b2800.maxAgentCalls === 130 && b2800.maxWallMs === 70 * 60 * 1000,
       [b2000.maxAgentCalls, b2400.maxAgentCalls, b2800.maxAgentCalls]);
+    check('预算：暴力解重写次数只是兜底（给完"最笨版本"还有一次机会 → maxBruteFix 2）',
+      harness.makeBudget(1500).maxBruteFix === 2, { maxBruteFix: harness.makeBudget(1500).maxBruteFix });
     check('预算：对拍规模/运行时限也按难度放宽（2400+ 50 组/210 秒/10 秒；低难度 30 组/90 秒/5 秒）',
       b2400.tier === 3 && harness.stressBudget(2400).perTier === 50
       && harness.stressBudget(2400).maxStressMs === 210000 && harness.stressBudget(2400).runTimeLimitMs === 10000
       && harness.stressBudget(1200).perTier === 30 && harness.stressBudget(1200).maxStressMs === 90000
       && harness.stressBudget(1200).runTimeLimitMs === 5000,
       [harness.stressBudget(2400), harness.stressBudget(1200)]);
-    check('预算：教练工具循环步数按难度放宽（1500 → 12 步；2000+ 18；2400+ 22；2800+ 26）',
-      agentloop.stepsForRating(1500) === 12 && agentloop.stepsForRating(2000) === 18
-      && agentloop.stepsForRating(2400) === 22 && agentloop.stepsForRating(2800) === 26
-      && agentloop.DEFAULT_MAX_STEPS === 12,
+    check('预算：教练工具循环步数只是兜底（1500 → 20 步；2000+ 32；2400+ 40；2800+ 48）',
+      agentloop.stepsForRating(1500) === 20 && agentloop.stepsForRating(2000) === 32
+      && agentloop.stepsForRating(2400) === 40 && agentloop.stepsForRating(2800) === 48
+      && agentloop.DEFAULT_MAX_STEPS === 20,
       [agentloop.stepsForRating(1500), agentloop.stepsForRating(2000), agentloop.stepsForRating(2400), agentloop.stepsForRating(2800)]);
 
     const stub = (text) => async () => text;

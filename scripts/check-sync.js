@@ -29,6 +29,8 @@ const FILES = [
   'lib/profile.js', 'lib/pricing.js', 'lib/sandbox.js',
   // 多题并行的两个底座：串行队列（CF 抓取窗口）+ 工作区锁（同题串行）
   'lib/serialqueue.js',
+  // 死循环特征检测（用"没有新信息"取代无脑的时间/次数上限）
+  'lib/loopguard.js',
   // 出问题时把"这台机器上到底发生了什么"打包成一份文本（设置页 / CLI / 测试台共用）
   'lib/diagbundle.js',
   'public/index.html', 'public/styles.css', 'public/js/app.js', 'public/js/review.js',

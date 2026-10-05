@@ -714,6 +714,51 @@ async function runLoopCases() {
     } finally { stub.restore(); }
   });
 
+  /* ---------- 死循环特征检测（取代"无脑掐步数"） ----------
+   * 用户原话：「你为什么要加上限？无非怕死循环嘛！那你怕死循环你的关键是要找什么条件什么特征下
+   * 被判定为死循环了，而不是直接无脑用时间上限来判断啊。」所以这里钉死两条：
+   *   ① 真的在原地打转（**第二次拿到同一个工具、同一个结果**）→ **提前**收尾，且标成 loopStopped；
+   *      ⚠️ 刻意不看"连续 N 次"：N 又是魔法数字（用户当场指出的第二次误区），相邻相等即停。
+   *   ② 一直在换输入的正常探查 → **不许**误判（该跑到步数上限就跑到上限）。 */
+  await tAsync('死循环特征：第二次拿到同一个工具、同一个结果就停（不数 N、不耗到步数上限）', async () => {
+    const dup = (i) => ({ toolCalls: [{ id: 'dup' + i, name: 'cf_probe', args: '{"q":"same"}' }], finishReason: 'tool_calls' });
+    // 发 1 是正常探查，发 2 与发 1 完全一样 → 第 2 步就该被特征检测掐掉；发 3 是给"收尾那一问"的正文。
+    // 后面再补几发同样的打转 + 一个结尾，是为了在检测万一失效时这条用例仍能跑到步数上限（不至于挂死）。
+    const script = [dup(0), dup(1), { content: '我看了一下，结论是这样的：……' },
+      dup(2), dup(3), { content: '我看了一下，结论是这样的：……' }];
+    const stub = stubModel(script);
+    try {
+      const r = await agentloop.runTurn({
+        provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools, maxSteps: 10
+      });
+      assert.ok(r.usage.loopStopped, '应标记 loopStopped（死于死循环特征）');
+      assert.ok(!r.usage.truncatedSteps, '不应被标成"步数用尽"');
+      assert.strictEqual(r.steps, 2, '应在第 2 步就收尾（相邻相等即停），实际 ' + r.steps + ' 步');
+      assert.ok(String(r.usage.loopReason).includes('完全相同'), '原因要说清是重复：' + r.usage.loopReason);
+      const last = stub.calls[stub.calls.length - 1];
+      assert.ok(String(last.messages[last.messages.length - 1].content).includes('卡住'),
+        '收尾指令要说"检测到你卡住了"：' + JSON.stringify(last.messages[last.messages.length - 1]));
+      assert.ok(r.text.length > 0, '仍然要给出正文');
+    } finally { stub.restore(); }
+  });
+
+  await tAsync('死循环特征：一直在换输入的探查不许被误判（该跑到上限就跑到上限）', async () => {
+    const stub = stubModel([
+      { toolCalls: [{ id: 'a', name: 'cf_probe', args: '{"q":"1"}' }], finishReason: 'tool_calls' },
+      { toolCalls: [{ id: 'b', name: 'cf_probe', args: '{"q":"2"}' }], finishReason: 'tool_calls' },
+      { toolCalls: [{ id: 'c', name: 'cf_probe', args: '{"q":"3"}' }], finishReason: 'tool_calls' },
+      { content: '结论' }
+    ]);
+    try {
+      const r = await agentloop.runTurn({
+        provider: {}, model: 'm', system: 'S', history: [], userText: 'q', tools: stubTools, maxSteps: 3
+      });
+      assert.ok(!r.usage.loopStopped, '不同输入不应触发死循环判定：' + JSON.stringify(r.usage));
+      assert.ok(r.usage.truncatedSteps, '应如实标记步数用尽');
+      assert.strictEqual(r.steps, 3);
+    } finally { stub.restore(); }
+  });
+
   /* ---------- 上游标记泄漏（DSML）：回收 + 净化 ---------- */
   // 标记字面量用拼装方式写，避免把上游特殊标记直接写进源码（可读性差且容易看错形态）
   const P = '\uFF5C';   // 全角竖线（上游实际用的那种）
