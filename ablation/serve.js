@@ -29,6 +29,8 @@ const record = require('./lib/record');
 const levels = require('./lib/levels');
 const l2 = require('./lib/l2');
 const uistore = require('./lib/uistore');
+const cffetch = require('./lib/cffetch');
+const mkgen = require('./lib/mkgen');
 const judgeLib = require('./judge');
 const workspace = require('../lib/workspace');
 const agentloop = require('../lib/agentloop');
@@ -189,6 +191,88 @@ async function runJudge(o) {
   return r;
 }
 
+/* ---------------- 攒题：从 CF 取题 + 自动写生成器 ---------------- */
+
+/** 写生成器是"一次模型调用"，不许两件同时跑（也不许和跑分抢模型） */
+let genBusy = false;
+
+/**
+ * 复用应用自己的取题通道（electron/main.js 的 CHATBOX_CF_API_TEST + CHATBOX_CF_JSON）把题扒进题库。
+ *
+ * 已有的 oracle / 生成器**原样保留**：save() 在没给 oracleCode/genCode 时会沿用旧文件，
+ * 所以"先贴 oracle，再重新取一次题面"不会把用户贴的代码弄丢。
+ */
+async function cfFetchInto(ref) {
+  if (job && job.running) return { ok: false, error: '跑分任务在跑，等它结束再取题' };
+  logEvent('取题：' + String(ref || '') + '（借应用内嵌浏览器过 CF 反爬，实测 20–60 秒）');
+  const r = await cffetch.fetchProblem(String(ref || ''), { log: logEvent });
+  if (!r.ok) { logEvent('取题失败：' + r.error); return { ok: false, error: r.error, logTail: r.logTail || '' }; }
+  const incoming = cffetch.toStoreProblem(r.problem);
+  const prev = store.get(incoming.id) || {};
+  const saved = store.save({
+    id: incoming.id, title: incoming.title, rating: incoming.rating, url: incoming.url,
+    source: 'cf',
+    note: prev.note || incoming.note,     // 用户自己写的备注别被 CF 的 tags 顶掉
+    statement: incoming.statement,
+    samples: incoming.samples
+  });
+  (r.problem.warnings || []).forEach((w) => logEvent('⚠️ 取题告警：' + w));
+  logEvent('已入库：' + saved.id + ' ' + saved.title + '（题面 ' + String(saved.statement || '').length + ' 字，样例 '
+    + (saved.samples || []).length + ' 组' + (saved.oracle ? '，oracle 已有' : '，还缺 oracle（贴你自己的 AC 题解）') + '）');
+  return {
+    ok: true, id: saved.id, title: saved.title, rating: saved.rating,
+    samples: (saved.samples || []).length, statementLen: String(saved.statement || '').length,
+    hasOracle: !!saved.oracle, hasGen: !!saved.gen, ms: r.ms
+  };
+}
+
+/** 给一道题写生成器：一次模型调用 + 机械体检（见 ablation/lib/mkgen.js） */
+async function makeGenFor(id) {
+  const p = store.get(String(id || '').trim());
+  if (!p) return { ok: false, error: '没有这道题：' + id };
+  const oracleCode = readCode(p.oracle);
+  if (!oracleCode.trim()) return { ok: false, error: '这题还没有 oracle：先贴一份你自己的 AC 题解（生成器要照它的输入格式写）' };
+  const target = targets[0];
+  if (!target) return { ok: false, error: '没有可用模型（用 --base-url/--model 或配 data/config.json）' };
+  logEvent('写生成器：' + p.id + '（一次模型调用 + 跑代码体检）');
+  const r = await mkgen.makeGen({
+    problem: p, statement: p.statement,
+    oracle: { lang: p.oracleLang, code: oracleCode },
+    target, params
+  });
+  if (!r.ok) {
+    logEvent('生成器体检没过：' + p.id + '：' + r.error);
+    return { ok: false, error: r.error, usage: r.usage || null, calls: r.calls || 1, ms: r.ms || 0 };
+  }
+  store.save({ id: p.id, genLang: r.lang, genCode: r.code });
+  ((r.gate && r.gate.warnings) || []).forEach((w) => logEvent('⚠️ ' + p.id + '：' + w));
+  logEvent('生成器已写入：' + p.id + '（' + (r.lang === 'cpp' ? 'C++' : 'Python') + '，体检通过'
+    + (((r.gate && r.gate.warnings) || []).length ? '，有 ' + r.gate.warnings.length + ' 条提醒' : '') + '）');
+  return { ok: true, id: p.id, lang: r.lang, code: r.code, gate: r.gate, usage: r.usage || null, calls: r.calls || 1, ms: r.ms || 0 };
+}
+
+/** 批量补生成器：默认只补"有 oracle 但没生成器"的题 */
+async function makeGensFor(ids, onlyMissing) {
+  const all = (Array.isArray(ids) && ids.length) ? ids.map(String) : store.problems.map((p) => p.id);
+  const todo = onlyMissing === false ? all : all.filter((id) => {
+    const p = store.get(id);
+    return p && !(p.gen && p.gen.file);
+  });
+  if (!todo.length) {
+    logEvent('没有需要补生成器的题（要么都有生成器了，要么题库是空的）');
+    return { ok: true, results: [] };
+  }
+  logEvent('补生成器：' + todo.length + ' 题（' + todo.join(', ') + '），一题一次模型调用');
+  const results = [];
+  for (const id of todo) {
+    const r = await makeGenFor(id);
+    results.push({ id, ok: !!r.ok, error: r.error || null, warnings: (r.gate && r.gate.warnings) || [] });
+    emit({ type: 'genDone', id, ok: !!r.ok, done: results.length, total: todo.length });
+  }
+  logEvent('补生成器完成：' + results.filter((x) => x.ok).length + '/' + results.length + ' 成功');
+  return { ok: true, results };
+}
+
 /* ---------------- HTTP ---------------- */
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj == null ? null : obj);
@@ -219,6 +303,7 @@ function stateOf() {
     defaults: DEFAULTS,
     targets: targets.map((t) => ({ providerId: t.providerId, model: t.model })),
     running: !!(job && job.running),
+    genBusy,
     job: job ? { running: job.running, cancelled: job.cancelled, startedAt: job.startedAt, done: job.done, total: job.total, current: job.current, opts: job.opts } : null,
     problems: store.list().map((p) => ({
       id: p.id, title: p.title, rating: p.rating, url: p.url, note: p.note, source: p.source,
@@ -316,6 +401,28 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const e = store.saveHuman({ problem: String(body.problem || ''), choice: String(body.choice || ''), note: String(body.note || ''), tags: body.tags || undefined, level: String(body.level || 'L2') });
       return sendJson(res, 200, { ok: true, entry: e });
+    }
+    if (req.method === 'POST' && p === '/api/cf-fetch') {
+      const body = await readBody(req);
+      // 取题本身要 20–60 秒：等它（前端有转圈 + SSE 日志），不要让它变成"后台静默任务"
+      return sendJson(res, 200, await cfFetchInto(body.ref != null ? body.ref : body.id));
+    }
+    if (req.method === 'POST' && p === '/api/make-gen') {
+      const body = await readBody(req);
+      if (genBusy) return sendJson(res, 409, { error: '正在写生成器，等它结束' });
+      genBusy = true;
+      try { return sendJson(res, 200, await makeGenFor(body.id)); }
+      finally { genBusy = false; }
+    }
+    if (req.method === 'POST' && p === '/api/make-gens') {
+      const body = await readBody(req);
+      if (genBusy) return sendJson(res, 409, { error: '正在写生成器，等它结束' });
+      genBusy = true;
+      // 不 await：一题一次模型调用，10 题可能好几分钟 —— 进度走 SSE（与跑分同一个套路）
+      makeGensFor(body.ids, body.onlyMissing !== false)
+        .catch((e) => { const m = String((e && e.message) || e); logEvent('补生成器失败：' + m); emit({ type: 'error', error: m }); })
+        .finally(() => { genBusy = false; emit({ type: 'gensEnd' }); });
+      return sendJson(res, 200, { ok: true, started: true });
     }
     if (req.method === 'POST' && p === '/api/clear') {
       const body = await readBody(req);

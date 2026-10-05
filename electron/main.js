@@ -356,6 +356,22 @@ function diagFail(msg) {
 }
 
 /**
+ * `CHATBOX_CF_JSON=<文件>`：把一次取题的**完整结果**（题面正文 + 样例 + 元数据）写盘。
+ *
+ * 为什么走文件而不是 stdout：调用方（消融测试台 ablation/lib/cffetch.js）是另一个 node 进程，
+ * 在受限环境里"用管道读子进程输出"会被拒；而 GUI 子系统的 exe 本来也没有控制台。
+ * 写一个 JSON 文件是最省事、跨环境都成立的回传方式（失败也要写，否则调用方只能干等超时）。
+ */
+function writeCfJson(payload) {
+  const file = process.env.CHATBOX_CF_JSON;
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+  } catch (e) { /* 调用方会因文件缺失而超时，这里不再抛 */ }
+}
+
+/**
  * 反爬相关：**不要让 Chromium 把抓取窗口当作"被遮挡/后台"**。
  * Cloudflare 的挑战是时序敏感的 JS + 渲染，被节流时要么跑不完、要么反复重挑战
  * —— 这是"用户自己的浏览器一切正常、应用内窗口频繁要过挑战"的最合理解释。
@@ -620,6 +636,7 @@ if (!gotLock) {
         if (process.env.CHATBOX_CF_API_TEST) {
           const ref = String(process.env.CHATBOX_CF_API_TEST).match(/^(\d+)\s*([A-Za-z][0-9]?)$/);
           const p = await cfClient.fetchProblem(ref[1], ref[2]);
+          writeCfJson({ ok: true, problem: p });   // CHATBOX_CF_JSON：把**完整**题面写盘（消融测试台复用取题通道）
           console.log('CF_TEST_RESULT ' + JSON.stringify({
             mode: 'api',
             title: p.title,
@@ -660,6 +677,8 @@ if (!gotLock) {
         }
       } catch (e) {
         console.log('CF_TEST_ERROR ' + (e && e.message));
+        // 失败也必须落盘（哪怕只是"取不到"），否则 CHATBOX_CF_JSON 的调用方只能干等到超时
+        writeCfJson({ ok: false, error: String((e && e.message) || e), kind: (e && e.kind) || null });
       }
       app.exit(0);
       return;

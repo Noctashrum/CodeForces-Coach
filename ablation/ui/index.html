@@ -59,6 +59,7 @@
     <button id="btnRunSel" class="primary">跑选中题</button>
     <button id="btnRunAll">跑全部（缺的档）</button>
     <button id="btnJudge">判分 + 配对比较</button>
+    <button id="btnGens" title="给「有 oracle 但没生成器」的题各写一个随机数据生成器（一题一次模型调用 + 跑代码体检）">补生成器</button>
     <button id="btnExport">导出 JSON</button>
     <button id="btnCancel">取消</button>
   </div>
@@ -88,12 +89,15 @@
     <h2 id="dlgTitle">加题</h2>
     <div class="grid2">
       <div>
+        <div class="row"><label style="width:70px">取题</label><input id="f_ref" placeholder="1800C，或贴 CF 题目链接" style="flex:1">
+          <button type="button" id="btnFetch" title="借应用内嵌浏览器过 CF 反爬，把题面/样例/标题/难度直接抓进来（20–60 秒）">从 CF 取题</button></div>
+        <div id="fetchMsg" class="small dim"></div>
         <div class="row"><label style="width:70px">题号</label><input id="f_id" placeholder="1800C" style="flex:1"></div>
         <div class="row"><label style="width:70px">标题</label><input id="f_title" style="flex:1"></div>
         <div class="row"><label style="width:70px">rating</label><input id="f_rating" type="number" style="width:90px">
           <label style="width:60px">链接</label><input id="f_url" style="flex:1"></div>
         <div class="row"><label style="width:70px">题面</label><span class="small dim">直接粘 CF 题面全文；官方样例留空会自动解析</span></div>
-        <textarea id="f_statement" style="min-height:220px" placeholder="把题面粘这里（含 Input/Output/Examples 就能自动抽出样例）"></textarea>
+        <textarea id="f_statement" style="min-height:220px" placeholder="把题面粘这里（含 Input/Output/Examples 就能自动抽出样例）；也可以点上面的「从 CF 取题」"></textarea>
         <div class="row"><label style="width:70px">样例</label><span class="small dim">（自动解析；也可手填 JSON 数组 [{"input":"1 2","output":"3"}]）</span></div>
         <textarea id="f_samples" style="min-height:70px" placeholder='留空 = 从题面自动解析'></textarea>
       </div>
@@ -101,9 +105,10 @@
         <div class="row"><label style="width:70px">oracle</label><span class="small dim">外部 AC 题解（<b>绝不能</b>用 L2 自己产的）</span>
           <select id="f_oracleLang"><option>python</option><option>cpp</option></select></div>
         <textarea id="f_oracleCode" style="min-height:150px" placeholder="题解代码（CF 上 AC 的提交 / 题解博客的代码 / 你验证过的实现）"></textarea>
-        <div class="row"><label style="width:70px">生成器</label><span class="small dim">随机数据，按 argv 控制规模</span>
-          <select id="f_genLang"><option>python</option><option>cpp</option></select></div>
-        <textarea id="f_genCode" style="min-height:120px" placeholder="gen：读 argv[1]=组数/规模，argv[2]=数值上限；没有生成器就只能判样例"></textarea>
+        <div class="row"><label style="width:70px">生成器</label><span class="small dim">随机数据；不用手写，点右边这个按钮让模型写 + 体检</span>
+          <select id="f_genLang"><option>python</option><option>cpp</option></select>
+          <button type="button" id="btnGen" title="按上面的题面与 oracle 写一个生成器，并真跑一遍体检（能不能跑、数据会不会把你的 oracle 跑崩、是否每次都一样）">自动写生成器</button></div>
+        <textarea id="f_genCode" style="min-height:120px" placeholder="留空：点上面的「自动写生成器」。判分/对拍只认文件，生成器必须**不带任何命令行参数**也能产出一组数据"></textarea>
         <div class="row"><label style="width:70px">备注</label><input id="f_note" style="flex:1"></div>
       </div>
     </div>
@@ -273,58 +278,130 @@ async function openDetail(id) {
   }
 }
 
+function msg(t) { $('fetchMsg').textContent = t || ''; }
+
+/** 把题目填进对话框。keepTyped=true 时不动用户已经打好的 oracle/生成器/备注（取题回来时别覆盖手上的代码） */
+function applyProblemToForm(p, keepTyped) {
+  $('f_id').value = p.id; $('f_title').value = p.title || ''; $('f_rating').value = p.rating || '';
+  $('f_url').value = p.url || ''; $('f_statement').value = p.statement || '';
+  $('f_samples').value = (p.samples || []).length ? JSON.stringify(p.samples, null, 1) : '';
+  if (!keepTyped || !$('f_oracleCode').value.trim()) {
+    $('f_oracleCode').value = p.oracleCode || ''; $('f_oracleLang').value = p.oracleLang || 'python';
+  }
+  if (!keepTyped || !$('f_genCode').value.trim()) {
+    $('f_genCode').value = p.genCode || ''; $('f_genLang').value = p.genLang || 'python';
+  }
+  if (!keepTyped || !$('f_note').value.trim()) $('f_note').value = p.note || '';
+}
+
 function openEdit(id) {
   editing = id || null;
   const p = id ? (S.problems || []).find((x) => x.id === id) : null;
   $('dlgTitle').textContent = p ? ('编辑 ' + p.id) : '加题';
   $('btnDelete').style.display = p ? '' : 'none';
-  ['f_id', 'f_title', 'f_rating', 'f_url', 'f_statement', 'f_samples', 'f_oracleCode', 'f_genCode', 'f_note'].forEach((k) => { $(k).value = ''; });
-  if (p) {
-    $('f_id').value = p.id; $('f_title').value = p.title || ''; $('f_rating').value = p.rating || '';
-    $('f_url').value = p.url || ''; $('f_statement').value = p.statement || '';
-    $('f_samples').value = (p.samples || []).length ? JSON.stringify(p.samples, null, 1) : '';
-    $('f_oracleCode').value = p.oracleCode || ''; $('f_genCode').value = p.genCode || '';
-    $('f_oracleLang').value = p.oracleLang || 'python'; $('f_genLang').value = p.genLang || 'python';
-    $('f_note').value = p.note || '';
-  }
+  ['f_ref', 'f_id', 'f_title', 'f_rating', 'f_url', 'f_statement', 'f_samples', 'f_oracleCode', 'f_genCode', 'f_note'].forEach((k) => { $(k).value = ''; });
+  msg('');
+  if (p) applyProblemToForm(p, false);
   dlg.showModal();
+}
+
+/** 表单 → /api/problems 的请求体（题号必填；样例留空 = 服务端从题面自动解析） */
+function formBody() {
+  const id = $('f_id').value.trim();
+  if (!id) throw new Error('题号不能空');
+  let samples = null;
+  const raw = $('f_samples').value.trim();
+  if (raw) { try { samples = JSON.parse(raw); } catch (err) { throw new Error('样例 JSON 解析失败：' + err.message); } }
+  return {
+    problem: {
+      id, title: $('f_title').value, rating: $('f_rating').value, url: $('f_url').value,
+      statement: $('f_statement').value, note: $('f_note').value,
+      oracleLang: $('f_oracleLang').value, oracleCode: $('f_oracleCode').value,
+      genLang: $('f_genLang').value, genCode: $('f_genCode').value,
+      samples: samples && samples.length ? samples : []
+    }
+  };
+}
+
+async function saveProblem() {
+  const body = formBody();
+  const r = await api('/api/problems', body);
+  logLine('保存 ' + body.problem.id + '：样例 ' + r.problem.samples + ' 组，oracle ' + (r.problem.hasOracle ? '有' : '无') + '，生成器 ' + (r.problem.hasGen ? '有' : '无'));
+  return r;
 }
 
 $('form').addEventListener('submit', async (e) => {
   const action = (e.submitter && e.submitter.value) || 'cancel';
   if (action === 'cancel') return;   // method=dialog 自己关
   e.preventDefault();
-  const id = $('f_id').value.trim();
   if (action === 'delete') {
     if (!editing) return;
     await api('/api/problems/delete', { id: editing }); logLine('删掉题目 ' + editing); dlg.close(); return refresh();
   }
-  if (!id) return logLine('题号不能空');
-  let samples = null;
-  const raw = $('f_samples').value.trim();
-  if (raw) { try { samples = JSON.parse(raw); } catch (err) { return logLine('样例 JSON 解析失败：' + err.message); } }
-  const body = {
-    problem: {
-      id, title: $('f_title').value, rating: $('f_rating').value, url: $('f_url').value,
-      statement: $('f_statement').value, note: $('f_note').value,
-      oracleLang: $('f_oracleLang').value, oracleCode: $('f_oracleCode').value,
-      genLang: $('f_genLang').value, genCode: $('f_genCode').value
-    }
-  };
-  // samples：留空 → 交给服务端从题面自动解析；填了 → 按填的走
-  body.problem.samples = samples && samples.length ? samples : [];
   try {
-    const r = await api('/api/problems', body);
-    logLine('保存 ' + id + '：样例 ' + r.problem.samples + ' 组，oracle ' + (r.problem.hasOracle ? '有' : '无') + '，生成器 ' + (r.problem.hasGen ? '有' : '无'));
-    sel.add(id); dlg.close(); await refresh();
+    const r = await saveProblem();
+    sel.add(r.problem.id); dlg.close(); await refresh();
   } catch (err) { logLine('保存失败：' + err.message); }
 });
+
+/** 从 CF 取题：复用应用自己的取题通道（题面/样例/标题/难度一次到手，用户只需要再贴 oracle） */
+$('btnFetch').addEventListener('click', async () => {
+  const ref = ($('f_ref').value || $('f_id').value).trim();
+  if (!ref) return msg('先填题号（如 1800C）或直接贴题目链接');
+  const btn = $('btnFetch');
+  btn.disabled = true; btn.textContent = '取题中…';
+  msg('取题中：借应用内嵌浏览器过 CF 反爬（约 20–60 秒），右边的「事件」栏有进度');
+  try {
+    const r = await api('/api/cf-fetch', { ref });
+    await refresh();
+    const p = (S.problems || []).find((x) => x.id === r.id);
+    if (p) applyProblemToForm(p, true);
+    $('f_ref').value = r.id;
+    msg('已入库 ' + r.id + '：题面 ' + r.statementLen + ' 字，样例 ' + r.samples + ' 组'
+      + (r.hasOracle ? '，oracle 已有（没被覆盖）' : '，还缺 oracle：贴一份你自己的 AC 题解'));
+    logLine('取题成功：' + r.id + ' ' + r.title);
+  } catch (err) {
+    msg('取题失败：' + err.message + '　→ CF 反爬是偶发的，再点一次通常就过；也可以直接把题面粘进来');
+    logLine('取题失败：' + err.message);
+  } finally { btn.disabled = false; btn.textContent = '从 CF 取题'; }
+});
+
+/** 自动写生成器：先存题（服务器要读落盘的 oracle），再让模型写 + 跑代码体检 */
+$('btnGen').addEventListener('click', async () => {
+  const btn = $('btnGen');
+  msg('');
+  try {
+    const saved = await saveProblem();
+    const id = saved.problem.id;
+    if (!saved.problem.hasOracle) { msg('这题还没有 oracle：先贴一份你自己的 AC 题解，生成器要照它的输入格式写'); return; }
+    btn.disabled = true; btn.textContent = '写生成器中…';
+    msg('写生成器：一次模型调用 + 跑代码体检（能不能跑、数据会不会把你的 oracle 跑崩、是不是每次都一样）…');
+    const g = await api('/api/make-gen', { id });
+    $('f_genLang').value = g.lang; $('f_genCode').value = g.code;
+    const warn = (g.gate && g.gate.warnings) || [];
+    msg('生成器已写入（' + g.lang + '，体检通过' + (warn.length ? '，提醒：' + warn.join('；') : '') + '）');
+    logLine('生成器已写入：' + id + (warn.length ? '（' + warn.join('；') + '）' : ''));
+  } catch (err) {
+    msg('自动写生成器失败：' + err.message);
+    logLine('自动写生成器失败：' + err.message);
+  } finally { btn.disabled = false; btn.textContent = '自动写生成器'; }
+});
+
 
 $('btnAdd').addEventListener('click', () => openEdit(null));
 $('btnRunSel').addEventListener('click', () => startRun(Array.from(sel), false));
 $('btnRunAll').addEventListener('click', () => startRun(Array.from(sel).length ? Array.from(sel) : (S.problems || []).map((p) => p.id), false));
 $('btnJudge').addEventListener('click', async () => {
   try { await api('/api/judge', { iterations: Number($('it').value) || 60 }); logLine('开始判分…'); } catch (e) { logLine('判分失败：' + e.message); }
+});
+$('btnGens').addEventListener('click', async () => {
+  const todo = (S.problems || []).filter((p) => p.hasOracle && !p.hasGen);
+  if (!todo.length) return logLine('没有要补的：有 oracle 的题都已经有生成器了');
+  logLine('补生成器：' + todo.length + ' 题（' + todo.map((p) => p.id).join('、') + '）——一题一次模型调用 + 跑代码体检，慢慢来');
+  try {
+    await api('/api/make-gens', { ids: todo.map((p) => p.id), onlyMissing: true });
+    $('progress').textContent = '补生成器 0/' + todo.length;
+  } catch (e) { logLine('补生成器失败：' + e.message); }
 });
 $('btnCancel').addEventListener('click', async () => { try { await api('/api/cancel', {}); logLine('已请求取消'); } catch (e) { logLine(e.message); } });
 $('btnExport').addEventListener('click', async () => {
@@ -361,6 +438,11 @@ es.onmessage = (ev) => {
   else if (e.type === 'verdict') { $('progress').textContent = '判分 ' + e.done + '/' + e.total + '　' + e.verdict.problem + ' ' + e.verdict.level + ' → ' + e.verdict.diffVerdict; }
   else if (e.type === 'judgeStart') { $('progress').textContent = '判分中（每题最多 ' + e.iterations + ' 组对拍）…'; }
   else if (e.type === 'judgeEnd') { $('progress').textContent = '判分完成'; logLine('判分完成：配对 ' + (e.compare && e.compare.n || 0) + ' 题'); refresh().catch(() => {}); }
+  else if (e.type === 'genDone') {
+    $('progress').textContent = '补生成器 ' + e.done + '/' + e.total;
+    logLine((e.ok ? '生成器 ✓ ' : '生成器 ✗ ') + e.id + (e.error ? '：' + e.error : ''));
+  }
+  else if (e.type === 'gensEnd') { $('progress').textContent = '补生成器结束'; logLine('补生成器结束'); refresh().catch(() => {}); }
   else if (e.type === 'error') logLine('⚠️ ' + e.error);
 };
 

@@ -378,7 +378,8 @@ npm run test:skills       # 技能系统与工具层单测（不联网，78 条�
 npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/L2/判分/配对比较全链路）
 npm run probe:ablation    # 消融实验四个入口的真跑探针（零 token：run/judge/import-l2/selftest）
 npm run probe:ui          # 人工测试台端到端探针（零 token：加题→跑分→判分→人工判定→导出）
-npm run ablation:serve    # 人工测试台（http://127.0.0.1:4311）：加题 → 跑 L0/L2 → 左右对比 → 打分
+npm run probe:cf          # 真机取题探针：借应用内嵌浏览器扒一道真题（复用应用的 CF 取题通道）
+npm run ablation:serve    # 人工测试台（http://127.0.0.1:4311）：从 CF 取题 → 只贴 oracle → 自动写生成器 → 跑 L0/L2 → 左右对比 → 打分
 node scripts/probe-review-session.js <handle> <比赛号>   # 真机验证：装复盘材料（题解 + 多份源码）
 node scripts/probe-review-bundle.js  <handle> <比赛号>   # 真机验证：打包给对话框的那份材料
 node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证：抓提交源码
@@ -392,8 +393,9 @@ node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证�
 
 这一轮的验收线刻意保守：**"不差于 L0"的比例**（`notWorseRate`）+ 配对胜平负与 McNemar 精确 p +
 每档 tokens/花费 + **假自信率**（链自己声称"已验证"、却被外部 oracle 判 WA）。
-`npm run ablation:serve` 打开一页人工测试台：粘贴题面（样例自动解析）、指定自己的 oracle 与生成器、
-左右对比 L0 原文与 L2 的图文文档、逐题记人工判定。
+`npm run ablation:serve` 打开一页人工测试台：填题号点「从 CF 取题」把题面/样例/标题/难度自动带出
+（复用应用自己的取题通道），**你只需要贴一份自己的 AC 题解当 oracle**，生成器点「自动写生成器」让模型写完当场体检；
+然后左右对比 L0 原文与 L2 的图文文档、逐题记人工判定。
 
 改**教练工具循环**（`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`）时，`.probe/` 下有两个省时间的工具：
 

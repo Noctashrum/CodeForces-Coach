@@ -37,6 +37,7 @@
     "test:ablation": "node ablation/selftest.js",
     "probe:ablation": "node .probe/probe-ablation.js",
     "probe:ui": "node .probe/probe-ui.js",
+    "probe:cf": "node .probe/probe-cf-fetch.js",
     "ablation:serve": "node ablation/serve.js",
     "test:units": "node scripts/test-anticheat.js && node scripts/test-explaindoc.js && node scripts/test-statement.js && node scripts/test-pricing.js && node scripts/test-parallel.js && node scripts/test-agentruns.js && node scripts/test-skills.js && node scripts/test-harness.js && node scripts/test-runner.js && node ablation/selftest.js",
     "smoke": "node scripts/run-smoke.js",

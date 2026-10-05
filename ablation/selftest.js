@@ -21,6 +21,8 @@ const record = require('./lib/record');
 const levels = require('./lib/levels');
 const l2 = require('./lib/l2');
 const compareLib = require('./lib/compare');
+const cffetch = require('./lib/cffetch');
+const mkgen = require('./lib/mkgen');
 const problemsLib = require('./lib/problems');
 const judge = require('./judge');
 const { startMockLlm } = require('./mockllm');
@@ -136,7 +138,30 @@ async function main() {
       && compareLib.exactBinomialTwoSided(0, 0) === 1
       && Math.abs(compareLib.exactBinomialTwoSided(3, 3) - 1) < 1e-9);
 
-    // ⑧ 记录与汇总
+    // ⑧ 取题通道 + 自动写生成器（用户 m04297：我只想贴 oracle，题面和生成器都别让我手填）
+    check('题号解析：1800C / 1800 C / 链接 / 看不懂 → 按预期',
+      JSON.stringify(cffetch.parseRef('1800C')) === '{"contestId":1800,"index":"C"}'
+      && JSON.stringify(cffetch.parseRef('1800 C')) === '{"contestId":1800,"index":"C"}'
+      && JSON.stringify(cffetch.parseRef('https://codeforces.com/contest/1800/problem/C')) === '{"contestId":1800,"index":"C"}'
+      && cffetch.parseRef('随便写点什么') === null);
+    // 题库清单里 oracle 只记 {lang, file}（判分自己读文件）；mkgen 要的是能贴进提示词的代码正文
+    const oracleSrc = { lang: problem.oracle.lang, code: fs.readFileSync(problem.oracle.file, 'utf8') };
+    const gen1 = await mkgen.makeGen({ problem, statement: problem.statement, oracle: oracleSrc, target, params });
+    check('自动写生成器：模型写出来 + 体检通过',
+      gen1.ok === true && !!gen1.code && !!gen1.gate && gen1.gate.status === 'ok',
+      gen1.error || JSON.stringify(gen1.gate && gen1.gate.detail));
+    check('自动写生成器：体检是真的跑了代码（有数据样例）', !!(gen1.gate && String(gen1.gate.sample || '').trim()), gen1.gate && gen1.gate.sample);
+    const gArgv = await mkgen.gateGen({ gen: { lang: 'python', code: 'import sys\nn = int(sys.argv[1])\nprint(n, n)' }, oracle: oracleSrc });
+    check('体检拦住"不给命令行参数就跑不动"的生成器（判分调用它时没有 argv）',
+      gArgv.ok === false && gArgv.status === 'gen', JSON.stringify([gArgv.ok, gArgv.status, gArgv.detail]));
+    const gBad = await mkgen.gateGen({ gen: { lang: 'python', code: 'print("这一行不是两个整数")' }, oracle: oracleSrc });
+    check('体检拦住"数据违反输入格式"的生成器（oracle 会崩）',
+      gBad.ok === false && gBad.status === 'oracle', JSON.stringify([gBad.ok, gBad.status]));
+    const gConst = await mkgen.gateGen({ gen: { lang: 'python', code: 'print(3, 4)' }, oracle: oracleSrc });
+    check('体检对"每次产出同一组数据"给警告但不拦（能跑，只是覆盖面小）',
+      gConst.ok === true && gConst.diverse === false && gConst.warnings.length >= 1, JSON.stringify(gConst.warnings));
+
+    // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
     check('records.jsonl 写出五条记录', lines.length === 5, 'lines=' + lines.length);

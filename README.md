@@ -406,7 +406,8 @@ npm run test:skills       # 78 skill checks (skill system + tool layer, no netwo
 npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/L2/judging/paired compare)
 npm run probe:ablation    # ablation probes: run / judge / import-l2 / selftest, all zero-token
 npm run probe:ui          # end-to-end probe of the manual ablation workbench (zero tokens)
-npm run ablation:serve    # manual workbench UI on http://127.0.0.1:4311 (add problems → run → compare L0 vs L2)
+npm run probe:cf          # live: fetch one real problem through the app's own CF fetch channel
+npm run ablation:serve    # manual workbench UI on http://127.0.0.1:4311 (fetch from CF → paste only your oracle → auto-write the generator → run L0 vs L2)
 node scripts/probe-review-session.js <handle> <contestId>   # live: assemble review material (editorials + sources)
 node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle that goes into the composer
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
@@ -423,7 +424,9 @@ see [ablation/README.md](ablation/README.md).
 The acceptance bar for this round is deliberately conservative — **"not worse than L0"** (`notWorseRate`), plus a
 paired win/tie/loss count with an exact McNemar p-value, the per-level token cost, and a **false-confidence rate**
 (the chain claimed "verified" while an external oracle says WA). `npm run ablation:serve` opens a one-page workbench
-for the manual pass: paste a statement (samples are parsed automatically), point at your own oracle + generator, run
+for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
+samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
+"auto-write generator" has the model write the random generator and mechanically checks it right away; run
 L0/L2 side by side, read the L2 rich document next to the raw L0 answer, and record a human verdict per problem.
 
 When working on the **coach tool loop** (`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`),
