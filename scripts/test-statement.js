@@ -198,6 +198,37 @@ ok('行内加粗的段落标记（**输入** 写在句子结尾）也能被契�
   assert.ok(c.inputSpec.indexOf('样例输入') < 0, '输入段不该吞掉样例段');
 });
 
+console.log('statement: 多解题（答案不唯一）识别——判分与讲解都要按它改口径');
+
+/* 真实事故（2026-10 消融报告）：2241B、2267B 的题面写着 "output any one of them"，
+ * 但链路和判分器都按"和官方样例逐字相同"判对错 → 正确解被判成 WA → 连锁自纠错把 20 分钟预算烧穿、
+ * 交白卷；判分器还把这两题整题判成"尺子不可信"排除掉。判据必须宁窄勿宽：
+ * 漏判 = 维持现状；误判 = 把一个正常题的验证关掉。*/
+ok('英文：any one of them / multiple valid answers → 多解题', () => {
+  assert.strictEqual(st.looksSpecialJudge('If there are multiple valid answers, output any one of them.'), true);
+  assert.strictEqual(st.looksSpecialJudge('If there are several optimal answers, output any of them in any order.'), true);
+  assert.strictEqual(st.looksSpecialJudge('You may print any valid answer.'), true);
+});
+
+ok('打破平局的规定 → 不算多解题（不许因为一句 any 就关掉字面比对）', () => {
+  assert.strictEqual(st.looksSpecialJudge('If there are multiple valid answers, output the lexicographically smallest one.'), false);
+  assert.strictEqual(st.looksSpecialJudge('The answer is unique; output the minimum possible value.'), false);
+  assert.strictEqual(st.looksSpecialJudge('Print the maximum possible score.'), false);
+});
+
+ok('普通题面里的 several/multiple 不误判（"several test cases" 不是多解）', () => {
+  assert.strictEqual(st.looksSpecialJudge('There are several test cases in the input.'), false);
+  assert.strictEqual(st.looksSpecialJudge('Each test contains multiple test cases.'), false);
+  assert.strictEqual(st.looksSpecialJudge(''), false);
+  assert.strictEqual(st.looksSpecialJudge(null), false);
+});
+
+ok('中文：答案不唯一 / 多解 / 输出任意 → 多解题', () => {
+  assert.strictEqual(st.looksSpecialJudge('本题答案不唯一，输出任意一个合法答案即可。'), true);
+  assert.strictEqual(st.looksSpecialJudge('这是一道多解题，输出任意一种方案。'), true);
+  assert.strictEqual(st.looksSpecialJudge('输出字典序最小的方案。'), false);
+});
+
 console.log('profile: 证据闸门（没有学员侧证据就不更新）');
 
 ok('只贴了个题号：没有学员侧证据 → 直接跳过', () => {

@@ -43,8 +43,20 @@ function loadProblems(args) {
   for (const p of list) {
     if (!p || !p.id) continue;
     if (want.length && want.indexOf(String(p.id)) < 0 && want.indexOf('all') < 0) continue;
+    // 题面有两种写法：① `statement` 给文件名/相对路径（statements/1800C.txt）；
+    // ② `statement` 里直接内联整段题面正文（消融工作台写出的 problems.json 就是这种）。
+    // 血泪教训（2026-10 消融报告，2241B/2267B）：只按文件名解析 → 内联题面的题一律解析成空串 →
+    // 判分器靠题面正则做的"多解题"识别全部失效 → 这两题被判成 oracle-broken 整题排除，
+    // 而它们其实是"答案不唯一"，正确解被字面比对误判成 WA。
     let statementFile = resolveFile(baseDir, p.statement || ('statements/' + p.id + '.txt'));
-    const statement = statementFile ? fs.readFileSync(statementFile, 'utf8') : '';
+    let statement = statementFile ? fs.readFileSync(statementFile, 'utf8') : '';
+    const inlineText = typeof p.statement === 'string' ? p.statement.trim() : '';
+    // 判据：**落不到任何文件** 且 **看着像题面正文而不是文件名**（题面正文总有空白，文件名没有）。
+    const looksLikePath = inlineText.length > 0 && inlineText.length < 200 && !/\s/.test(inlineText);
+    if (!statement.trim() && inlineText && !looksLikePath) {
+      statement = inlineText;
+      statementFile = null;
+    }
     const entry = {
       id: String(p.id),
       contestId: p.contestId || null,

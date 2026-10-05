@@ -70,6 +70,13 @@ function fileStamp(file) {
   return { file, bytes: stat.size, mtime: stat.mtime.toISOString() };
 }
 
+/** 批次号（YYYYMMDD-HHMMSS）：一次"开始跑"= 一个批次，用于按轮次隔离工作区与文档 */
+function runId(d) {
+  const x = d || new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return x.getFullYear() + p(x.getMonth() + 1) + p(x.getDate()) + '-' + p(x.getHours()) + p(x.getMinutes()) + p(x.getSeconds());
+}
+
 /** 一次实验的输出目录：records.jsonl / summary.json / answers/ / transcript/ / sandbox/ */
 function openRun(outDir) {
   ensureDir(outDir);
@@ -78,7 +85,9 @@ function openRun(outDir) {
   ensureDir(path.join(outDir, 'sandbox'));
   const recordsFile = path.join(outDir, 'records.jsonl');
   const records = [];
+  const id = runId();
   return {
+    id,
     outDir,
     recordsFile,
     records,
@@ -123,4 +132,4 @@ function openRun(outDir) {
   };
 }
 
-module.exports = { ensureDir, normLang, extractFinalCode, costOf, fileStamp, openRun };
+module.exports = { ensureDir, normLang, extractFinalCode, costOf, fileStamp, openRun, runId };

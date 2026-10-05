@@ -56,6 +56,38 @@ async function main() {
   const params = { temperature: 0.6, topP: 1, maxTokens: 0 };
 
   try {
+    // P0 回归①：消融工作台写出的 problems.json 里 `statement` 是**整段题面正文**，装载器原来把它当文件名
+    //   → 题面解析成空串 → 多解题检测恒 false → 2241B/2267B 被判 oracle-broken 整题排除（正确解被字面比对误判成 WA）。
+    const inlineProblems = path.join(tmp, 'inline-problems.json');
+    fs.writeFileSync(inlineProblems, JSON.stringify({
+      problems: [{
+        id: '2241B',
+        statement: 'You are given an integer x. If there are multiple valid answers, output any one of them.',
+        samples: [{ input: '1 1', output: '11' }]
+      }]
+    }), 'utf8');
+    const inlineLoaded = problemsLib.loadProblems({ problemsFile: inlineProblems, problems: 'all' });
+    check('装载：problems.json 里内联的整段题面不再被当成文件名丢掉',
+      inlineLoaded.all.length === 1 && inlineLoaded.all[0].statement.length > 60 && inlineLoaded.skipped.length === 0,
+      JSON.stringify([inlineLoaded.all.length, inlineLoaded.skipped.length, String(inlineLoaded.all[0] && inlineLoaded.all[0].statement).length]));
+    check('装载：内联题面也判得出多解题（判分器与产品共用一份判据）',
+      mkgen.looksSpecialJudge(inlineLoaded.all[0].statement) === true
+      && mkgen.looksSpecialJudge('Print the maximum possible score.') === false);
+    // P0 回归②：工作区/文档按轮次隔离 —— 否则上一轮遗留的 sol.py 会被下一轮当成自己的产物读走
+    //   （2268A 的失败轮就是这样被记成"有代码、验证通过"，交付的却是 4 小时前那一轮的文档与代码）
+    check('轮次隔离：批次号形如 YYYYMMDD-HHMMSS', /^\d{8}-\d{6}$/.test(String(run.id)), String(run.id));
+    const wsA = l2.prepareWorkspace(run.outDir, '21000101-000000');
+    const wsB = l2.prepareWorkspace(run.outDir, '21000101-000001');
+    // 直接验"上一轮写下的产物下一轮读不到"：2268A 事故就是上一轮的 sol.py 被下一轮当成自己的交付
+    const probeDir = path.join(wsA, 'workspace', 'ab-isolation-probe');
+    fs.mkdirSync(probeDir, { recursive: true });
+    fs.writeFileSync(path.join(probeDir, 'sol.py'), 'print(1)', 'utf8');
+    check('轮次隔离：不同轮次落在不同工作区根目录，且上一轮的产物下一轮读不到',
+      wsA !== wsB && path.dirname(wsA) === path.dirname(wsB) && /l2-data/.test(wsA)
+      && !fs.existsSync(path.join(wsB, 'workspace', 'ab-isolation-probe', 'sol.py')),
+      wsA + ' | ' + wsB);
+    l2.prepareWorkspace(run.outDir, run.id);   // 还原成本轮的根目录（自测后面还要真跑 L2）
+
     // ① L0
     const rec0 = await levels.runL0({ problem, statement: problem.statement, target, params, run, name: 'L0-example-ab' });
     check('L0 出代码', rec0.ok && !!rec0.code, rec0.error || '');

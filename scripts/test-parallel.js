@@ -383,6 +383,74 @@ const callAgent = async (opts) => {
   ok('标尺有罪：题解保持原样（没有被坏尺子的期望值改动）',
     String(resRuler.solCode || '').indexOf('heapq') >= 0, String(resRuler.solCode || '').slice(0, 80));
 
+  /* ---------------- 多解题（答案不唯一）：本地判不了就不改题解、不烧仲裁 ----------------
+   * 实测事故（2026-10 消融报告 2267B）：题面写明"输出任意一个合法答案"，官方样例只是其中**一个**
+   * 合法答案 → 题解与暴力解给出不同的合法答案 → 旧逻辑当成"题解错" → 两次重写都被长度上限截断
+   * → 20 分钟总时长上限烧穿、正文 0 字节、连文档都没生成。这里把"判不了"这条闸门钉死。 */
+  console.log('parallel: 多解题（答案不唯一）→ 判不了就不改题解');
+  // 题：输出 1..n 的任意排列（题面明说多解）。样例给的是顺序 1 2 3。
+  const MA_SOL = [
+    'import sys',
+    'd = sys.stdin.read().split()',
+    'n = int(d[0])',
+    'print(" ".join(str(i) for i in range(n, 0, -1)))'   // 逆序：合法但与样例不同
+  ].join('\n');
+  const MA_BRUTE = [
+    'import sys',
+    'd = sys.stdin.read().split()',
+    'n = int(d[0])',
+    'print(" ".join(str(i) for i in range(1, n + 1)))'   // 顺序：与样例逐字相同
+  ].join('\n');
+  const MA_GEN = [
+    'import random, sys',
+    'm = int(sys.argv[1]) if len(sys.argv) > 1 else 8',
+    'print(random.randint(2, max(2, min(m, 8))))'
+  ].join('\n');
+  const MA_STATEMENT = STATEMENT
+    + '\nYou may print the numbers in any order. If there are multiple valid answers, output any one of them.';
+  let maSolCalls = 0;
+  let maBruteCalls = 0;
+  let maAdjCalls = 0;
+  const callAgentMulti = async (opts) => {
+    const sys = String(opts.system || '');
+    const label = String(opts.label || '');
+    if (sys.indexOf('【题解 Agent】') >= 0) { maSolCalls++; return '思路：任意排列即可。\n\n```python\n' + MA_SOL + '\n```'; }
+    if (sys.indexOf('【暴力 Agent】') >= 0) { maBruteCalls++; return '暴力。\n\n```python\n' + MA_BRUTE + '\n```'; }
+    if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + MA_GEN + '\n```';
+    if (sys.indexOf('错因仲裁') >= 0 || label.indexOf('仲裁') >= 0) { maAdjCalls++; return '{"wrong":"sol","reason":"输出与样例不同"}'; }
+    if (sys.indexOf('【讲解 Agent】') >= 0) return '## 题面拆解\n多解题：任意排列都合法。\n## 验证\n与样例不同不代表错。';
+    return '{}';
+  };
+  const resMA = await harness.runPipeline({
+    conv: { id: 'multi-answer', title: '多解题' },
+    lang: 'python', intent: 'full', statement: MA_STATEMENT,
+    samples: [{ input: '3', output: '1 2 3' }],
+    workspace, wsKey: 'multi-answer',
+    callAgent: callAgentMulti, tiers: [4, 6], perTier: 6, bruteTimeoutMs: 5000,
+    emit: () => {}, log: () => {}
+  });
+  const maTraj = (resMA.trajectory || []).map((t) => t.kind);
+  ok('多解题：样例与题解字面不同 → 不判题解错、不改写题解（sol 只跑一次）',
+    maSolCalls === 1 && maBruteCalls === 1, { sol: maSolCalls, brute: maBruteCalls });
+  ok('多解题：样例关不作判错依据（轨迹记下 special-judge，而不是 sol-samples-fail）',
+    maTraj.indexOf('sol-samples-special-judge') >= 0 && maTraj.indexOf('sol-samples-fail') < 0,
+    { traj: maTraj.join(',') });
+  ok('多解题：对拍不一致 → 停止改写、不花仲裁调用（本地判不了就不判）',
+    maAdjCalls === 0 && maTraj.indexOf('multi-answer-undecidable') >= 0,
+    { adj: maAdjCalls, traj: maTraj.join(',') });
+  ok('多解题：结论如实标成 multi-answer，覆盖范围**不是**完整验证',
+    resMA.status === 'multi-answer' && resMA.verification.status === 'multi-answer'
+    && resMA.verification.multiAnswer === true && resMA.verification.scopeComplete === false,
+    { status: resMA.status, v: resMA.verification && resMA.verification.status,
+      multi: resMA.verification && resMA.verification.multiAnswer,
+      scope: resMA.verification && resMA.verification.scopeComplete });
+  ok('多解题：不把"两边都合法"的差异当教学反例交给讲解（没有最小反例）',
+    !resMA.minimalCase || !resMA.minimalCase.input, resMA.minimalCase);
+  ok('多解题：提醒里说明"和样例不同不等于错、样例通关也不是正确性证明"',
+    (resMA.notes || []).join('').indexOf('多解题') >= 0
+    && (resMA.notes || []).join('').indexOf('不等于') >= 0,
+    { notes: (resMA.notes || []).join(' | ').slice(0, 200) });
+
   /* ---------------- 数值范围：**只提醒，绝不改数据** ----------------
    * 曾经以为"机械缩放数值"是代码层的稳妥解法，结果把二进制串字段 00100010 改成 16，
    * 把整轮带沟里（仲裁判生成器有罪、白重写 3 次）。现在改成：把上限告诉生成器（argv[2]），
@@ -563,6 +631,9 @@ const callAgent = async (opts) => {
       if (opts.onMeta) opts.onMeta({ finishReason: 'length' });   // 模拟：输出预算全花在思考上，正文被截断
       return '';
     }
+    // 暴力解也拿不到代码：这条用例专门验"**没有任何可交付物**时也不许给空消息"
+    // （有暴力解可交付的情况由下面"降级交付"那条用例覆盖）
+    if (sys.indexOf('【暴力 Agent】') >= 0) return '';
     return callAgent(opts);
   };
   const resTrunc = await harness.runPipeline({
@@ -587,6 +658,46 @@ const callAgent = async (opts) => {
     { len: String(resTrunc.explainerText || '').length, head: String(resTrunc.explainerText || '').slice(0, 60) });
   ok('截断：机械摘要里说明"没有额外调用模型"（成本透明）',
     /没有额外调用模型/.test(String(resTrunc.explainerText || '')));
+
+  /* ---------------- P0-② 降级交付：题解被截断，但同一轮已经生成了能过样例的暴力解 ----------------
+   * 实测（2026-10 消融报告，2267B / 2267F2 / 2268A）：题解两次都被长度上限截断 → 原来直接 return 交白卷
+   * （0 字节正文 + 连文档都不生成），而同一轮里**明明有暴力解**。降级口径：交付暴力解，
+   * 并把"这是慢解 / 没做随机对拍 / 不是已验证的最优解"如实写进状态、轨迹与提醒。 */
+  console.log('parallel: 题解被截断 → 降级交付暴力解（不许交白卷）');
+  {
+    let truncSolCalls = 0;
+    const callAgentTruncSolOnly = async (opts) => {
+      const sys = String(opts.system || '');
+      if (sys.indexOf('【题解 Agent】') >= 0) {
+        truncSolCalls++;
+        if (opts.onMeta) opts.onMeta({ finishReason: 'length' });
+        return '';
+      }
+      return callAgent(opts);
+    };
+    const resDeg = await harness.runPipeline({
+      conv: { id: 'trunc-degrade', title: '截断降级' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: 'trunc-degrade',
+      callAgent: callAgentTruncSolOnly, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+    ok('降级：题解重试后仍无代码 → 交付同轮的暴力解（不交白卷）',
+      truncSolCalls >= 2 && String(resDeg.solCode || '').trim() === String(BRUTE).trim(),
+      { calls: truncSolCalls, head: String(resDeg.solCode || '').slice(0, 60), want: BRUTE.slice(0, 60) });
+    ok('降级：验证状态如实标成 degraded-brute / unverified（绝不写 ok）',
+      !!resDeg.verification && resDeg.verification.status !== 'ok' && resDeg.verification.degraded === 'brute',
+      { status: resDeg.verification && resDeg.verification.status, degraded: resDeg.verification && resDeg.verification.degraded });
+    ok('降级：轨迹、提醒与覆盖范围都写明"这是暴力解、没有做随机对拍"',
+      (resDeg.trajectory || []).some((t) => t.kind === 'sol-truncated-fallback-brute')
+      && (resDeg.notes || []).join('').indexOf('暴力解') >= 0
+      && /降级/.test(String((resDeg.verification || {}).scopeNote || '')),
+      { traj: (resDeg.trajectory || []).map((t) => t.kind).join(','), scope: String((resDeg.verification || {}).scopeNote || '').slice(0, 60) });
+    ok('降级：消息里仍然有正文（讲解 Agent 拿到的是这份慢解）',
+      typeof resDeg.explainerText === 'string' && resDeg.explainerText.length > 80,
+      { len: String(resDeg.explainerText || '').length });
+  }
 
 
   /**

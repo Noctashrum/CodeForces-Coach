@@ -47,9 +47,18 @@ function roleOf(system) {
 
 let wsRoot = null;
 
-/** 工作区根目录指向实验目录（一个进程只设一次；幂等） */
-function prepareWorkspace(outDir) {
-  const root = path.join(outDir, 'l2-data');
+/**
+ * 工作区根目录指向**本轮实验**的独立子目录（幂等）。
+ *
+ * 为什么必须按轮次隔离（P0-③，2026-10 消融报告）：工作区原来在一次实验里跨轮共享，
+ * 于是"上一轮遗留的 sol.py"会被下一轮当成自己的产物读走 —— 2268A 的失败轮因此被记成
+ * "有代码、验证通过"，交付的却是 4 小时前那一轮的文档与代码，人工复核时根本分不出来。
+ * 现在每轮从空工作区开始：本轮跑成什么样，记录里就是什么样（同一批次内所有题共享一个根，
+ * 但每题一个会话目录，互不干扰）。
+ */
+function prepareWorkspace(outDir, roundId) {
+  const safe = String(roundId == null || roundId === '' ? 'default' : roundId).replace(/[^A-Za-z0-9_.-]/g, '');
+  const root = path.join(outDir, 'l2-data', safe);
   if (wsRoot !== root) {
     workspace.setRoot(root);
     wsRoot = root;
@@ -82,7 +91,8 @@ function clip(s, n) {
 async function runL2(ctx) {
   const { problem, statement, target, params, run, name } = ctx;
   const t0 = Date.now();
-  prepareWorkspace(run.outDir);
+  const roundId = (run && run.id) ? String(run.id) : 'default';
+  prepareWorkspace(run.outDir, roundId);
   const conv = convFor(problem);
   const key = workspace.keyFor(conv);
   const lang = ctx.lang === 'cpp' ? 'cpp' : 'python';
@@ -197,12 +207,15 @@ async function runL2(ctx) {
     rec.notes = res.notes || [];
     rec.richFallback = res.richFallback || null;
     rec.workspace = { key, dir: workspace.convDir(key), files: (workspace.listFiles(key) || []).map((f) => f.name) };
+    rec.roundId = roundId;   // 这一条属于哪一轮（工作区/文档都按它隔离）
     const answerText = String(res.explainerText || '');
     if (agentloop.hasLeakMarkup(answerText)) rec.leakMarkup = true;
     rec.answerFile = run.saveAnswer(name, agentloop.stripLeakMarkup(answerText));
     if (res.richDoc) {
       const docsDir = record.ensureDir(path.join(run.outDir, 'docs'));
-      rec.docFile = path.join(docsDir, name + '.html');
+      // 文档名带上轮次号：否则失败轮没有文档时，界面上/交付包里挂着的还是上一轮那份同名旧文档
+      // （2026-10 消融报告里 2268A 就是这样把 4 小时前的产物当成本轮结果的）。
+      rec.docFile = path.join(docsDir, name + '-' + roundId + '.html');
       fs.writeFileSync(rec.docFile, res.richDoc, 'utf8');
       rec.richDocBytes = Buffer.byteLength(res.richDoc, 'utf8');
     }

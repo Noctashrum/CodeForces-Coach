@@ -2047,7 +2047,9 @@
       ok: ['ok', '✓ 对拍通过'],
       mismatch: ['bad', '✕ 发现反例'],
       'brute-failed': ['warn', '⚠ 暴力解未过样例'],
-      error: ['bad', '✕ 运行出错']
+      error: ['bad', '✕ 运行出错'],
+      'multi-answer': ['warn', '⚠ 多解题·不可判'],
+      'degraded-brute': ['warn', '⚠ 降级：交付暴力解']
     };
     const st = v ? (statusMap[v.status] || ['warn', v.status || '未知']) : null;
     // P0：对拍被截断 / 题解没过样例时不许显示成"✓ 对拍通过"——部分验证必须看得见。
@@ -2082,6 +2084,12 @@
       }
       if (v.status === 'unverified') {
         html += '<div class="pp-ws-hint">未能完全验证通过：讲解会如实说明。</div>';
+      }
+      if (v.status === 'multi-answer') {
+        html += '<div class="pp-ws-hint">本题答案不唯一：题解与暴力解给出不同答案**不代表**谁错（本地没有 checker，判不了）。</div>';
+      }
+      if (v.status === 'degraded-brute') {
+        html += '<div class="pp-ws-hint">题解被长度上限截断 → 交付的是暴力解（官方样例通过，未做随机对拍）。</div>';
       }
     } else if (files.length) {
       html += '<div class="pp-ws-hint">尚未对拍验证。</div>';

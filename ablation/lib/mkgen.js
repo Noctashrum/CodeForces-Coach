@@ -20,6 +20,7 @@
 
 const llm = require('../../lib/llm');
 const runner = require('../../lib/runner');
+const statementLib = require('../../lib/statement');
 const record = require('./record');
 
 const SYSTEM = [
@@ -61,13 +62,12 @@ const HINT_RUN = 'oracle 在官方样例上就跑不过，通常意味着这份�
 /**
  * 题面里的"答案不唯一"表述（CF 的标准说法）→ 样例输出**不能**用精确比对来判 oracle 对不对。
  * 例：2241B 的题面原句 "If there are multiple valid answers, output any one of them."
+ *
+ * 检测器**与产品侧共用一份实现**（lib/statement.js 的 looksSpecialJudge）。
+ * 为什么必须共用：判分器和 cf-coach 本体如果各写一套正则，就会出现
+ * "链上按字面比对判它错、判分器把它算作不可判"的互相打架（2026-10 报告里 2241B 正是如此）。
  */
-const SPECIAL_JUDGE = /(output|print)\s+any\s+(one\s+)?(of\s+them|answer|valid|correct)|any\s+(valid|correct)\s+answer|multiple\s+(valid\s+)?answers|several\s+(valid\s+)?answers|if\s+there\s+are\s+(several|multiple)|any\s+of\s+the\s+(following|answers)|special\s+judge|checker/i;
-
-/** 这题是不是"输出任意合法答案"的多解题（只能靠题面判断） */
-function looksSpecialJudge(text) {
-  return SPECIAL_JUDGE.test(String(text || ''));
-}
+const looksSpecialJudge = statementLib.looksSpecialJudge;
 
 /**
  * oracle 先验：拿**官方样例**跑一遍，**并且比对样例输出**。
