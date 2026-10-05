@@ -23,6 +23,8 @@ build/*.blockmap
 profile-log.jsonl
 
 # Developer probe output (the probe scripts themselves are tracked)
+# 卫生 A/B 的跑批产物：含题面原文与模型产出（可能很大，也不该进仓库）
+.probe/hygiene-ab/
 .probe/rendered.html
 .probe/*.txt
 .probe/richdoc-*.html
