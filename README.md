@@ -428,6 +428,9 @@ for the manual pass: type a problem id and hit "fetch from CF" (it reuses the ap
 samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
 "auto-write generator" has the model write the random generator and mechanically checks it right away; run
 L0/L2 side by side, read the L2 rich document next to the raw L0 answer, and record a human verdict per problem.
+Live fetching is occasionally blocked by CF's anti-bot challenge (it is probabilistic): click again, it usually goes
+through. If it keeps failing, hit "**import app cache**" — that reads the statement the app itself already fetched and
+cached under `data/cf-problems/`, purely from local disk (no network, no challenge).
 
 When working on the **coach tool loop** (`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`),
 two probes under `.probe/` save a lot of time:

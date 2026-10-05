@@ -182,4 +182,59 @@ function toStoreProblem(p) {
   };
 }
 
-module.exports = { fetchProblem, parseRef, toStoreProblem, electronPath };
+/* ------------------------------------------------------------------ *
+ * 应用自己的题面缓存（<DATA_DIR>/cf-problems/<题号>.json）
+ *
+ * 为什么要有这条路：CF 的反爬是**概率性**的 —— 现场抓题经常整轮被抓（Cloudflare 403），
+ * 但用户在应用里点开某道题时抓成功过一次，题面就已经落盘了（lib/cf.js 的 writeProblemCache）。
+ * 直接把这份缓存导进测试台，比现场再抓一次可靠得多，也少交一次"挑战"的学费。
+ * 缓存结构和 fetchProblem 返回的 problem 完全一样，所以 toStoreProblem 能直接复用。
+ * ------------------------------------------------------------------ */
+
+/** 应用数据目录（默认仓库里的 data/，可用 CFCOACH_APP_DATA 或 opts.dataDir 覆盖） */
+function appDataDir(opts) {
+  const o = opts || {};
+  return o.dataDir || process.env.CFCOACH_APP_DATA || path.join(ROOT, 'data');
+}
+
+/** 题面缓存目录 */
+function appCacheDir(opts) {
+  return path.join(appDataDir(opts), 'cf-problems');
+}
+
+/** 缓存里已有哪些题号（如 ['4A','1800C']，按题号排序）；目录不存在就返回空数组 */
+function listAppCache(opts) {
+  try {
+    return fs.readdirSync(appCacheDir(opts))
+      .filter((f) => /\.json$/i.test(f))
+      .map((f) => f.replace(/\.json$/i, ''))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 读缓存里的一道题：返回 CF 原始结构（同 fetchProblem 的 problem），没有或文件坏了返回 null。
+ * @param {string|{contestId:number,index:string}} ref 题号（4A / 4 A / 题目链接）或已解析的 {contestId,index}
+ */
+function readAppCache(ref, opts) {
+  const parsed = (ref && typeof ref === 'object' && ref.contestId != null)
+    ? { contestId: ref.contestId, index: String(ref.index || '').toUpperCase() }
+    : parseRef(ref);
+  if (!parsed) return null;
+  const id = String(parsed.contestId) + String(parsed.index).toUpperCase();
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(appCacheDir(opts), id + '.json'), 'utf8'));
+    if (!raw || !raw.statement) return null;
+    if (raw.contestId == null) { raw.contestId = parsed.contestId; raw.index = parsed.index; }
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+module.exports = {
+  fetchProblem, parseRef, toStoreProblem, electronPath,
+  appDataDir, appCacheDir, listAppCache, readAppCache
+};

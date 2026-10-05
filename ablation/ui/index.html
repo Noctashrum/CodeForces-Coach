@@ -91,6 +91,9 @@
       <div>
         <div class="row"><label style="width:70px">取题</label><input id="f_ref" placeholder="1800C，或贴 CF 题目链接" style="flex:1">
           <button type="button" id="btnFetch" title="借应用内嵌浏览器过 CF 反爬，把题面/样例/标题/难度直接抓进来（20–60 秒）">从 CF 取题</button></div>
+        <div class="row"><label style="width:70px"></label>
+          <button type="button" id="btnImport" title="直接读应用自己抓过的题面缓存（data/cf-problems/<题号>.json）：纯本地文件，不用再过一次 CF 反爬">导应用缓存</button>
+          <span id="cacheHint" class="small dim" style="flex:1"></span></div>
         <div id="fetchMsg" class="small dim"></div>
         <div class="row"><label style="width:70px">题号</label><input id="f_id" placeholder="1800C" style="flex:1"></div>
         <div class="row"><label style="width:70px">标题</label><input id="f_title" style="flex:1"></div>
@@ -366,6 +369,31 @@ $('btnFetch').addEventListener('click', async () => {
   } finally { btn.disabled = false; btn.textContent = '从 CF 取题'; }
 });
 
+/**
+ * 导应用缓存：直接读应用自己抓过的题面缓存（data/cf-problems/<题号>.json）。
+ * 这条路**不联网、不过反爬**，是"现场取题被 Cloudflare 拦死"时最靠谱的退路：
+ * 只要你在应用里成功打开过一次这道题，题面就已经落盘了。
+ */
+$('btnImport').addEventListener('click', async () => {
+  const ref = ($('f_ref').value || $('f_id').value).trim();
+  if (!ref) return msg('先填题号（如 4A）；应用缓存里的题：' + (((S.appCache || {}).ids) || []).join('、'));
+  const btn = $('btnImport');
+  btn.disabled = true; btn.textContent = '导入中…';
+  try {
+    const r = await api('/api/import-cache', { ref });
+    await refresh();
+    const p = (S.problems || []).find((x) => x.id === r.id);
+    if (p) applyProblemToForm(p, true);
+    $('f_ref').value = r.id;
+    msg('已从应用缓存导入 ' + r.id + '：题面 ' + r.statementLen + ' 字，样例 ' + r.samples + ' 组'
+      + (r.hasOracle ? '，oracle 已有（没被覆盖）' : '，还缺 oracle：贴一份你自己的 AC 题解'));
+    logLine('导入成功：' + r.id + ' ' + r.title);
+  } catch (err) {
+    msg('导入失败：' + err.message);
+    logLine('导入失败：' + err.message);
+  } finally { btn.disabled = false; btn.textContent = '导应用缓存'; }
+});
+
 /** 自动写生成器：先存题（服务器要读落盘的 oracle），再让模型写 + 跑代码体检 */
 $('btnGen').addEventListener('click', async () => {
   const btn = $('btnGen');
@@ -420,7 +448,17 @@ async function startRun(ids, all) {
   } catch (e) { logLine('启动失败：' + e.message); }
 }
 
-async function refresh() { S = await (await fetch('/api/state')).json(); render(); }
+async function refresh() {
+  S = await (await fetch('/api/state')).json();
+  render();
+  const cache = (S && S.appCache) || { ids: [] };
+  const ids = cache.ids || [];
+  if ($('cacheHint')) {
+    $('cacheHint').textContent = ids.length
+      ? ('应用抓过的题：' + ids.join('、') + '（点「导应用缓存」直接导入，不用再过反爬）')
+      : '应用题面缓存是空的：在应用里成功打开一次某道题，题面就会落盘到 data/cf-problems/';
+  }
+}
 
 const es = new EventSource('/api/events');
 const seen = new Set();

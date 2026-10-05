@@ -161,6 +161,24 @@ async function main() {
     check('体检对"每次产出同一组数据"给警告但不拦（能跑，只是覆盖面小）',
       gConst.ok === true && gConst.diverse === false && gConst.warnings.length >= 1, JSON.stringify(gConst.warnings));
 
+    // ⑧b 导应用缓存：现场取题被 CF 反爬拦死时的退路（纯本地文件读，离线可测）
+    const fakeData = path.join(tmp, 'appdata');
+    check('导缓存：目录不存在时清单为空（不炸）', JSON.stringify(cffetch.listAppCache({ dataDir: fakeData })) === '[]');
+    fs.mkdirSync(path.join(fakeData, 'cf-problems'), { recursive: true });
+    fs.writeFileSync(path.join(fakeData, 'cf-problems', '1800C.json'), JSON.stringify({
+      contestId: 1800, index: 'C', title: 'C. Double Sort?', statement: '题面正文', samples: [{ input: '1', output: '2' }]
+    }), 'utf8');
+    check('导缓存：列出缓存里已有的题号', JSON.stringify(cffetch.listAppCache({ dataDir: fakeData })) === '["1800C"]');
+    const cached = cffetch.readAppCache('1800C', { dataDir: fakeData });
+    check('导缓存：按题号读回题面与样例（绕开反爬）',
+      !!cached && cached.statement === '题面正文' && cached.samples.length === 1, JSON.stringify(cached && cached.title));
+    check('导缓存：缓存里没有的题号返回 null（上层给人话）',
+      cffetch.readAppCache('9999Z', { dataDir: fakeData }) === null
+      && cffetch.readAppCache('1800 D', { dataDir: fakeData }) === null);
+    check('导缓存：链接与 {contestId,index} 两种写法都认',
+      !!cffetch.readAppCache('https://codeforces.com/contest/1800/problem/C', { dataDir: fakeData })
+      && !!cffetch.readAppCache({ contestId: 1800, index: 'c' }, { dataDir: fakeData }));
+
     // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);

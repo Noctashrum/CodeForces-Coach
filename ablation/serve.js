@@ -197,17 +197,13 @@ async function runJudge(o) {
 let genBusy = false;
 
 /**
- * 复用应用自己的取题通道（electron/main.js 的 CHATBOX_CF_API_TEST + CHATBOX_CF_JSON）把题扒进题库。
+ * 把一份 CF 结构（现场抓的和应用缓存里的形状完全一样）入库。
  *
  * 已有的 oracle / 生成器**原样保留**：save() 在没给 oracleCode/genCode 时会沿用旧文件，
  * 所以"先贴 oracle，再重新取一次题面"不会把用户贴的代码弄丢。
  */
-async function cfFetchInto(ref) {
-  if (job && job.running) return { ok: false, error: '跑分任务在跑，等它结束再取题' };
-  logEvent('取题：' + String(ref || '') + '（借应用内嵌浏览器过 CF 反爬，实测 20–60 秒）');
-  const r = await cffetch.fetchProblem(String(ref || ''), { log: logEvent });
-  if (!r.ok) { logEvent('取题失败：' + r.error); return { ok: false, error: r.error, logTail: r.logTail || '' }; }
-  const incoming = cffetch.toStoreProblem(r.problem);
+function saveProblemInto(cfProblem, sourceLabel) {
+  const incoming = cffetch.toStoreProblem(cfProblem);
   const prev = store.get(incoming.id) || {};
   const saved = store.save({
     id: incoming.id, title: incoming.title, rating: incoming.rating, url: incoming.url,
@@ -216,14 +212,57 @@ async function cfFetchInto(ref) {
     statement: incoming.statement,
     samples: incoming.samples
   });
-  (r.problem.warnings || []).forEach((w) => logEvent('⚠️ 取题告警：' + w));
-  logEvent('已入库：' + saved.id + ' ' + saved.title + '（题面 ' + String(saved.statement || '').length + ' 字，样例 '
-    + (saved.samples || []).length + ' 组' + (saved.oracle ? '，oracle 已有' : '，还缺 oracle（贴你自己的 AC 题解）') + '）');
+  (cfProblem.warnings || []).forEach((w) => logEvent('⚠️ 取题告警：' + w));
+  logEvent('已入库（' + sourceLabel + '）：' + saved.id + ' ' + saved.title + '（题面 ' + String(saved.statement || '').length
+    + ' 字，样例 ' + (saved.samples || []).length + ' 组'
+    + (saved.oracle ? '，oracle 已有' : '，还缺 oracle（贴你自己的 AC 题解）') + '）');
+  return saved;
+}
+
+function savedSummary(saved, ms) {
   return {
     ok: true, id: saved.id, title: saved.title, rating: saved.rating,
     samples: (saved.samples || []).length, statementLen: String(saved.statement || '').length,
-    hasOracle: !!saved.oracle, hasGen: !!saved.gen, ms: r.ms
+    hasOracle: !!saved.oracle, hasGen: !!saved.gen, ms: ms || 0
   };
+}
+
+/**
+ * 复用应用自己的取题通道（electron/main.js 的 CHATBOX_CF_API_TEST + CHATBOX_CF_JSON）把题扒进题库。
+ */
+async function cfFetchInto(ref) {
+  if (job && job.running) return { ok: false, error: '跑分任务在跑，等它结束再取题' };
+  logEvent('取题：' + String(ref || '') + '（借应用内嵌浏览器过 CF 反爬，实测 20–60 秒）');
+  const r = await cffetch.fetchProblem(String(ref || ''), { log: logEvent });
+  if (!r.ok) {
+    logEvent('取题失败：' + r.error);
+    const ids = cffetch.listAppCache();
+    if (ids.length) logEvent('（应用自己抓过的题可以直接导入，不用再交一次挑战：' + ids.join(', ') + '）');
+    return { ok: false, error: r.error, logTail: r.logTail || '', appCacheIds: ids };
+  }
+  return savedSummary(saveProblemInto(r.problem, '现场取题'), r.ms);
+}
+
+/**
+ * 从应用自己的**题面缓存**导入（<DATA_DIR>/cf-problems/<题号>.json）。
+ *
+ * 为什么值得单独一条路：CF 的反爬是概率性的，现场抓题经常整轮被抓；而用户在应用里
+ * 点开过某道题，题面就已经落盘了。导入走的是**纯本地文件读**，没有网络、没有挑战。
+ */
+function importFromCache(ref) {
+  const ids = cffetch.listAppCache();
+  const cached = cffetch.readAppCache(String(ref == null ? '' : ref));
+  if (!cached) {
+    return {
+      ok: false, ids,
+      error: '应用缓存里没有「' + String(ref == null ? '' : ref).trim() + '」（目录 ' + cffetch.appCacheDir() + '）'
+        + (ids.length
+          ? '；现有：' + ids.join(', ')
+          : '；缓存还是空的 —— 先在应用里正常打开一次这道题（题面抓成功后会自动落盘），或改用「从 CF 取题」')
+    };
+  }
+  logEvent('从应用缓存导入：' + String(ref || ''));
+  return savedSummary(saveProblemInto(cached, '应用缓存'), 0);
 }
 
 /** 给一道题写生成器：一次模型调用 + 机械体检（见 ablation/lib/mkgen.js） */
@@ -304,6 +343,8 @@ function stateOf() {
     targets: targets.map((t) => ({ providerId: t.providerId, model: t.model })),
     running: !!(job && job.running),
     genBusy,
+    // 应用自己抓过的题面缓存（纯本地文件，导入不必再过 CF 反爬）—— 界面上列出来一键导入
+    appCache: { dir: cffetch.appCacheDir(), ids: cffetch.listAppCache() },
     job: job ? { running: job.running, cancelled: job.cancelled, startedAt: job.startedAt, done: job.done, total: job.total, current: job.current, opts: job.opts } : null,
     problems: store.list().map((p) => ({
       id: p.id, title: p.title, rating: p.rating, url: p.url, note: p.note, source: p.source,
@@ -406,6 +447,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       // 取题本身要 20–60 秒：等它（前端有转圈 + SSE 日志），不要让它变成"后台静默任务"
       return sendJson(res, 200, await cfFetchInto(body.ref != null ? body.ref : body.id));
+    }
+    if (req.method === 'POST' && p === '/api/import-cache') {
+      const body = await readBody(req);
+      // 纯本地文件读，秒回：不用过 CF 反爬
+      return sendJson(res, 200, importFromCache(body.ref != null ? body.ref : body.id));
     }
     if (req.method === 'POST' && p === '/api/make-gen') {
       const body = await readBody(req);

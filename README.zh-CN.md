@@ -396,6 +396,8 @@ node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证�
 `npm run ablation:serve` 打开一页人工测试台：填题号点「从 CF 取题」把题面/样例/标题/难度自动带出
 （复用应用自己的取题通道），**你只需要贴一份自己的 AC 题解当 oracle**，生成器点「自动写生成器」让模型写完当场体检；
 然后左右对比 L0 原文与 L2 的图文文档、逐题记人工判定。
+现场取题偶尔会被 CF 反爬拦（Cloudflare 挑战是概率性的）：再点一次通常就过；仍不行就点「**导应用缓存**」，
+直接读应用自己抓成功过、已落盘到 `data/cf-problems/` 的题面 —— 纯本地读，不联网、不过反爬。
 
 改**教练工具循环**（`lib/agentloop.js` / `lib/tools.js` / `scripts/mock-llm.js`）时，`.probe/` 下有两个省时间的工具：
 
