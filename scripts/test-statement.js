@@ -103,6 +103,60 @@ ok('带编号的多组样例 + 结尾「说明」段：第 1 组输出不许吞�
   assert.strictEqual(s[1].output.trim(), '12');
 });
 
+/* ---------- 事故回归：粘贴的 CF 题面里，格式段标题被当成第 1 组样例 ----------
+ * 真实事故（2026-10，系统性污染 2258B1/B2、2258E、2259E、2260F 五道题）：
+ * CF 题面的**格式段标题就是裸的 `Input` / `Output` 两行**，机械抽取把它们和
+ * "输入格式段正文 / 输出格式段正文"配成了第 1 组样例 → 正确的题解被判"官方样例不过"
+ * → 暴力解跟着栽 → 整条验证链塌成 `no-bruler`（对拍 0 组）。
+ */
+ok('粘贴的 CF 题面（Input/Output 是格式段标题）→ 只抽出真样例，绝不抽出格式段正文', () => {
+  const s = [
+    '【Codeforces 2258B2】B2. Carrot Chopdown (Hard Version)',
+    '难度：1600 分 · 标签：greedy',
+    '时限：2 秒 · 内存：256 MB',
+    '',
+    'Carrot 有一块地，需要砍下一些胡萝卜。',
+    '',
+    'Input',
+    'Each test contains multiple test cases. The first line contains $$$t$$$ ($$$1 \\le t \\le 10^4$$$).',
+    'Each test case contains $$$n$$$ and an array $$$a$$$.',
+    '',
+    'Output',
+    'For each test case, output $$$m$$$ integers.',
+    '',
+    '样例：',
+    '输入 1：',
+    '1',
+    '20',
+    '6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6 6',
+    '输出 1：',
+    '40 60 120 120 120 120'
+  ].join('\n');
+  const out = st.extractSamples(s);
+  assert.strictEqual(out.length, 1, JSON.stringify(out));
+  assert.ok(/^1\n20\n6 /.test(out[0].input), out[0].input);
+  assert.ok(/40 60 120/.test(out[0].output), out[0].output);
+  assert.ok(out[0].input.indexOf('Each test') < 0, '输入格式段正文不许被当成样例输入');
+  assert.ok(out[0].output.indexOf('For each test') < 0, '输出格式段正文不许被当成样例输出');
+});
+
+ok('英文题面：裸 Input/Output 只有在 Example 段之后才算样例', () => {
+  const s = ['故事……', '', 'Input', 'The first line contains n.', '', 'Output', 'Print n.', '',
+    'Example', 'Input', '3', 'Output', '6'].join('\n');
+  const out = st.extractSamples(s);
+  assert.strictEqual(out.length, 1, JSON.stringify(out));
+  assert.strictEqual(out[0].input.trim(), '3');
+  assert.strictEqual(out[0].output.trim(), '6');
+});
+
+ok('只有格式段、没有样例段 → 返回 0 组（宁可"没有样例"，也不给一组假样例）', () => {
+  const s = ['正文……', '', 'Input', 'The first line contains n.', '', 'Output', 'Print the answer.'].join('\n');
+  assert.deepStrictEqual(st.extractSamples(s), []);
+  const r = st.looksStandard(s, []);
+  assert.strictEqual(r.hasSamples, false, JSON.stringify(r));
+  assert.strictEqual(r.standard, false);
+});
+
 console.log('statement: 整理结果校验（宁可失败走兜底，也不喂编造的样例）');
 
 const GOOD_NORM = {

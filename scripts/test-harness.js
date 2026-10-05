@@ -200,6 +200,20 @@ async function main() {
       check('竞技场比对：能识别不一致', cmp.same === false && cmp.a.output.trim() === '6' && cmp.b.output.trim() === '5', cmp);
       const mini = await arena.minimize('1\n3\n1 2 3\n', 'sol', 'brute');
       check('反例最小化收敛', mini.ok === true && mini.minimalLength <= mini.originalLength, mini);
+      /**
+       * ⚠️ 回归（2026-10 事故）：尺子崩了/超时**不算反例**。
+       * 旧版 isBad 只看 `!same`，于是"尺子崩溃"也被当成触发点 → 最小化器会为了保持崩溃
+       * 一路删输入，最后交付一条连题目都读不进去的假反例（实测 n=20 只剩 14 个数）。
+       */
+      const arenaCrash = await runner.openArena({
+        sol: { lang: 'python', code: 'import sys\nd = list(map(int, sys.stdin.read().split()))\nprint(sum(d[1:]))' },
+        brute: { lang: 'python', code: 'import sys\nd = list(map(int, sys.stdin.read().split()))\nassert len(d) <= 3, "too many"\nprint(sum(d[1:]))' }
+      });
+      const cmpCrash = await arenaCrash.compare('3\n1 2 3 4\n', 'sol', 'brute');
+      check('尺子崩了要如实标成 b.ok=false（而不能当成"不一致"）', cmpCrash.same === false && cmpCrash.b.ok === false, cmpCrash);
+      const miniCrash = await arenaCrash.minimize('3\n1 2 3 4\n', 'sol', 'brute');
+      check('尺子崩掉的输入不许被最小化成反例', miniCrash.ok === false, miniCrash);
+      arenaCrash.close();
       await arena.update('sol', { lang: 'cpp', code: workspace.readFile(convId, 'brute.cpp') });
       const cmp2 = await arena.compare('1\n2\n3 4\n', 'sol', 'brute');
       check('竞技场可单独替换题解', cmp2.same === true, cmp2);

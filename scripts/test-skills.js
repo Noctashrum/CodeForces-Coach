@@ -878,6 +878,24 @@ async function runToolCases() {
     await assert.rejects(() => byName.get('cf_fetch').execute({}), /contestId|statement/);
   });
 
+  /* ---------- 粘贴通道的样例污染（2026-10 事故：假样例把正确题解判成"样例不过"） ---------- */
+
+  await tAsync('粘贴的题面不许顶掉官方结构化样例，也不许把假样例记成样例', async () => {
+    const official = [{ input: '1\n20\n6 6', output: '40 60 120 120' }];
+    const conv = {
+      id: 'c-paste', cfProblem: { contestId: 2258, index: 'B2' },
+      statementText: '官方抓到的题面'.repeat(200), cfProblemSamples: official.slice()
+    };
+    const tp = toolsLib.createTools(Object.assign({}, hooks, { conv, saveConv: () => {} }));
+    // 这段"题面"里只有格式段标题（裸 Input/Output）+ 一组伪样例，机械解析要么 0 组、要么假样例
+    const pasted = '【Codeforces 2258B2】B2. Carrot Chopdown\n\nInput\nEach test contains multiple test cases.\n\nOutput\nFor each test case, output m integers.\n\n样例：\n输入 1：\n1\n输出 1：\n2\n';
+    const out = await tp.find((x) => x.name === 'cf_fetch').execute({ statement: pasted });
+    assert.deepStrictEqual(conv.cfProblemSamples, official, '官方样例被粘贴通道顶掉了：' + JSON.stringify(conv.cfProblemSamples));
+    assert.ok(String(conv.statementText).length > 1000, '更长的官方题面被更短的粘贴版顶掉了：' + String(conv.statementText).length);
+    assert.ok(out.includes('题面已登记'), '返回文本应如实说明登记结果：' + out.slice(0, 200));
+    assert.ok(out.includes('未覆盖'), '顶不住时要如实说"未覆盖"：' + out.slice(0, 300));
+  });
+
   await tAsync('cf_source 无浏览器通道时如实说明（注入桩，不打网络）', async () => {
     const t3 = toolsLib.createTools(Object.assign({}, hooks, { browserFetch: async () => ({ ok: false, reason: 'source-unavailable' }) }));
     const out = await t3.find((x) => x.name === 'cf_source').execute({ contestId: 1900, submissionId: 101 });

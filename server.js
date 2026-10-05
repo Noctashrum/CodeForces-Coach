@@ -793,6 +793,20 @@ function buildCoachSystem(o) {
   }
   state.push('题面是否已在会话中：' + ((conv.statementText || '').trim() ? '是' : '否'));
   /**
+   * 题面正文必须**真的进 prompt**，不能只声明"它在会话里"。
+   *
+   * 为什么（2026-10 事故）：题面只存在会话对象 `conv.statementText` 里，正文从不进上下文；
+   * 而"最后一步/泄漏重试"那条窄上下文路径只带最近几条 user/assistant 消息 → 模型真的看不到题面，
+   * 于是它说"题面正文和我刚才那几轮工具跑出来的结果，都没有进到我写这轮回答的上下文里——我现在手里其实是空的"
+   * （2260G）。只声明"已完整保存在会话里、不需要重新索要"是**它看不见的承诺**，等于误导。
+   */
+  const stmtBody = String(conv.statementText || '').trim();
+  if (stmtBody) {
+    const stmtCap = 4000;
+    state.push('题面正文（' + (stmtBody.length > stmtCap ? '已截断到前 ' + stmtCap + ' 字符' : '全文') + '）：\n'
+      + stmtBody.slice(0, stmtCap));
+  }
+  /**
    * 题面已在会话里 → **明令禁止**再去联网取。
    *
    * 为什么写成祈使句：只说"是否已在会话中：是"是陈述句，模型照样会`cf_fetch`一次
@@ -802,7 +816,8 @@ function buildCoachSystem(o) {
   if ((conv.statementText || '').trim()) {
     state.push('⛔ 题面正文已经在会话里了（就是上面那份）：**不要再调 cf_fetch 联网取题**。'
       + 'cf_verify / cf_contract / cf_doc 都会自己读会话里的题面，直接用即可；'
-      + '只有会话里确实没有题面时才取。');
+      + '只有会话里确实没有题面时才取。'
+      + '唯一例外：如果官方样例是 0 组（粘贴的题面机械解析不出样例），可以取一次题把**结构化样例**拿回来，比机械解析可靠。');
   } else if (conv.cfProblem) {
     state.push('题面还没取：需要题面时用 cf_fetch 取一次（一次就够）。');
   }
@@ -1612,6 +1627,12 @@ async function handleChat(req, res) {
      *  中断/异常都可能发生在任何阶段，所以未完成的 chip 必须在这里收掉，
      *  否则界面（以及刷新后的历史）会一直挂着转圈的"正在生成"。 */
     let assistantTarget = null;   // 函数作用域：收尾逻辑也要能拿到这条消息
+    /**
+     * 本轮验证状态也要放在函数作用域：
+     * 异常/中断收尾路径（finalizeStopped）以前**丢掉了它** → 用户看到的是模型的夸大散文，
+     * 而工作区里明明是 `no-bruler`／对拍 0 组（2026-10 事故：正文写"官方样例 6/6 + 31150 组随机对拍零不一致"）。
+     */
+    let turnVerification = null;
     const finalizeStopped = (status, errMsg) => {
       const t = assistantTarget || conv.messages.find((m) => m.id === assistantMsgId);
       if (t) {
@@ -1619,6 +1640,15 @@ async function handleChat(req, res) {
         t.reasoning = reasoning;
         t.status = status;
         t.error = errMsg || '';
+        if (turnVerification && !t.verification) {
+          t.verification = turnVerification;
+          if (turnVerification.status && turnVerification.status !== 'ok') {
+            send('notice', {
+              level: 'warn',
+              message: '本轮验证未通过（' + turnVerification.status + '）：上面这段回答里关于"已验证"的说法以工作区验证记录为准。'
+            });
+          }
+        }
         if (Array.isArray(t.tools) && t.tools.length) {
           t.tools = t.tools.map((c) => (c.state === 'running'
             ? Object.assign({}, c, { state: 'done', ok: false, summary: c.summary || '已中断（生成被停止）' })
@@ -1715,7 +1745,8 @@ async function handleChat(req, res) {
          * 未通过时还要给用户一条**可见**提醒 —— 以前这两件事由流水线路径做，
          * 改成工具循环后它们一起消失了：学员看到一段讲得很自信的讲解，却不知道它没验证过。
          */
-        let turnVerification = null;        const addUsage = (role, u) => {
+        turnVerification = null;   // 已在函数作用域声明（finalizeStopped 也要读它）
+        const addUsage = (role, u) => {
           if (!u) return;
           const key = role || 'coach';
           const slot = usageBook.byRole[key] || (usageBook.byRole[key] = { calls: 0, promptTokens: 0, completionTokens: 0 });

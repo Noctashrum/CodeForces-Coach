@@ -84,6 +84,17 @@ writeJson(path.join(DATA, 'conversations', 'c1.json'), {
 write(path.join(USERDATA, 'cf-diag.log'),
   '2026-10-05T02:00:00Z [cf] 隐藏窗口抓取超时\n2026-10-05T02:00:20Z [cf] 可见窗口挑战通过\n');
 
+// 事故现场（2026-10）：那一轮模型**正文为空 + status=error**，诊断包以前只印 "[assistant ERROR]" 不印原因。
+// 这条 fixture 专门守住"失败原因必须可见"。updatedAt 故意最旧 → 排序在最后，不影响其它断言。
+writeJson(path.join(DATA, 'conversations', 'c9.json'), {
+  id: 'c9', title: '2258B2（空正文）', provider: 'p1', model: 'deepseek-flash',
+  mode: 'coach', rich: false, updatedAt: '2025-01-01T00:00:00Z',
+  messages: [
+    { role: 'user', content: 'CF 2258B2 讲讲' },
+    { role: 'assistant', content: '', status: 'error', error: '生成已取消', reasoning: '想了一半就断了' }
+  ]
+});
+
 writeJson(path.join(ABL, 'summary.json'), {
   generatedAt: '2026-10-05T03:02:52.372Z', runs: 3,
   byLevel: { L0: { ok: 1 }, L1: { ok: 0, failed: 1 }, L2: { ok: 1 } }
@@ -244,6 +255,19 @@ ok('工作区段带验证状态（scopeComplete/stressTruncated/交付与回退�
 ok('会话只带最近几条消息（默认 4 条），更早的被裁掉', () => {
   assert.ok(R.text.includes('第 4 条（保留）'), '最近的消息要在');
   assert.ok(!R.text.includes('第 1 条（会被裁掉）'), '更早的消息不该在');
+});
+
+/**
+ * 事故回归（2026-10）：用户"在日志里定位不到模型输出"。
+ * 原因之一就是这一节只印 `[assistant ERROR]` + 正文 —— 而那一轮**正文就是空的**，
+ * 失败原因只写在消息的 `error` 字段里（它其实早就落盘了，只是没进包）。
+ */
+ok('正文为空的失败消息必须印出 error / reasoning / status（否则根本定位不到）', () => {
+  const sec = R.text.slice(R.text.indexOf('会话 conversations/'));
+  assert.ok(sec.includes('error=生成已取消'), '必须印出 error 文本：' + sec.slice(0, 400));
+  assert.ok(sec.includes('只有思考过程'), '只有 reasoning 没有正文要说清楚');
+  assert.ok(sec.includes('想了一半就断了'), 'reasoning 摘录要带上');
+  assert.ok(sec.includes('status=error'), '记 status 变化');
 });
 
 ok('跑分记录：summary / 题库台账（oracle 有、gen 无）/ records / verdicts / compare 都在', () => {
