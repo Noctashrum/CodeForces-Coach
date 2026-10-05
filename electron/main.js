@@ -231,8 +231,11 @@ function fetchHtmlViaBrowserNow(url, opts) {
         // "可见窗口"重试接上来（lib/cf.js 的两段式）。旧实现要耗满 60 秒才走到那一步。
         if (!challengeSince) challengeSince = Date.now();
         const waited = Date.now() - challengeSince;
-        if (waited > CHALLENGE_WAIT_MS) {
-          diagFail('题面抓取：反爬挑战页超过 ' + Math.round(CHALLENGE_WAIT_MS / 1000) + ' 秒未通过'
+        // 挑战等待预算必须**分窗口**：可见窗口是唯一可靠过挑战的方式（用户还能手动点一下
+        // 「Verify you are human」），给它 12 秒等于不给 —— 实测就是这么"可见窗口刚露面就失败"的。
+        const challengeBudget = o.visible ? VISIBLE_CHALLENGE_WAIT_MS : CHALLENGE_WAIT_MS;
+        if (waited > challengeBudget) {
+          diagFail('题面抓取：反爬挑战页超过 ' + Math.round(challengeBudget / 1000) + ' 秒未通过'
             + '（窗口=' + (o.visible ? '可见' : '隐藏') + '，落地 ' + current + '，标题 ' + JSON.stringify((st && st.title) || '') + '）');
           done(new Error('反爬挑战未通过（' + (o.visible ? '可见窗口' : '隐藏窗口') + '）'));
           return;
@@ -283,7 +286,17 @@ function fetchHtmlViaBrowserNow(url, opts) {
       }
       pollForStatement();
     };
-    const onFail = (e, code, desc) => {
+    /**
+     * ⚠️ 两个**必须忽略**的情况（cf-diag.log 实证：两段式的第二段刚起步 0.5 秒就报
+     * `页面加载失败 -3`，整次抓取因此失败，用户看到的就是"稳定取不出来"）：
+     *   · ERR_ABORTED(-3)：这是我们**自己发起的下一次导航**把上一个导航掐掉了
+     *     （隐藏阶段超时 → 可见阶段 loadURL）。它不是"这一页加载失败"，而是"上一页被取代了"；
+     *     真正的结果由新导航的 did-finish-load 或本阶段的超时决定。
+     *   · 子框架失败（isMainFrame === false）：统计/广告 iframe 挂了与本页无关。
+     */
+    const onFail = (e, code, desc, validatedURL, isMainFrame) => {
+      if (code === -3) { console.log('[cf] 忽略被取代的导航（-3 ERR_ABORTED）: ' + desc); return; }
+      if (isMainFrame === false) { console.log('[cf] 忽略子框架加载失败 ' + code + ' ' + desc); return; }
       console.log('[cf] did-fail-load ' + code + ' ' + desc);
       diagFail('题面抓取：页面加载失败 ' + code + ' ' + desc + '（' + url + '）');
       done(new Error('页面加载失败 ' + code + ' ' + desc));
@@ -312,12 +325,14 @@ function fetchHtmlViaBrowserNow(url, opts) {
  *
  * 三个数字都是"别让用户干等"的产物：
  *   · 隐藏窗口：只给 20 秒 —— 它是安静的第一枪，过不了挑战就该让位；
- *   · 挑战页最多等 12 秒 —— 挑战在隐藏窗口里往往根本过不去，等满 60 秒纯属浪费；
- *   · 可见窗口：给足 75 秒 —— 屏内可见窗口是**唯一可靠**过挑战的方式，值得等。
+ *   · 挑战页最多等 12 秒（隐藏窗口）—— 挑战在隐藏窗口里往往根本过不去，等满 60 秒纯属浪费；
+ *   · 可见窗口：给足 75 秒，其中**挑战等待 60 秒** —— 屏内可见窗口是唯一可靠过挑战的方式
+ *     （用户甚至能手动点一下验证框），所以它的挑战预算必须跟着窗口预算走，不能沿用隐藏窗口的 12 秒。
  */
 const HIDDEN_TIMEOUT_MS = 20000;
 const VISIBLE_TIMEOUT_MS = 75000;
 const CHALLENGE_WAIT_MS = 12000;
+const VISIBLE_CHALLENGE_WAIT_MS = 60000;
 
 /**
  * 反爬对照实验用的"伪造 UA"。**默认不使用**——见下方抓取窗口配置的说明：
