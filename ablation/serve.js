@@ -288,13 +288,16 @@ async function makeGenFor(id) {
   const r = await mkgen.makeGen({
     problem: p, statement: p.statement,
     oracle: { lang: p.oracleLang, code: oracleCode },
+    samples: p.samples || [],
     target, params
   });
   if (!r.ok) {
-    logEvent('生成器体检没过：' + p.id + '：' + r.error);
-    return { ok: false, error: r.error, usage: r.usage || null, calls: r.calls || 1, ms: r.ms || 0 };
+    const broken = !!(r.gate && r.gate.status === 'oracle-broken');
+    logEvent((broken ? 'oracle 有问题（不是生成器的锅）：' : '生成器体检没过：') + p.id + '：' + r.error);
+    return { ok: false, error: r.error, oracleBroken: broken, usage: r.usage || null, calls: r.calls || 1, ms: r.ms || 0 };
   }
-  store.save({ id: p.id, genLang: r.lang, genCode: r.code });
+  const savedGen = store.save({ id: p.id, genLang: r.lang, genCode: r.code });
+  ((savedGen && savedGen.langFix) || []).forEach((f) => logEvent('（' + p.id + ' 的生成器语言按代码内容从 ' + f.from + ' 改成 ' + f.to + '）'));
   ((r.gate && r.gate.warnings) || []).forEach((w) => logEvent('⚠️ ' + p.id + '：' + w));
   logEvent('生成器已写入：' + p.id + '（' + (r.lang === 'cpp' ? 'C++' : 'Python') + '，体检通过'
     + (((r.gate && r.gate.warnings) || []).length ? '，有 ' + r.gate.warnings.length + ' 条提醒' : '') + '）');
@@ -345,7 +348,10 @@ function readBody(req) {
   });
 }
 
-function readCode(f) { try { return f && f.file && fs.existsSync(f.file) ? fs.readFileSync(f.file, 'utf8') : ''; } catch { return ''; } }
+/** 读 oracle/gen 的代码。顺手剥掉历史上可能带进来的 ``` 围栏（存盘时也会剥，这里兜住老文件）。 */
+function readCode(f) {
+  try { return uistore.stripFence(f && f.file && fs.existsSync(f.file) ? fs.readFileSync(f.file, 'utf8') : ''); } catch { return ''; }
+}
 
 function stateOf() {
   return {
@@ -455,7 +461,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/problems') {
       const body = await readBody(req);
       const saved = store.save(body.problem || body);
-      return sendJson(res, 200, { ok: true, problem: { id: saved.id, title: saved.title, hasOracle: !!saved.oracle, hasGen: !!saved.gen, samples: (saved.samples || []).length } });
+      (saved.langFix || []).forEach((f) => logEvent('（' + saved.id + ' 的 ' + f.which + ' 语言按代码内容从 ' + f.from + ' 改成 ' + f.to + '）'));
+      return sendJson(res, 200, {
+        ok: true,
+        problem: {
+          id: saved.id, title: saved.title, hasOracle: !!saved.oracle, hasGen: !!saved.gen,
+          samples: (saved.samples || []).length,
+          oracleLang: saved.oracleLang, genLang: saved.genLang, langFix: saved.langFix || []
+        }
+      });
     }
     if (req.method === 'POST' && p === '/api/problems/delete') {
       const body = await readBody(req);
@@ -528,4 +542,10 @@ server.listen(PORT, '127.0.0.1', () => {
   const cacheIds = cffetch.listAppCache();
   console.log('应用数据目录：' + APP_DATA + '（这里出模型配置；题面缓存 ' + (cacheIds.length ? cacheIds.join(', ') : '空') + '）');
   console.log('题库：' + store.problems.length + ' 题' + (store.problems.length ? ('（' + store.problems.map((p) => p.id).join(', ') + '）') : '（先在界面上加题）'));
+  if (store.repairs.length) {
+    console.log('已自动修好 ' + store.repairs.length + ' 处 oracle/生成器：');
+    store.repairs.forEach((r) => console.log('  ' + r.id + ' ' + r.which
+      + (r.fence ? '：去掉了整块粘贴带进来的 Markdown 围栏' : '')
+      + (r.from !== r.to ? (r.fence ? '；' : '') + '语言 ' + r.from + ' → ' + r.to + '（按代码内容判断）' : '')));
+  }
 });

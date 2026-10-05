@@ -53,6 +53,30 @@ function genLangFor(oracleLang) {
   return oracleLang === 'cpp' ? 'cpp' : 'python';
 }
 
+/** 解释器/编译器报的"代码本身就有问题"（与数据无关）的一类错 */
+const CODE_ERROR = /SyntaxError|IndentationError|TabError|NameError|ModuleNotFoundError|ImportError|\berror:\s|\berror C\d|undefined reference|ld returned|cannot find -l/i;
+const HINT_CODE = '看起来是代码本身的问题：① 粘贴时是不是整块带上了 ``` 围栏（去掉）；② 语言选对了吗（C++ 的题解选了 python，第一行就 SyntaxError）。';
+const HINT_RUN = 'oracle 在官方样例上就跑不过，通常意味着这份代码不是这道题的正解，或者它期待的输入格式和题面不一样。';
+
+/**
+ * oracle 先验：拿**官方样例**跑一遍。样例一定是合法输入，所以它失败就等于 oracle 自己不行 ——
+ * 这时候绝不能把锅算在"生成器造的数据"上（用户 m07960 就是被那句报错带偏的）。
+ * 没有样例就跳过（返回 null），后面按"跑生成数据的结果"分类。
+ */
+async function oraclePreflight(arena, samples, warnings) {
+  const first = (Array.isArray(samples) ? samples : []).filter((s) => s && String(s.input == null ? '' : s.input).trim())[0];
+  if (!first) return null;
+  const sample = String(first.input);
+  const r = await arena.run('sol', sample);
+  if (r.ok && !r.timedOut) return null;
+  const err = String(r.err || '').slice(0, 300);
+  return {
+    ok: false, status: 'oracle-broken', warnings, sample, maxNumber: 0, diverse: false, oracleStable: true,
+    detail: 'oracle 在**官方样例**上就失败了，所以问题不在生成的数据：' + (r.timedOut ? '（超时）' : '') + err
+      + '。' + (CODE_ERROR.test(err) ? HINT_CODE : HINT_RUN)
+  };
+}
+
 /**
  * @param {object} o
  * @param {object} o.problem    题目对象（题号/标题）
@@ -84,7 +108,7 @@ async function makeGen(o) {
   const lang = got.lang === 'cpp' || got.lang === 'c' ? 'cpp' : (got.lang === 'python' || got.lang === 'py' ? 'python' : oracle.lang);
   const code = got.code.trim();
 
-  const gate = await gateGen({ gen: { lang, code }, oracle });
+  const gate = await gateGen({ gen: { lang, code }, oracle, samples: o.samples });
   return {
     ok: gate.ok,
     error: gate.ok ? undefined : gate.detail,
@@ -104,6 +128,8 @@ async function gateGen(o) {
   const arena = await runner.openArena({ sol: o.oracle, brute: o.oracle, gen: o.gen });
   if (!arena.ok) return { ok: false, status: 'prepare', detail: '编译/落地失败：' + arena.error, warnings, sample: '', maxNumber: 0, diverse: false, oracleStable: true };
   try {
+    const pre = await oraclePreflight(arena, o.samples, warnings);
+    if (pre) return pre;
     const cases = [];
     for (let i = 0; i < 4; i++) {
       // **故意不给任何 argv、也不给 stdin**：判分走 runner.stressTest，正是这么调生成器的
@@ -126,9 +152,17 @@ async function gateGen(o) {
 
     const a = await arena.run('sol', sample);
     if (a.timedOut || !a.ok) {
+      const err = String(a.err || '');
+      // 编译/语法错与数据无关：那是 oracle 自己的问题，得说清楚（否则用户会一直去改生成器）
+      if (CODE_ERROR.test(err)) {
+        return {
+          ok: false, status: 'oracle-broken', warnings, sample, maxNumber, diverse, oracleStable: true,
+          detail: 'oracle 自己跑不起来（和生成的数据无关）：' + err.slice(0, 300) + '。' + HINT_CODE
+        };
+      }
       return {
         ok: false, status: 'oracle', warnings, sample, maxNumber, diverse, oracleStable: true,
-        detail: '生成的数据把你的 oracle 跑崩了' + (a.timedOut ? '（超时）' : '') + '：' + String(a.err || '').slice(0, 300)
+        detail: '生成的数据把你的 oracle 跑崩了' + (a.timedOut ? '（超时）' : '') + '：' + err.slice(0, 300)
           + '。多半是数据违反了输入格式或取值范围。'
       };
     }

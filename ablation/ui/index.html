@@ -146,7 +146,11 @@ function logLine(s) {
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? undefined : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+  if (!r.ok || j.error) {
+    const e = new Error(j.error || ('HTTP ' + r.status));
+    e.data = j;          // 带上服务端的原始字段（如 oracleBroken），调用方好分类提示
+    throw e;
+  }
   return j;
 }
 
@@ -331,7 +335,10 @@ function formBody() {
 async function saveProblem() {
   const body = formBody();
   const r = await api('/api/problems', body);
-  logLine('保存 ' + body.problem.id + '：样例 ' + r.problem.samples + ' 组，oracle ' + (r.problem.hasOracle ? '有' : '无') + '，生成器 ' + (r.problem.hasGen ? '有' : '无'));
+  const fix = (r.problem.langFix || []).map((f) => f.which + ' 语言按代码内容 ' + f.from + ' → ' + f.to);
+  logLine('保存 ' + body.problem.id + '：样例 ' + r.problem.samples + ' 组，oracle ' + (r.problem.hasOracle ? '有' : '无') + '，生成器 ' + (r.problem.hasGen ? '有' : '无')
+    + (fix.length ? '；' + fix.join('；') : ''));
+  if (fix.length) msg('（已自动纠正：' + fix.join('；') + '　—— 整块粘贴带进来的 ``` 围栏也会自动去掉）');
   return r;
 }
 
@@ -412,8 +419,12 @@ $('btnGen').addEventListener('click', async () => {
     msg('生成器已写入（' + g.lang + '，体检通过' + (warn.length ? '，提醒：' + warn.join('；') : '') + '）');
     logLine('生成器已写入：' + id + (warn.length ? '（' + warn.join('；') + '）' : ''));
   } catch (err) {
-    msg('自动写生成器失败：' + err.message);
-    logLine('自动写生成器失败：' + err.message);
+    // 报错分清"生成器不行"和"oracle 本身不行"：后者别再去改生成器
+    const broken = !!(err && err.data && err.data.oracleBroken);
+    const m = (err && err.message) || String(err);
+    msg((broken ? 'oracle 有问题，先修 oracle：' : '自动写生成器失败：') + m
+      + (broken ? '　→ 上去把 oracle 框里的 ``` 围栏去掉、语言选成和代码一致，再点一次' : ''));
+    logLine((broken ? 'oracle 有问题：' : '自动写生成器失败：') + m);
   } finally { btn.disabled = false; btn.textContent = '自动写生成器'; }
 });
 

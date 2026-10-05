@@ -35,6 +35,34 @@ function readJson(file, fallback) {
 
 function extOf(lang) { return String(lang) === 'cpp' ? 'cpp' : 'py'; }
 
+/**
+ * 整块粘代码时最常见的坑：连着 Markdown 围栏一起粘进来。
+ * 用户 m07960 的 oracle 就是这样 —— 文件第 1 行是 ```，跑起来立刻 SyntaxError，
+ * 而体检脚本却把锅算在"生成器造的数据"上，看起来像生成器一直崩。
+ * 只在"整段就是一个围栏块"时剥掉；正文内部出现 ``` 的正常代码不动。
+ */
+function stripFence(text) {
+  const t = String(text == null ? '' : text).replace(/^\uFEFF/, '');
+  if (!/^\s*```/.test(t)) return t;
+  const whole = t.match(/^\s*```[^\n]*\r?\n([\s\S]*?)\r?\n?[ \t]*```[ \t]*$/);
+  if (whole) return whole[1];
+  return t.replace(/^\s*```[^\n]*\r?\n/, '');   // 结尾那道围栏被截断了
+}
+
+/** 从代码本身猜语言。只在证据明确时给答案；含糊就返回 null，不动用户选的项。 */
+function detectLang(code) {
+  const s = String(code == null ? '' : code);
+  if (!s.trim()) return null;
+  const cpp = /#\s*include\s*[<"]|\busing\s+namespace\s+std\b|\bint\s+main\s*\(|\bstd::\w|\bcin\s*>>|\bcout\s*<</.test(s);
+  const py = /^[ \t]*(?:import|from)\s+[A-Za-z_][\w.]*/m.test(s)
+    || /^[ \t]*def\s+[A-Za-z_]\w*\s*\(/m.test(s)
+    || /\binput\s*\(/.test(s)
+    || /\bprint\s*\(/.test(s);
+  if (cpp && !py) return 'cpp';
+  if (py && !cpp) return 'python';
+  return null;
+}
+
 function init(rootDir) {
   const dir = path.resolve(String(rootDir));
   const dirs = {
@@ -99,8 +127,24 @@ function init(rootDir) {
         if (fs.existsSync(file)) { fs.unlinkSync(file); }
         return null;
       };
-      rec.oracle = put('oracle', rec.oracleLang, p.oracleCode != null ? p.oracleCode : (prev.oracle ? fs.existsSync(prev.oracle.file) ? fs.readFileSync(prev.oracle.file, 'utf8') : '' : ''));
-      rec.gen = put('gen', rec.genLang, p.genCode != null ? p.genCode : (prev.gen ? fs.existsSync(prev.gen.file) ? fs.readFileSync(prev.gen.file, 'utf8') : '' : ''));
+      const prevCode = (which) => {
+        const f = prev[which];
+        return f && f.file && fs.existsSync(f.file) ? fs.readFileSync(f.file, 'utf8') : '';
+      };
+      // 存盘前两道清洗：① 剥掉整块粘贴带上来的 ``` 围栏；② 语言以代码内容为准
+      // （下拉停在默认的 python、贴的却是 C++，是最常见的一种"跑不起来"）。
+      const codes = {
+        oracle: stripFence(p.oracleCode != null ? p.oracleCode : prevCode('oracle')),
+        gen: stripFence(p.genCode != null ? p.genCode : prevCode('gen'))
+      };
+      const langFix = [];
+      [['oracle', 'oracleLang'], ['gen', 'genLang']].forEach(([which, key]) => {
+        const guess = detectLang(codes[which]);
+        if (guess && guess !== rec[key]) { langFix.push({ which, from: rec[key], to: guess }); rec[key] = guess; }
+      });
+      rec.oracle = put('oracle', rec.oracleLang, codes.oracle);
+      rec.gen = put('gen', rec.genLang, codes.gen);
+      if (langFix.length) rec.langFix = langFix;
       // 旧语言的文件（切语言后残留）删掉，避免判分读到过期的那个
       ['oracle', 'gen'].forEach((which) => {
         const other = path.join(dirs[which], id + '.' + (rec[which] ? (rec[which].lang === 'cpp' ? 'py' : 'cpp') : 'py'));
@@ -164,7 +208,28 @@ function init(rootDir) {
       return true;
     }
   };
+  // 自愈历史数据：以前"连着围栏整块粘进来"或"语言选错"的 oracle/gen，在这里一次性修好。
+  // 不修的话，判分（直接读文件）和生成器体检都会莫名其妙失败，而且报错会指向错的方向。
+  const repairs = [];
+  problems.slice().forEach((p) => {
+    const patch = { id: p.id };
+    let dirty = false;
+    [['oracle', 'oracleLang'], ['gen', 'genLang']].forEach(([which, key]) => {
+      const f = p[which];
+      if (!f || !f.file || !fs.existsSync(f.file)) return;
+      const raw = fs.readFileSync(f.file, 'utf8');
+      const clean = stripFence(raw);
+      const guess = detectLang(clean);
+      const langChanged = !!(guess && guess !== p[key]);
+      if (clean === raw && !langChanged) return;
+      patch[which + 'Code'] = clean;
+      repairs.push({ id: p.id, which, fence: clean !== raw, from: p[key], to: langChanged ? guess : p[key] });
+      dirty = true;
+    });
+    if (dirty) { try { store.save(patch); } catch { /* 单条坏记录不该拖垮启动 */ } }
+  });
+  store.repairs = repairs;
   return store;
 }
 
-module.exports = { init };
+module.exports = { init, stripFence, detectLang };

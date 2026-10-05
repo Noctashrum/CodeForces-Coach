@@ -23,6 +23,7 @@ const l2 = require('./lib/l2');
 const compareLib = require('./lib/compare');
 const cffetch = require('./lib/cffetch');
 const mkgen = require('./lib/mkgen');
+const uistore = require('./lib/uistore');
 const problemsLib = require('./lib/problems');
 const judge = require('./judge');
 const { startMockLlm } = require('./mockllm');
@@ -194,6 +195,45 @@ async function main() {
     const gConst = await mkgen.gateGen({ gen: { lang: 'python', code: 'print(3, 4)' }, oracle: oracleSrc });
     check('体检对"每次产出同一组数据"给警告但不拦（能跑，只是覆盖面小）',
       gConst.ok === true && gConst.diverse === false && gConst.warnings.length >= 1, JSON.stringify(gConst.warnings));
+
+    // ⑧a-2 两道清洗：整块粘贴带 ``` 围栏 + 语言选错（用户 m07960「生成器为什么一直跑崩」的真因：
+    //       落盘的 oracle 第 1 行是 ```、语言记成 python 而正文是 C++，报错却指向"生成的数据"）
+    check('剥围栏：整块粘贴的代码只留正文', uistore.stripFence('```cpp\nint main(){}\n```') === 'int main(){}',
+      JSON.stringify(uistore.stripFence('```cpp\nint main(){}\n```')));
+    check('剥围栏：正文里出现的 ``` 不动（不是整块围栏就不碰）',
+      uistore.stripFence('int main(){}\n// ``` 这种注释') === 'int main(){}\n// ``` 这种注释');
+    check('猜语言：C++ / Python 都认得出，没把握就给 null（不擅自改用户的选项）',
+      uistore.detectLang('#include <bits/stdc++.h>\nint main(){}') === 'cpp'
+      && uistore.detectLang('n = int(input())\nprint(n)') === 'python'
+      && uistore.detectLang('') === null);
+    const gBroken = await mkgen.gateGen({
+      gen: { lang: 'python', code: 'print(3, 4)' },
+      oracle: { lang: 'python', code: '```\n#include <bits/stdc++.h>\nint main(){}\n```' },
+      samples: [{ input: '3 4', output: '7' }]
+    });
+    check('oracle 自己坏掉时报 oracle-broken（不冤枉生成器，并指出围栏/语言）',
+      gBroken.ok === false && gBroken.status === 'oracle-broken' && /围栏|语言/.test(String(gBroken.detail)),
+      JSON.stringify([gBroken.status, String(gBroken.detail).slice(0, 120)]));
+    // 老数据自愈：problems.json 记 python、文件却是"带围栏的 C++" → 重新 init 一次应被修好
+    // （真机上 2268A 就是这个形态；用户重启工作台即自动修）
+    const legacy = path.join(tmp, 'uistore-legacy');
+    uistore.init(legacy).save({
+      id: '1111A', title: '1111A', statement: '输入两个整数', samples: [{ input: '1 2', output: '3' }],
+      oracleLang: 'cpp', oracleCode: '#include <bits/stdc++.h>\nint main(){}'
+    });
+    fs.writeFileSync(path.join(legacy, 'problems.json'), JSON.stringify([{
+      id: '1111A', title: '1111A', statement: '输入两个整数', samples: [{ input: '1 2', output: '3' }],
+      oracleLang: 'python', genLang: 'python',
+      oracle: { lang: 'python', file: path.join(legacy, 'oracle', '1111A.py') }
+    }]), 'utf8');
+    fs.writeFileSync(path.join(legacy, 'oracle', '1111A.py'), '```\n#include <bits/stdc++.h>\nint main(){}\n```', 'utf8');
+    fs.unlinkSync(path.join(legacy, 'oracle', '1111A.cpp'));
+    const healed = uistore.init(legacy).get('1111A');
+    check('自愈：老数据里"带围栏 + 语言记错"的 oracle 重启后被修好',
+      !!healed && healed.oracleLang === 'cpp' && healed.oracle && healed.oracle.lang === 'cpp'
+      && !/```/.test(fs.readFileSync(healed.oracle.file, 'utf8'))
+      && !fs.existsSync(path.join(legacy, 'oracle', '1111A.py')),
+      JSON.stringify([healed && healed.oracleLang, healed && healed.oracle && healed.oracle.file]));
 
     // ⑧b 导应用缓存：现场取题被 CF 反爬拦死时的退路（纯本地文件读，离线可测）
     const fakeData = path.join(tmp, 'appdata');
