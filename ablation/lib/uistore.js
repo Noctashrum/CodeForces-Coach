@@ -79,6 +79,28 @@ function init(rootDir) {
   let problems = readJson(problemsFile, []);
   if (!Array.isArray(problems)) problems = [];
 
+  /**
+   * 每题每档挑一条给判分/汇总用。
+   *
+   * 取法：优先"最新的、真的产出了代码的那条"；都没有代码时才取最新的一条。
+   * 为什么不是无条件取最新：重跑失败（模型这次没给出代码块）会把更早的**成功**记录顶掉，
+   * 配对表里就变成"这一档什么都没产出"。用户 m08171 的 pilot 里 2268A 的 L0/L2 两次成功记录
+   * （02:35 / 02:39）就是这么被 05:31 / 05:36 的失败重跑吃掉的，看起来像"两边都没交东西"。
+   */
+  function pickLatest() {
+    const m = new Map();   // key → { rec, dropped: [] }
+    readJsonl(store.recordsFile).forEach((r) => {
+      if (!r || !r.level) return;
+      const key = r.level + '|' + r.problem;
+      const cur = m.get(key);
+      if (!cur) { m.set(key, { rec: r, dropped: [] }); return; }
+      if (!!r.code && !cur.rec.code) { cur.dropped.push(cur.rec); cur.rec = r; return; }   // 新的有代码、旧的没有 → 换新的
+      if (!r.code && cur.rec.code) { cur.dropped.push(r); return; }                        // 新的没代码、旧的有 → 保留旧的
+      cur.dropped.push(cur.rec); cur.rec = r;                                             // 都有/都没有 → 取更新的
+    });
+    return m;
+  }
+
   const store = {
     dir,
     dirs,
@@ -189,11 +211,20 @@ function init(rootDir) {
     },
 
     records() { return readJsonl(store.recordsFile); },
-    /** 每题每档只留最后一条（重跑同一题时旧记录不该再参与统计） */
-    latestRecords() {
-      const m = new Map();
-      store.records().forEach((r) => { if (r && r.level) m.set(r.level + '|' + r.problem, r); });
-      return [...m.values()];
+    /** 每题每档一条（取法见 pickLatest：优先"最新且有代码"的那条，不让失败重跑吃掉成功记录） */
+    latestRecords() { return [...pickLatest().values()].map((x) => x.rec); },
+    /** 上面那个取法跳过了哪些记录（启动日志/排查用） */
+    latestAudit() {
+      const out = [];
+      pickLatest().forEach((x, key) => {
+        if (!x.dropped.length) return;
+        out.push({
+          key,
+          kept: { startedAt: x.rec.startedAt || null, hasCode: !!x.rec.code },
+          dropped: x.dropped.map((d) => ({ startedAt: d.startedAt || null, hasCode: !!d.code }))
+        });
+      });
+      return out;
     },
     verdicts() { return readJsonl(store.verdictsFile); },
     compare() { return readJson(store.compareFile, null); },
@@ -229,6 +260,9 @@ function init(rootDir) {
     if (dirty) { try { store.save(patch); } catch { /* 单条坏记录不该拖垮启动 */ } }
   });
   store.repairs = repairs;
+  // 重跑把成功记录顶掉的情况在这里留个账：判分用的是 latestRecords()，
+  // 不说明白的话，"那一档没产出"会被误读成模型不行（用户 m08171 的 2268A 就是）。
+  store.superseded = store.latestAudit();
   return store;
 }
 

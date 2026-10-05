@@ -59,22 +59,60 @@ const HINT_CODE = '看起来是代码本身的问题：① 粘贴时是不是整
 const HINT_RUN = 'oracle 在官方样例上就跑不过，通常意味着这份代码不是这道题的正解，或者它期待的输入格式和题面不一样。';
 
 /**
- * oracle 先验：拿**官方样例**跑一遍。样例一定是合法输入，所以它失败就等于 oracle 自己不行 ——
- * 这时候绝不能把锅算在"生成器造的数据"上（用户 m07960 就是被那句报错带偏的）。
- * 没有样例就跳过（返回 null），后面按"跑生成数据的结果"分类。
+ * 题面里的"答案不唯一"表述（CF 的标准说法）→ 样例输出**不能**用精确比对来判 oracle 对不对。
+ * 例：2241B 的题面原句 "If there are multiple valid answers, output any one of them."
  */
-async function oraclePreflight(arena, samples, warnings) {
+const SPECIAL_JUDGE = /(output|print)\s+any\s+(one\s+)?(of\s+them|answer|valid|correct)|any\s+(valid|correct)\s+answer|multiple\s+(valid\s+)?answers|several\s+(valid\s+)?answers|if\s+there\s+are\s+(several|multiple)|any\s+of\s+the\s+(following|answers)|special\s+judge|checker/i;
+
+/** 这题是不是"输出任意合法答案"的多解题（只能靠题面判断） */
+function looksSpecialJudge(text) {
+  return SPECIAL_JUDGE.test(String(text || ''));
+}
+
+/**
+ * oracle 先验：拿**官方样例**跑一遍，**并且比对样例输出**。
+ *
+ * 为什么要比对输出：能跑 ≠ 是对的。用户 m08171 的 pilot 里 2268A 那把 oracle
+ * 只打印 (1<<(n-k+1)) + 2*(k-1)、完全不读数组 —— 它跑得动、不崩，于是
+ * "生成的数据跑不动 oracle"这一关全过，判分却拿它当尺子，把两侧（实测都正确）判成 WA。
+ * 样例输出一比对就现原形：官方样例期望 9/3/1/19，它给 10/8/2/20。
+ *
+ * 没有样例就跳过（返回 null），后面按"跑生成数据的结果"分类。
+ * @param {object} arena
+ * @param {Array} samples 官方样例 [{input,output}]
+ * @param {string[]} warnings
+ * @param {{statement?:string, specialJudge?:boolean}} [opts]
+ */
+async function oraclePreflight(arena, samples, warnings, opts) {
+  const o = opts || {};
   const first = (Array.isArray(samples) ? samples : []).filter((s) => s && String(s.input == null ? '' : s.input).trim())[0];
   if (!first) return null;
   const sample = String(first.input);
   const r = await arena.run('sol', sample);
-  if (r.ok && !r.timedOut) return null;
-  const err = String(r.err || '').slice(0, 300);
-  return {
-    ok: false, status: 'oracle-broken', warnings, sample, maxNumber: 0, diverse: false, oracleStable: true,
-    detail: 'oracle 在**官方样例**上就失败了，所以问题不在生成的数据：' + (r.timedOut ? '（超时）' : '') + err
-      + '。' + (CODE_ERROR.test(err) ? HINT_CODE : HINT_RUN)
-  };
+  if (r.timedOut || !r.ok) {
+    const err = String(r.err || '').slice(0, 300);
+    return {
+      ok: false, status: 'oracle-broken', warnings, sample, maxNumber: 0, diverse: false, oracleStable: true,
+      detail: 'oracle 在**官方样例**上就失败了，所以问题不在生成的数据：' + (r.timedOut ? '（超时）' : '') + err
+        + '。' + (CODE_ERROR.test(err) ? HINT_CODE : HINT_RUN)
+    };
+  }
+  const want = first.output == null ? '' : String(first.output);
+  if (want.trim()) {
+    const cmp = runner.compareOutputs(r.output, want);
+    if (!cmp.ok) {
+      if (o.specialJudge || looksSpecialJudge(o.statement)) {
+        warnings.push('oracle 的输出和官方样例对不上，但题面允许输出任意合法答案（多解题）：样例关不能用来判它的对错');
+        return null;
+      }
+      return {
+        ok: false, status: 'oracle-broken', warnings, sample, maxNumber: 0, diverse: false, oracleStable: true,
+        detail: 'oracle 在**官方样例**上给的答案不对（样例期望「' + want.trim().slice(0, 120) + '」，它给「'
+          + String(r.output == null ? '' : r.output).trim().slice(0, 120) + '」）→ 它多半不是这道题的正解。' + HINT_RUN
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -108,7 +146,7 @@ async function makeGen(o) {
   const lang = got.lang === 'cpp' || got.lang === 'c' ? 'cpp' : (got.lang === 'python' || got.lang === 'py' ? 'python' : oracle.lang);
   const code = got.code.trim();
 
-  const gate = await gateGen({ gen: { lang, code }, oracle, samples: o.samples });
+  const gate = await gateGen({ gen: { lang, code }, oracle, samples: o.samples, statement: o.statement });
   return {
     ok: gate.ok,
     error: gate.ok ? undefined : gate.detail,
@@ -128,7 +166,7 @@ async function gateGen(o) {
   const arena = await runner.openArena({ sol: o.oracle, brute: o.oracle, gen: o.gen });
   if (!arena.ok) return { ok: false, status: 'prepare', detail: '编译/落地失败：' + arena.error, warnings, sample: '', maxNumber: 0, diverse: false, oracleStable: true };
   try {
-    const pre = await oraclePreflight(arena, o.samples, warnings);
+    const pre = await oraclePreflight(arena, o.samples, warnings, { statement: o.statement, specialJudge: o.specialJudge });
     if (pre) return pre;
     const cases = [];
     for (let i = 0; i < 4; i++) {
@@ -175,4 +213,4 @@ async function gateGen(o) {
   }
 }
 
-module.exports = { makeGen, gateGen, SYSTEM, userPrompt, genLangFor };
+module.exports = { makeGen, gateGen, SYSTEM, userPrompt, genLangFor, looksSpecialJudge, oraclePreflight };

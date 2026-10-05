@@ -270,6 +270,76 @@ async function main() {
       env.dataDir() === path.resolve(dNoCfg) && cffetch.appDataDir() === path.resolve(dNoCfg));
     if (keepData === undefined) delete process.env.CFCOACH_APP_DATA; else process.env.CFCOACH_APP_DATA = keepData;
 
+    // ⑧d 尺子先验：判分器必须先证明 oracle 自己是对的，否则不许拿它判候选
+    //     实证（用户 m08171 的 pilot）：2268A 的 oracle 只打印 n,k 的闭式、完全不读数组，
+    //     连自己的官方样例都过不了（期望 9/3/1/19，它给 10/3/7/8）；旧判分器照样拿它当标尺，
+    //     把 L0/L2 两侧（用按题面独立写的暴力解验过 520 组全对）都判成"差分 WA"。
+    check('多解题识别：题面写 any valid answer 就认得出，普通题面不误判',
+      mkgen.looksSpecialJudge('If there are multiple valid answers, output any one of them.') === true
+      && mkgen.looksSpecialJudge('Print the maximum possible score.') === false);
+    const gWrongOracle = await mkgen.gateGen({
+      gen: { lang: 'python', code: 'print(1)' },
+      oracle: { lang: 'python', code: 'print(0)' },        // 跑得动，但样例答案错
+      samples: [{ input: '1 2', output: '3' }]
+    });
+    check('尺子先验：oracle 跑得动但样例答案不对 → oracle-broken（不再拿它判候选）',
+      gWrongOracle.ok === false && gWrongOracle.status === 'oracle-broken' && /官方样例/.test(String(gWrongOracle.detail)),
+      JSON.stringify([gWrongOracle.status, String(gWrongOracle.detail).slice(0, 120)]));
+    const gWrongSpecial = await mkgen.gateGen({
+      gen: { lang: 'python', code: 'print(1)' },
+      oracle: { lang: 'python', code: 'print(0)' },
+      statement: 'If there are multiple valid answers, output any one of them.',
+      samples: [{ input: '1 2', output: '3' }]
+    });
+    check('尺子先验：多解题的 oracle 与样例不同不算坏（题面允许任意合法答案）',
+      gWrongSpecial.status !== 'oracle-broken', String(gWrongSpecial.status));
+
+    const wrongOracleFile = path.join(tmp, 'gate-wrong-oracle.py');
+    fs.writeFileSync(wrongOracleFile, 'print(0)', 'utf8');
+    const gateBad = await judge.oracleGate({ samples: [{ input: '1 2', output: '3' }], oracle: { lang: 'python', file: wrongOracleFile } });
+    check('oracleGate：坏尺子判 oracle-broken 并说清"不是候选的错"',
+      gateBad.status === 'oracle-broken' && /官方样例|不是这道题的正解/.test(String(gateBad.detail)), gateBad.status);
+    const gateSpecial = await judge.oracleGate({
+      statement: 'If there are multiple valid answers, output any one of them.',
+      samples: [{ input: '1 2', output: '3' }], oracle: { lang: 'python', file: wrongOracleFile }
+    });
+    check('oracleGate：多解题 → special-judge 状态',
+      gateSpecial.status === 'special-judge' && gateSpecial.special === true, gateSpecial.status);
+    const vBrokenRuler = await judge.judgeRecord(
+      { level: 'L2', problem: '9999Z', model: 'mock', code: 'print(0)', codeLang: 'python', assertedVerified: true },
+      { id: '9999Z', samples: [{ input: '1 2', output: '3' }], oracle: { lang: 'python', file: wrongOracleFile } },
+      { iterations: 5, maxTotalMs: 10000, gate: gateBad });
+    check('坏尺子上不记候选 WA，也不算链吹牛（falseConfidence）',
+      vBrokenRuler.diffVerdict === 'oracle-broken' && vBrokenRuler.oracleBroken === true && vBrokenRuler.falseConfidence !== true,
+      JSON.stringify([vBrokenRuler.sampleVerdict, vBrokenRuler.diffVerdict, vBrokenRuler.falseConfidence]));
+
+    // 配对比较：判不了的格子不许冒充"打平"
+    const cmpHalf = compareLib.compare(
+      [{ level: 'L0', problem: '2268A', model: 'm' }, { level: 'L2', problem: '2268A', model: 'm' },
+        { level: 'L0', problem: '2241C', model: 'm' }, { level: 'L2', problem: '2241C', model: 'm' }],
+      [{ level: 'L0', problem: '2268A', model: 'm', diffVerdict: 'oracle-broken', sampleVerdict: 'AC' },
+        { level: 'L2', problem: '2268A', model: 'm', diffVerdict: 'oracle-broken', sampleVerdict: 'AC', assertedVerified: true },
+        { level: 'L0', problem: '2241C', model: 'm', diffVerdict: 'AC', sampleVerdict: 'AC' },
+        { level: 'L2', problem: '2241C', model: 'm', diffVerdict: 'AC', sampleVerdict: 'AC', assertedVerified: true }],
+      { base: 'L0', cand: 'L2' });
+    check('配对比较：坏尺子那一对挪出胜平负、只按可判的题算比例（不冒充打平）',
+      cmpHalf.n === 2 && cmpHalf.decidable === 1 && cmpHalf.tie === 1 && cmpHalf.undecidable.count === 1
+      && cmpHalf.notWorseRate === 1 && /2268A/.test(cmpHalf.note),
+      JSON.stringify([cmpHalf.n, cmpHalf.decidable, cmpHalf.tie, cmpHalf.undecidable.count, cmpHalf.notWorseRate]));
+
+    // 去重口径：失败重跑不许把更早的**成功**记录顶掉（用户 pilot 里 2268A 就是这样"消失"的）
+    const dedupe = uistore.init(path.join(tmp, 'uistore-dedupe'));
+    fs.writeFileSync(path.join(dedupe.dir, 'records.jsonl'), [
+      JSON.stringify({ level: 'L0', problem: '2268A', model: 'm', startedAt: 'T1', code: 'int main(){}' }),
+      JSON.stringify({ level: 'L0', problem: '2268A', model: 'm', startedAt: 'T2' })   // 更晚，但没代码
+    ].join('\n') + '\n', 'utf8');
+    const kept = dedupe.latestRecords();
+    check('去重：更晚的失败重跑（无代码）不吃掉更早的成功记录',
+      kept.length === 1 && kept[0].startedAt === 'T1' && !!kept[0].code, JSON.stringify(kept.map((x) => x.startedAt)));
+    check('去重：被跳过的记录留了账（latestAudit 能说清谁被顶掉了）',
+      dedupe.latestAudit().length === 1 && dedupe.latestAudit()[0].dropped.length === 1
+      && dedupe.latestAudit()[0].dropped[0].startedAt === 'T2', JSON.stringify(dedupe.latestAudit()));
+
     // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);

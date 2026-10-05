@@ -23,9 +23,13 @@ function pairKey(x) {
   return String(x.problem) + '|' + String(x.model || '');
 }
 
-/** 判分明细 → 正确性（含证据强度） */
+/** 判分明细 → 正确性（含证据强度）；`undecidable` 表示"这一格判不了"，绝不能冒充候选错 */
 function acOf(v) {
   if (!v) return { ac: false, strength: 'none' };
+  // 尺子自己过不了官方样例（oracle-broken）→ 判分器没资格说候选错
+  if (v.diffVerdict === 'oracle-broken') return { ac: false, strength: 'none', undecidable: true, why: 'oracle-broken' };
+  // 多解题 + 没有 checker：差分不一致时两边都可能是对的 → 不可判
+  if (v.diffVerdict === 'WA' && v.specialJudge) return { ac: false, strength: 'none', undecidable: true, why: 'special-judge' };
   if (v.diffVerdict === 'AC') return { ac: true, strength: 'diff' };
   // 差分跑不了（缺 oracle 或缺生成器）时只能看官方样例：单独标成 samples 级证据，绝不与差分 AC 混为一谈
   if ((v.diffVerdict === 'no-oracle' || v.diffVerdict === 'no-gen') && v.sampleVerdict === 'AC') {
@@ -86,6 +90,8 @@ function compare(records, verdicts, opts) {
     pairs.push({
       problem: (rb.problem || String(key).split('|')[0]), model: rb.model,
       baseAC: ab.ac, candAC: ac2.ac, baseStrength: ab.strength, candStrength: ac2.strength,
+      baseUndecidable: ab.undecidable === true, candUndecidable: ac2.undecidable === true,
+      undecidableWhy: ab.why || ac2.why || null,
       baseMs: rb.ms || 0, candMs: rc.ms || 0,
       baseTokens: ((rb.usage && rb.usage.promptTokens) || 0) + ((rb.usage && rb.usage.completionTokens) || 0),
       candTokens: ((rc.usage && rc.usage.promptTokens) || 0) + ((rc.usage && rc.usage.completionTokens) || 0),
@@ -96,11 +102,15 @@ function compare(records, verdicts, opts) {
   }
 
   let win = 0; let tie = 0; let loss = 0; let b = 0; let c = 0;
+  const undecidableItems = [];
   for (const p of pairs) {
+    // 判不了的格子单独列，不塞进胜平负（否则就成了"用错尺子得出的打平"）
+    if (p.baseUndecidable || p.candUndecidable) { undecidableItems.push({ problem: p.problem, model: p.model, why: p.undecidableWhy }); continue; }
     if (p.candAC && !p.baseAC) { win++; c++; }
     else if (!p.candAC && p.baseAC) { loss++; b++; }
     else tie++;
   }
+  const decidable = win + tie + loss;
 
   const byLevel = {};
   for (const r of records || []) {
@@ -115,13 +125,15 @@ function compare(records, verdicts, opts) {
   Object.values(byLevel).forEach((g) => { g.avgTokens = g.runs ? Math.round(g.tokens / g.runs) : 0; g.avgCost = g.priced ? money(g.cost / g.priced) : null; });
 
   // 假自信率（只在候选档上算：基准档没有"已验证"这个概念）
+  // 注意：不可判的格子不算"被外部判错"——那是尺子的问题，不是链吹牛
   let asserted = 0; let assertedWrong = 0;
   for (const r of records || []) {
     if (!r || r.level !== cand) continue;
     if (r.assertedVerified !== true) continue;
     asserted++;
     const v = vByKey.get(cand + '|' + pairKey(r));
-    if (!acOf(v).ac) assertedWrong++;
+    const av = acOf(v);
+    if (!av.ac && !av.undecidable) assertedWrong++;
   }
 
   const human = o.human || [];
@@ -143,16 +155,19 @@ function compare(records, verdicts, opts) {
     base, cand, n,
     pairs,
     win, tie, loss,
+    decidable,
+    undecidable: { count: undecidableItems.length, items: undecidableItems },
     notWorse: win + tie,
-    notWorseRate: n ? (win + tie) / n : null,
-    winRate: n ? win / n : null,
-    lossRate: n ? loss / n : null,
+    notWorseRate: decidable ? (win + tie) / decidable : null,
+    winRate: decidable ? win / decidable : null,
+    lossRate: decidable ? loss / decidable : null,
     discordant: { baseBetter: b, candBetter: c },
     p: exactBinomialTwoSided(b, c),
     byLevel,
     falseConfidence: { asserted, assertedWrong, rate: asserted ? assertedWrong / asserted : null },
     quality,
-    note: n ? '' : '没有跑齐两档的题（配对为空）：先对同一批题跑 ' + base + ' 与 ' + cand + '。'
+    note: n ? (undecidableItems.length ? '有 ' + undecidableItems.length + ' 对题判不了（尺子/checker 问题），没有算进胜平负：' + undecidableItems.map((x) => x.problem + '(' + x.why + ')').join('、') : '')
+      : '没有跑齐两档的题（配对为空）：先对同一批题跑 ' + base + ' 与 ' + cand + '。'
   };
 }
 

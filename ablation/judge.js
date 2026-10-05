@@ -23,6 +23,7 @@ const path = require('path');
 const env = require('./lib/env');
 const problemsLib = require('./lib/problems');
 const compareLib = require('./lib/compare');
+const mkgen = require('./lib/mkgen');
 const runner = require('../lib/runner');
 const { compare } = compareLib;
 
@@ -40,7 +41,53 @@ function readPart(part, fallbackLang) {
   return { lang: part.lang || fallbackLang || 'cpp', code: fs.readFileSync(part.file, 'utf8') };
 }
 
+/**
+ * oracle 先验（判分前必过的一关）：拿官方样例跑这把"尺子"，**并比对样例输出**。
+ *
+ * 为什么必须有：差分对拍是拿 oracle 当标尺，尺子本身错了，候选的**正确**解答会被判成 WA。
+ * 实证（用户 m08171 的 pilot）：2268A 的 oracle 只打印 (1<<(n-k+1)) + 2*(k-1)、完全不读数组，
+ * 连自己的 4 组官方样例都过不了（期望 9/3/1/19，它给 10/8/2/20）；判分器照样拿它当标尺，
+ * 把 L0 与 L2 两侧（用按题面独立写的暴力解验过：400+120 组全对）都判成"差分 WA"。
+ *
+ * @returns {Promise<{status:'ok'|'no-oracle'|'unverified'|'oracle-broken'|'special-judge', detail:?string, special:boolean}>}
+ */
+async function oracleGate(problem) {
+  const out = { status: 'ok', detail: null, special: !!(problem && mkgen.looksSpecialJudge(problem.statement)) };
+  const samples = ((problem && problem.samples) || []).filter((s) => s && String(s.input || '').trim() && String(s.output || '').trim());
+  const oracle = readPart(problem && problem.oracle, 'cpp');
+  if (!oracle) { out.status = 'no-oracle'; return out; }
+  if (!samples.length) {
+    out.status = 'unverified';
+    out.detail = '这把 oracle 没有可比对的官方样例，没法先验它是不是正解：下面的差分结论只能当"相对这把尺子"看';
+    return out;
+  }
+  const r = await runner.runSamples({
+    lang: oracle.lang,
+    code: oracle.code,
+    samples: samples.map((s) => ({ input: s.input, output: s.output })),
+    timeLimitMs: runner.RUN_TIMEOUT_MS
+  });
+  if (!r.ok) { out.status = 'oracle-broken'; out.detail = 'oracle 自己跑不起来（和候选无关）：' + String(r.error || '').slice(0, 200); return out; }
+  const bad = (r.results || []).filter((x) => x.verdict !== 'AC');
+  if (!bad.length) return out;
+  const b = bad[0];
+  const idx = (b.index || 1) - 1;
+  const got = String(b.actual == null ? '' : b.actual).trim().slice(0, 120);
+  const want = String((samples[idx] || {}).output || '').trim().slice(0, 120);
+  if (out.special) {
+    out.status = 'special-judge';
+    out.detail = '这题是多解题（题面允许输出任意合法答案）：样例第 ' + (b.index || 1) + ' 组它给「' + got
+      + '」、样例是「' + want + '」，两者都可能是对的 → 样例关不作为判错依据（要判得靠 checker）';
+    return out;
+  }
+  out.status = 'oracle-broken';
+  out.detail = '**这把 oracle 过不了自己的官方样例**（第 ' + (b.index || 1) + ' 组：样例期望「' + want + '」、它给「'
+    + got + '」）→ 它多半不是这道题的正解（贴错题了 / 贴成别的题的解了）。本轮不拿它判候选：错的尺子会把正确解答判成 WA';
+  return out;
+}
+
 async function judgeRecord(rec, problem, opts) {
+  const o = opts || {};
   const out = { level: rec.level, problem: rec.problem, model: rec.model, codeSource: rec.codeSource || null,
     sampleVerdict: 'skipped', diffVerdict: 'skipped', detail: null,
     // 链自己有没有声称"已验证"（只有 L2 有这个概念）→ 用来算假自信率
@@ -48,6 +95,14 @@ async function judgeRecord(rec, problem, opts) {
     scopeComplete: rec.level === 'L2' ? rec.scopeComplete === true : null };
   if (!rec.code) { out.sampleVerdict = 'no-code'; out.diffVerdict = 'no-code'; out.detail = rec.error || '没有代码'; return out; }
   if (!problem) { out.detail = '题库里没有这道题的记录'; out.sampleVerdict = 'unknown'; out.diffVerdict = 'unknown'; return out; }
+
+  // 先验尺子：尺子不可信时，差分结论一律不许算到候选头上
+  const gate = o.gate !== undefined ? o.gate : await oracleGate(problem);
+  if (gate) {
+    if (gate.status === 'oracle-broken') out.oracleBroken = true;
+    if (gate.status === 'special-judge') out.specialJudge = true;
+    if (gate.status === 'unverified') out.oracleUnverified = true;
+  }
 
   if (problem.samples && problem.samples.length) {
     const r = await runner.runSamples({
@@ -62,35 +117,53 @@ async function judgeRecord(rec, problem, opts) {
       out.sampleVerdict = bad.length ? 'WA' : 'AC';
       if (bad.length) out.detail = '样例失败（第 ' + (bad[0].index || 1) + ' 组）：' + bad[0].verdict
         + (bad[0].actual != null ? '（实际输出 ' + String(bad[0].actual).slice(0, 200) + '）' : '');
-
+      // 多解题：样例对不上 ≠ 错（题面允许任意合法答案），不能记成 WA
+      if (bad.length && out.specialJudge) {
+        out.sampleVerdict = 'special-judge';
+        out.detail = gate && gate.detail ? gate.detail : out.detail;
+      }
     }
   }
 
   const oracle = readPart(problem.oracle, 'cpp');
   const gen = readPart(problem.gen, 'cpp');
-  if (oracle && gen) {
+  if (out.oracleBroken) {
+    // 尺子自己过不了官方样例：差分结论作废（不是候选的错）
+    out.diffVerdict = 'oracle-broken';
+    out.detail = gate.detail;
+  } else if (oracle && gen) {
     const r = await runner.stressTest({
       solution: { lang: rec.codeLang || 'cpp', code: rec.code },
       brute: oracle,
       gen,
-      iterations: opts.iterations,
+      iterations: o.iterations,
       timeLimitMs: runner.RUN_TIMEOUT_MS,
-      maxTotalMs: opts.maxTotalMs
+      maxTotalMs: o.maxTotalMs
     });
     if (!r.ok) { out.diffVerdict = 'run-error'; out.detail = r.error; }
     else if (r.status === 'ok') out.diffVerdict = 'AC';
-    else if (r.status === 'mismatch') { out.diffVerdict = 'WA'; out.detail = out.detail || ('差分第 ' + r.iteration + ' 组不一致'); out.counterExample = { input: r.input, expected: r.expected, actual: r.actual }; }
-    else { out.diffVerdict = 'run-error'; out.detail = out.detail || (r.which + '：' + r.detail); }
+    else if (r.status === 'mismatch') {
+      out.diffVerdict = 'WA';
+      out.detail = out.detail || ('差分第 ' + r.iteration + ' 组不一致');
+      out.counterExample = { input: r.input, expected: r.expected, actual: r.actual };
+      // 多解题 + 没有 checker：两边都可能是对的 → 标成"不可判"，别冒充候选错
+      if (out.specialJudge) {
+        out.diffUnreliable = true;
+        out.detail = '差分第 ' + r.iteration + ' 组不一致，但这题是多解题且没有 checker：两边都可能是对的 → 这一格不可判（'
+          + (gate && gate.detail ? gate.detail : '题面允许输出任意合法答案') + '）';
+      }
+    } else { out.diffVerdict = 'run-error'; out.detail = out.detail || (r.which + '：' + r.detail); }
   } else if (oracle) {
     // 有 oracle、没有生成器：差分跑不了，但缺的**不是** oracle（测试台点「自动写生成器」就能补）
     out.diffVerdict = 'no-gen';
     out.detail = out.detail || '有 oracle 但没有数据生成器：差分对拍跑不了（先在测试台点「自动写生成器」/「补生成器」再判分）';
+    if (out.oracleUnverified && gate) out.detail = (gate.detail || '') + '；' + out.detail;
   } else {
     out.diffVerdict = 'no-oracle';
     out.detail = out.detail || '没有 oracle：差分对拍跑不了（oracle 必须是外部提供的 AC 代码，不能是 cf-coach 自己的产出）';
   }
-  // 假自信：链说"已验证"、外部 oracle 却判它错 —— 这是验证链最该被追问的一种失败
-  if (out.assertedVerified) out.falseConfidence = (out.diffVerdict === 'WA');
+  // 假自信：链说"已验证"、外部 oracle 却判它错 —— 只在**尺子可信**的 WA 上算
+  if (out.assertedVerified && out.diffVerdict === 'WA' && !out.specialJudge && !out.oracleBroken) out.falseConfidence = true;
   return out;
 }
 
@@ -135,12 +208,28 @@ async function judgeAll(opts, hooks) {
   log('差分：每题最多 ' + iterations + ' 组随机数据（oracle 来自题库，不是 L2 产出的）\n');
 
   const verdicts = [];
+  // 尺子先验：每题只体检一次（跑官方样例 + 比对输出），结论复用到这一题的所有记录上
+  const gates = new Map();
+  const gateFor = async (id) => {
+    if (!gates.has(id)) gates.set(id, await oracleGate(byId.get(id)));
+    return gates.get(id);
+  };
   for (let i = 0; i < records.length; i++) {
     const rec = records[i];
     const problem = byId.get(rec.problem);
-    const v = await judgeRecord(rec, problem, { iterations, maxTotalMs });
+    let gate = null;
+    if (problem) {
+      const first = !gates.has(rec.problem);
+      gate = await gateFor(rec.problem);
+      if (first) {
+        log('  尺子先验 ' + rec.problem + '：' + gate.status + (gate.detail ? '  ' + gate.detail : '')
+          + (gate.special ? '（题面判为多解题）' : ''));
+      }
+    }
+    const v = await judgeRecord(rec, problem, { iterations, maxTotalMs, gate });
     verdicts.push(v);
     log([v.level, v.problem, (v.model || '')].join(' ') + ' → 样例 ' + v.sampleVerdict + '｜差分 ' + v.diffVerdict
+      + (v.oracleBroken ? '｜⛔尺子不可信' : '') + (v.specialJudge ? '｜多解题' : '')
       + (v.assertedVerified != null ? '｜链声称已验证 ' + (v.assertedVerified ? '是' : '否') : '')
       + (v.falseConfidence ? '  ⚠️假自信' : '') + (v.detail ? '  ' + v.detail : ''));
     if (h.onVerdict) h.onVerdict(v, i, records.length);
@@ -150,7 +239,7 @@ async function judgeAll(opts, hooks) {
 
   const byLevel = {};
   for (const v of verdicts) {
-    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0 };
+    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0 };
     g.total++;
     if (v.sampleVerdict === 'AC') g.sampleAC++;
     if (v.diffVerdict === 'AC') g.diffAC++;
@@ -158,6 +247,8 @@ async function judgeAll(opts, hooks) {
     if (v.sampleVerdict === 'no-code') g.noCode++;
     if (v.diffVerdict === 'no-oracle') g.noOracle++;
     if (v.diffVerdict === 'no-gen') g.noGen++;
+    if (v.oracleBroken) g.oracleBroken++;
+    if (v.specialJudge) g.specialJudge++;
     if (v.assertedVerified === true) g.asserted++;
     if (v.falseConfidence) g.falseConfidence++;
   }
@@ -166,6 +257,7 @@ async function judgeAll(opts, hooks) {
     const pct = (n) => g.total ? Math.round((n / g.total) * 100) + '%' : '—';
     log(lv.padEnd(3) + ' n=' + g.total + '  样例通过 ' + g.sampleAC + '(' + pct(g.sampleAC) + ')'
       + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
+      + (g.oracleBroken ? '  ⛔尺子不可信 ' + g.oracleBroken : '') + (g.specialJudge ? '  多解题 ' + g.specialJudge : '')
       + (g.asserted ? '  声称已验证 ' + g.asserted + '（其中假自信 ' + g.falseConfidence + '）' : ''));
   }
 
@@ -193,8 +285,12 @@ async function judgeAll(opts, hooks) {
     log('（没有跑齐两档的题：对同一批题同时跑 ' + base + ' 与 ' + cand + ' 才有配对结论）');
   } else {
     const pct = (x) => (x == null ? '—' : Math.round(x * 100) + '%');
-    log('配对 ' + cmp.n + ' 题：' + cand + ' 更好 ' + cmp.win + '，打平 ' + cmp.tie + '，' + base + ' 更好 ' + cmp.loss
-      + '  →  **不差于 ' + base + ' 的比例 ' + pct(cmp.notWorseRate) + '**（' + cmp.notWorse + '/' + cmp.n + '）');
+    log('配对 ' + cmp.n + ' 题（可判 ' + cmp.decidable + '）：' + cand + ' 更好 ' + cmp.win + '，打平 ' + cmp.tie + '，' + base + ' 更好 ' + cmp.loss
+      + '  →  **不差于 ' + base + ' 的比例 ' + pct(cmp.notWorseRate) + '**（' + cmp.notWorse + '/' + cmp.decidable + '）');
+    if (cmp.undecidable && cmp.undecidable.count) {
+      log('⚠️ 判不了 ' + cmp.undecidable.count + ' 题（没有算进胜平负）：'
+        + cmp.undecidable.items.map((x) => x.problem + '（' + x.why + '）').join('、'));
+    }
     log('不一致格子：' + cand + ' 更好 ' + cmp.discordant.candBetter + ' / ' + base + ' 更好 ' + cmp.discordant.baseBetter
       + '  → McNemar 精确检验双侧 p = ' + cmp.p.toFixed(3)
       + (cmp.discordant.candBetter + cmp.discordant.baseBetter < 6 ? '（格子太少，p 没有判别力：这只是"没发现差异"，不是"证明相等"）' : ''));
@@ -215,7 +311,7 @@ async function judgeAll(opts, hooks) {
   return { outDir, records, verdicts, byLevel, cmp, human, vfile, cfile, iterations };
 }
 
-module.exports = { judgeRecord, readRecords, judgeAll };
+module.exports = { judgeRecord, readRecords, judgeAll, oracleGate };
 
 if (require.main === module) {
   main().catch((e) => { console.error('判分失败：' + ((e && e.stack) || e)); process.exit(1); });

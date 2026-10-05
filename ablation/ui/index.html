@@ -163,12 +163,16 @@ function verdictBadge(v) {
   const map = {
     AC: ['b-ok', '差分 AC'], WA: ['b-bad', '差分 WA'], 'no-oracle': ['b-warn', '缺 oracle'],
     'no-gen': ['b-warn', '缺生成器（只能看样例）'],
+    'oracle-broken': ['b-bad', '⛔ 尺子坏了（不判候选）'],
+    'special-judge': ['b-warn', '多解题（样例关不算判错）'],
     'run-error': ['b-warn', '运行错误'], 'no-code': ['b-dim', '没抽到代码'], unknown: ['b-dim', '未知'], skipped: ['b-dim', '未判分']
   };
   const m = map[v.diffVerdict] || ['b-dim', v.diffVerdict];
   let s = '<span class="badge ' + m[0] + '">' + esc(m[1]) + '</span>';
   if (v.sampleVerdict === 'WA') s += ' <span class="badge b-bad">样例 WA</span>';
+  if (v.sampleVerdict === 'special-judge') s += ' <span class="badge b-warn">样例对不上（多解题，可能仍合法）</span>';
   if (v.falseConfidence) s += ' <span class="badge b-bad">假自信</span>';
+  if (v.diffUnreliable) s += ' <span class="badge b-warn">这一格不可判</span>';
   return s;
 }
 
@@ -179,16 +183,23 @@ function renderSummary() {
   if (!c || !c.n) {
     html += '<div class="dim">还没有配对结论：对同一批题跑齐 <b>L0</b> 与 <b>L2</b>，再点"判分 + 配对比较"。</div>';
   } else {
+    const und = c.undecidable || { count: 0, items: [] };
     html += '<div class="kpi">'
-      + '<div>配对题数<b>' + c.n + '</b></div>'
+      + '<div>配对题数<b>' + c.n + (c.decidable != null && c.decidable !== c.n ? '<span class="small dim"> 可判 ' + c.decidable + '</span>' : '') + '</b></div>'
       + '<div>L2 更好<b style="color:var(--ok)">' + c.win + '</b></div>'
       + '<div>打平<b>' + c.tie + '</b></div>'
       + '<div>L0 更好<b style="color:var(--bad)">' + c.loss + '</b></div>'
-      + '<div>不差于 L0<b style="color:' + (c.notWorseRate >= 0.5 ? 'var(--ok)' : 'var(--bad)') + '">' + pct(c.notWorseRate) + '</b></div>'
+      + '<div>不差于 L0<b style="color:' + (c.notWorseRate == null ? '' : (c.notWorseRate >= 0.5 ? 'var(--ok)' : 'var(--bad)')) + '">' + (c.notWorseRate == null ? '—' : pct(c.notWorseRate)) + '</b></div>'
+      + '<div>判不了<b style="color:' + (und.count ? 'var(--warn)' : '') + '">' + und.count + '</b></div>'
       + '<div>McNemar p<b>' + (c.p == null ? '—' : c.p.toFixed(3)) + '</b></div>'
       + '<div>假自信率<b>' + (c.falseConfidence.asserted ? pct(c.falseConfidence.rate) + '<span class="small dim"> ' + c.falseConfidence.assertedWrong + '/' + c.falseConfidence.asserted + '</span>' : '—') + '</b></div>'
       + '<div>人工判定<b class="small">' + c.quality.total + ' 题</b></div>'
       + '</div>';
+    if (und.count) {
+      html += '<div class="small" style="color:var(--warn);margin-top:6px">⚠️ ' + und.count + ' 对题判不了，<b>没有算进胜平负</b>：'
+        + und.items.map((x) => esc(x.problem) + '（' + esc(x.why === 'special-judge' ? '多解题没 checker' : '尺子坏了：' + x.why) + '）').join('、')
+        + '　→ 尺子（oracle）自己过不了官方样例时，正确解答会被判成 WA，所以这一格只能空着。</div>';
+    }
     if ((c.discordant.candBetter + c.discordant.baseBetter) < 6) {
       html += '<div class="small dim" style="margin-top:6px">不一致格子只有 ' + (c.discordant.candBetter + c.discordant.baseBetter) + ' 个：p 值此时没有判别力（只是"没发现差异"，不是"证明相等"）。要下结论至少 6 个不一致格子。</div>';
     }
