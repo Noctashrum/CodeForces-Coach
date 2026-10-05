@@ -21,6 +21,7 @@
   "scripts": {
     "start": "node server.js",
     "app": "electron .",
+    "diag": "node scripts/diag.js",
     "icon": "node scripts/gen-icon.js",
     "pack": "node scripts/pack.js"
   },

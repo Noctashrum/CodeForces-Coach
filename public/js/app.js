@@ -3459,6 +3459,17 @@
       + '<button class="btn btn-default" data-ds-export>导出全部对话 (JSON)</button>'
       + '<button class="btn btn-default" data-ds-import>导入对话 (JSON)</button>'
       + '</div></div>'
+      + '<div class="form-group"><label class="form-label">诊断包（出问题时发给开发者）</label>'
+      + '<div style="display:flex;gap:10px;flex-wrap:wrap">'
+      + '<button class="btn btn-default" data-ds-diag>导出诊断包 (TXT)</button>'
+      + '<button class="btn btn-default" data-ds-diagfile>写到 data/diag/ 目录</button>'
+      + '</div>'
+      + '<div class="form-hint">诊断包是一份纯文本，含：运行环境、模型配置（<b>key 与 cookie 已自动打码</b>）、'
+      + '抓取/诊断日志、题面缓存台账、工作区验证状态、最近几个会话的尾部消息、消融跑分记录。'
+      + '完整解题代码与完整题面正文不进包（回答只留前 600 字符、工具结果只留前 300 字符）。默认只带最近 6 个会话，体积按段裁剪。<br>'
+      + '从仓库源码跑（开发版）时，命令行也能生成同一份文件：'
+      + '<code>node scripts/diag.js --out 诊断包.txt</code></div>'
+      + '<div class="form-hint" data-ds-diagpath></div></div>'
       + '<div class="form-group"><label class="form-label">危险操作</label>'
       + '<button class="btn btn-danger" data-ds-clear>清空所有对话</button></div>'
       + '</div>';
@@ -3779,6 +3790,24 @@
           }
         });
         fi.click();
+      });
+      root.querySelector('[data-ds-diag]').addEventListener('click', function () {
+        window.open('/api/diag/export', '_blank');
+        toast('正在生成诊断包…（纯文本，key 与 cookie 已打码）', 'info');
+      });
+      root.querySelector('[data-ds-diagfile]').addEventListener('click', async function () {
+        const btn = this;
+        btn.disabled = true;
+        try {
+          const r = await api('/api/diag/save', { method: 'POST' });
+          root.querySelector('[data-ds-diagpath]').textContent =
+            '已写出：' + r.file + '（' + Math.round(r.bytes / 1024) + 'KB，段落：' + (r.sections || []).join(' / ') + '）';
+          toast('诊断包已写到 data/diag/ 目录', 'success');
+        } catch (e) {
+          toast('写诊断包失败：' + e.message, 'error');
+        } finally {
+          btn.disabled = false;
+        }
       });
       root.querySelector('[data-ds-clear]').addEventListener('click', async function () {
         const ok = await confirmModal({
