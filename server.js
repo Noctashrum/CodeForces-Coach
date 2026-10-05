@@ -989,16 +989,29 @@ function wsKeyOf(convId) {
 
 /** 取本题官方样例（缓存不足时重新抓题）；供 harness 的样例校准复用 */
 async function ensureSamples(conv) {
-  let samples = (conv.cfProblemSamples || []).filter((s) => s.input != null);
+  const raw = (conv.cfProblemSamples || []).filter((s) => s.input != null);
+  // ⚠️ 老版本会把题面的「输入格式」段落机械抽成样例 1（假样例）——这种样例是**系统性污染源**：
+  //    题解/标尺在假样例上必挂，整条链会得出"题解没过样例"的假失败（2026-10 另一台机器 19 轮里 17 轮如此）。
+  //    所以进链之前先清一遍，并优先换成题面缓存里的结构化真样例。
+  const { samples: kept, dropped } = statementLib.sanitizeSamples(raw);
+  let samples = kept;
   if (!samples.length && conv.cfProblem) {
     try {
       const fetched = await cf.fetchProblem(conv.cfProblem.contestId, conv.cfProblem.index);
-      conv.cfProblemSamples = fetched.samples;
-      saveConv(conv);
-      samples = fetched.samples.filter((s) => s.input != null);
+      const clean = statementLib.sanitizeSamples((fetched.samples || []).filter((s) => s.input != null)).samples;
+      if (clean.length) {
+        conv.cfProblemSamples = clean;
+        saveConv(conv);
+        samples = clean;
+        console.log('[coach] 清掉 ' + dropped.length + ' 组假样例 → 改用题面缓存里的真样例（' + clean.length + ' 组）');
+      }
     } catch (e) {
       console.log('[coach] 重新取题样例失败: ' + e.message);
     }
+  } else if (dropped.length) {
+    conv.cfProblemSamples = samples;
+    saveConv(conv);
+    console.log('[coach] 清掉 ' + dropped.length + ' 组假样例（保留 ' + samples.length + ' 组真样例）');
   }
   return samples;
 }
@@ -2037,7 +2050,7 @@ async function handleChat(req, res) {
           tools,
           signal: ctrl.signal,
           maxTokens: (cfg.maxOutputTokens > 0) ? cfg.maxOutputTokens : 0,
-          maxSteps: 12,
+          maxSteps: agentloop.stepsForRating(conv.problemMeta && conv.problemMeta.rating),
           ...runTurnHooks
         });
 
