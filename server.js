@@ -26,6 +26,7 @@ const skillsLib = require('./lib/skills');
 const toolsLib = require('./lib/tools');
 const agentloop = require('./lib/agentloop');
 const cfreview = require('./lib/cfreview');
+const diagbundle = require('./lib/diagbundle');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -2548,6 +2549,51 @@ async function fetchModels(provider) {
   return models;
 }
 
+/* ---------------- 诊断包 ---------------- */
+
+/**
+ * 诊断包的采集参数：所有目录/版本号都取自服务进程自己知道的事实，
+ * 不额外问主进程要东西（这样 server.js 在纯 node 下也能跑这条路由）。
+ */
+function diagStateText() {
+  const counts = {};
+  try { counts.conversations = fs.readdirSync(CONV_DIR).filter((f) => f.endsWith('.json')).length; } catch { /* ignore */ }
+  try { counts.archive = fs.readdirSync(ARCH_DIR).filter((f) => f.endsWith('.json')).length; } catch { /* ignore */ }
+  try { counts.workspace = fs.readdirSync(path.join(DATA_DIR, 'workspace')).length; } catch { /* ignore */ }
+  try { counts.cachedProblems = fs.readdirSync(path.join(DATA_DIR, 'cf-problems')).filter((f) => f.endsWith('.json')).length; } catch { /* ignore */ }
+  try { counts.editorials = fs.readdirSync(path.join(DATA_DIR, 'cache', 'editorials')).length; } catch { /* ignore */ }
+  try { counts.skills = fs.readdirSync(path.join(ROOT, 'skills')).length; } catch { /* ignore */ }
+  const cfg = readJSON(CONFIG_FILE, null) || {};
+  const providers = (cfg.providers || []).map((pv) => ({
+    id: pv.id, name: pv.name, kind: pv.kind, baseUrl: pv.baseUrl,
+    models: (pv.models || []).map((m) => (typeof m === 'string' ? m : (m && (m.id || m.name))))
+  }));
+  return JSON.stringify({
+    appVersion: APP_VERSION, dataDir: DATA_DIR, counts,
+    defaults: cfg.defaults || cfg.default || null,
+    providers
+  }, null, 2);
+}
+
+function diagOpts() {
+  let locale = '—';
+  let timeZone = '—';
+  try {
+    const r = Intl.DateTimeFormat().resolvedOptions();
+    locale = r.locale || '—'; timeZone = r.timeZone || '—';
+  } catch { /* ignore */ }
+  return {
+    dataDir: DATA_DIR,
+    rootDir: ROOT,
+    appVersion: APP_VERSION,
+    electronVersion: process.versions.electron || null,
+    chromeVersion: process.versions.chrome || null,
+    locale, timeZone,
+    packed: /app\.asar/.test(String(process.resourcesPath || '')),
+    extra: [{ name: '应用状态（会话数 / 缓存台账 / 服务商）', text: diagStateText() }]
+  };
+}
+
 /* ---------------- 导出 / 导入 ---------------- */
 
 function convToMarkdown(c) {
@@ -3506,6 +3552,22 @@ const server = http.createServer(async (req, res) => {
     /* ---- 聊天（SSE） ---- */
     if (method === 'POST' && p === '/api/chat') {
       await handleChat(req, res);
+      return;
+    }
+
+    /* ---- 诊断包（把"出问题那一刻"的证据打成一个纯文本文件） ---- */
+    if (method === 'GET' && p === '/api/diag/export') {
+      const b = diagbundle.collect(diagOpts());
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + diagbundle.defaultFileName() + '"'
+      });
+      res.end(b.text);
+      return;
+    }
+    if (method === 'POST' && p === '/api/diag/save') {
+      const r = diagbundle.write(diagOpts());
+      sendJSON(res, 200, { ok: true, file: r.file, bytes: r.bytes, sections: r.sections.map((s) => s.name), warnings: r.warnings });
       return;
     }
 

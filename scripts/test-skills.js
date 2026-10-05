@@ -735,6 +735,25 @@ async function runLoopCases() {
     assert.ok(!cleaned.includes('parameter'), '标记属性不该残留：' + cleaned);
   });
 
+  // 真实变体（2026-10-05 的 2268A 跑分里实测）：DSML 与标签名之间**多一个空格**。
+  // 老正则不允许这段空白 → hasLeakMarkup=false → stripLeakMarkup 直接原样返回 → 整坨标记被当成回答落盘。
+  const markSpaced = (tag, attrs) => '<' + P + P + 'DSML' + P + P + ' ' + tag + (attrs ? ' ' + attrs : '') + '>';
+  const leakedCallSpaced = (name, param, value) => [
+    markSpaced('calls'),
+    markSpaced('invoke', 'name="' + name + '"'),
+    markSpaced('parameter', 'name="' + param + '" string="true"') + value + markSpaced('parameter'),
+    markSpaced('invoke'),
+    markSpaced('calls')
+  ].join('\n');
+
+  await tAsync('工具标记泄漏：DSML 与标签名之间带空格的变体也必须认出来（实测踩过）', async () => {
+    const s = leakedCallSpaced('run_code', 'path', 'check.cpp');
+    assert.ok(agentloop.hasLeakMarkup(s), '带空格的变体没被认出来：' + JSON.stringify(s.slice(0, 60)));
+    const cleaned = agentloop.stripLeakMarkup(s);
+    assert.ok(!agentloop.hasLeakMarkup(cleaned), '剥完不该还有标记');
+    assert.ok(!cleaned.includes('run_code'), '标记不该被当成正文留着：' + JSON.stringify(cleaned));
+  });
+
   await tAsync('工具标记泄漏：回收成真实调用并执行（cf.run → cf_probe 这种写歪的名字也要对回）', async () => {
     const stub = stubModel([
       { content: leakedCall('cf.probe', 'q', 'leak') },

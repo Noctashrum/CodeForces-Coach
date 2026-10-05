@@ -73,6 +73,25 @@ async function main() {
     check('L1 工具流水留档（toolEnd 事件）', events.filter((e) => e.kind === 'toolEnd').length >= 3, 'events=' + events.length);
     check('L1 对拍结果传给了模型', events.some((e) => e.name === 'stress_test' && /对拍通过/.test(String(e.result))));
 
+    // ②b L1 的收尾兜底：2268A 实测那次 20 步全花在辅助脚本上，最后「正解没落盘、正文也没代码块」→
+    //    兜底要追问一次"只要最终代码"，把交付物救回来（否则整档就是 FAILED，白烧 70 万 token）
+    const mockNoCode = await startMockLlm({ port: 0, l1NoCode: true });
+    try {
+      const rec1b = await levels.runL1({
+        problem, statement: problem.statement, run, name: 'L1-nocode-ab', maxSteps: 3, iterations: 5, params,
+        target: { provider: { id: 'mock', type: 'openai', baseUrl: mockNoCode.url, apiKey: 'mock', stream: true }, providerId: 'mock', model: 'mock-gpt-4' }
+      });
+      check('L1 收尾兜底：没代码也没落盘 → 追问一次"只要最终代码"',
+        !!rec1b.finalize, JSON.stringify(rec1b.finalize || null));
+      check('L1 收尾兜底：追问拿到的代码算数（来源标成 answer-final）',
+        rec1b.ok && rec1b.codeSource === 'answer-final', JSON.stringify([rec1b.ok, rec1b.codeSource, rec1b.error]));
+      check('L1 收尾兜底：那次追问的 token 也计入本档成本',
+        !!(rec1b.finalize && rec1b.finalize.promptTokens > 0 && rec1b.usage && rec1b.usage.promptTokens > 0),
+        JSON.stringify([rec1b.finalize, rec1b.usage]));
+      check('L1 收尾兜底：回答单独留档（原始那份是空话/标记）',
+        !!rec1b.finalAnswerFile && fs.existsSync(rec1b.finalAnswerFile), String(rec1b.finalAnswerFile || ''));
+    } finally { await mockNoCode.close(); }
+
     // ③ 判分能判对
     const v0 = await judge.judgeRecord(rec0, problem, { iterations: 20, maxTotalMs: 60000 });
     check('判分：L0 正确代码 → 样例 AC', v0.sampleVerdict === 'AC', v0.sampleVerdict + ' ' + (v0.detail || ''));
@@ -89,6 +108,18 @@ async function main() {
     ].join('\n');
     const vBad = await judge.judgeRecord({ level: 'L0', problem: problem.id, code: tricky, codeLang: 'python', codeSource: 'selftest' }, problem, { iterations: 30, maxTotalMs: 60000 });
     check('判分：样例过得去但差分抓到错', vBad.sampleVerdict === 'AC' && vBad.diffVerdict === 'WA', JSON.stringify([vBad.sampleVerdict, vBad.diffVerdict, vBad.detail]));
+
+    // ④b 差分"跑不了"的两种原因必须分开报（2268A 那次就是被混成一句 no-oracle 才看不出该点「补生成器」）
+    const vNoGen = await judge.judgeRecord(
+      { level: 'L0', problem: 'nogen', code: 'print(1)', codeLang: 'python', codeSource: 'selftest' },
+      { id: 'nogen', samples: [], oracle: problem.oracle, gen: null }, { iterations: 20, maxTotalMs: 60000 });
+    check('判分：有 oracle 没生成器 → no-gen（提示怎么补，而不是怪 oracle）',
+      vNoGen.diffVerdict === 'no-gen' && /生成器/.test(String(vNoGen.detail || '')), JSON.stringify([vNoGen.diffVerdict, vNoGen.detail]));
+    const vNoOracle = await judge.judgeRecord(
+      { level: 'L0', problem: 'nooracle', code: 'print(1)', codeLang: 'python', codeSource: 'selftest' },
+      { id: 'nooracle', samples: [], oracle: null, gen: problem.gen }, { iterations: 20, maxTotalMs: 60000 });
+    check('判分：没有 oracle → no-oracle（oracle 必须是外部 AC，不能是 coach 自己的产出）',
+      vNoOracle.diffVerdict === 'no-oracle', JSON.stringify([vNoOracle.diffVerdict, vNoOracle.detail]));
 
     // ⑤ L2（cf-coach 本体无头跑）：验证链要真的跑起来并给出可判分的交付物
     const rec2 = await l2.runL2({
@@ -132,6 +163,9 @@ async function main() {
     check('配对比较：没有 oracle 的题只算样例级证据（不冒充差分 AC）',
       compareLib.acOf({ diffVerdict: 'no-oracle', sampleVerdict: 'AC' }).strength === 'samples'
       && compareLib.acOf({ diffVerdict: 'WA', sampleVerdict: 'AC' }).ac === false);
+    check('配对比较：缺生成器（no-gen）同样只算样例级证据，不冒充差分 AC',
+      compareLib.acOf({ diffVerdict: 'no-gen', sampleVerdict: 'AC' }).strength === 'samples'
+      && compareLib.acOf({ diffVerdict: 'no-gen', sampleVerdict: 'WA' }).ac === false);
     check('配对比较：McNemar 精确检验的已知值正确',
       Math.abs(compareLib.exactBinomialTwoSided(0, 5) - 0.0625) < 1e-9
       && Math.abs(compareLib.exactBinomialTwoSided(1, 9) - (22 / 1024)) < 1e-9
@@ -199,7 +233,7 @@ async function main() {
     // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
-    check('records.jsonl 写出五条记录', lines.length === 5, 'lines=' + lines.length);
+    check('records.jsonl 每条跑分一行（L0/L1/L1 兜底/L2/错解 L2/错解 L0 = 6 行）', lines.length === 6, 'lines=' + lines.length);
     check('summary.json 写出分档汇总', fs.existsSync(path.join(run.outDir, 'summary.json')));
     const r0 = JSON.parse(lines[0]);
     check('记录里有题面 sha（三档同题面可审计）', !!r0.statementSha, String(r0.statementSha));

@@ -301,6 +301,15 @@ data/
   **C++ 无法用这种方式限制**，只做超时与进程树清理——请只使用你信任的模型。
 - 富文档运行在带 CSP 的沙箱 iframe 中，禁止一切外部请求。
 
+### 出问题时：把现场发出来
+
+上面这些数据都留在那台机器上——这正是"远程排障只能靠猜"的原因。**设置 → 数据存储 → 诊断包**
+会写出一份纯文本 `.txt`：运行环境（应用/Electron/Chromium 版本、数据目录）、模型配置、应用与抓取日志、
+题面缓存台账、每个工作区的验证结论、最近几个会话的尾部消息，以及消融跑分记录——里面还包含每次跑的
+**逐步工具轨迹**（哪一步走歪了一眼就能看出来）。API key、cookie、邮箱、系统用户名都已打码，完整题面与
+完整解题代码不进包，所以可以直接发出来。界面起不来时用命令行生成同一份文件：
+`node scripts/diag.js --out 诊断包.txt`（完整说明见 [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)）。
+
 ### 从 Codeforces 取题
 
 CF 挂在 Cloudflare 后面：普通 HTTP 请求可能吃 `403 + cf-mitigated: challenge`，但官方 `/api/*` 接口不被拦。
@@ -352,9 +361,10 @@ lib/profile.js       学员画像的证据闸门与幻觉守卫
 lib/pricing.js       token 用量汇总与费用估算（缓存命中感知）
 lib/workspace.js     工作区文件与同题已验证产物缓存
 lib/sandbox.js       Python / Node 沙箱守卫
+lib/diagbundle.js    诊断包：把环境 / 日志 / 缓存台账 / 验证结论 / 跑分工具轨迹收成一份脱敏文本
 electron/            桌面壳：窗口、托盘、菜单、冒烟自检、CF 抓取浏览器通道
 public/              无构建前端（app.js、md.js 渲染器、rich/ 设计系统、本地化依赖）
-scripts/             mock 服务、单元与端到端测试、探针、打包、图标
+scripts/             mock 服务、单元与端到端测试、探针、打包、图标、诊断包 CLI
 .probe/              开发探针（并发计时、文档渲染与泄漏、单轮审计）
 ```
 
@@ -364,7 +374,7 @@ scripts/             mock 服务、单元与端到端测试、探针、打包、
 
 ```bash
 npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，258 项检查
-npm run test:units        # 单元测试全家桶（10 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / harness / runner / ablation
+npm run test:units        # 单元测试全家桶（11 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation
 npm run test:harness      # 编排器单测（契约切片、样例隔离、工作区、证据门、富文档）
 npm run test:runner       # 运行器单测（编译 / 输出归一化比对 / 超时 / C++23）
 npm run test:parallel     # 并发生成、停止退栈、预算护栏、生成器数据不变量、标尺降档、串行队列/工作区锁
@@ -373,8 +383,10 @@ node scripts/run-smoke.js --packaged   # 桌面冒烟自检（打包版的真实
 npm run mock              # 单独启动模拟 LLM（:3999）
 npm run mock-cf           # 单独启动模拟 Codeforces（:3998）
 npm run pack              # 打包便携目录版 dist/CFCoach-win32-x64（保留 exe 旁 data/）
-npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（34 个文件）
-npm run test:skills       # 技能系统与工具层单测（不联网，78 条）
+npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（35 个文件）
+npm run test:skills       # 技能系统与工具层单测（不联网，79 条）
+npm run test:diagbundle   # 诊断包单测（脱敏一个不漏、段落齐全、截断、CLI 三种用法）
+npm run diag              # 生成诊断包：node scripts/diag.js --out 诊断包.txt
 npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/L2/判分/配对比较全链路）
 npm run probe:ablation    # 消融实验四个入口的真跑探针（零 token：run/judge/import-l2/selftest）
 npm run probe:ui          # 人工测试台端到端探针（零 token：加题→跑分→判分→人工判定→导出）
@@ -386,6 +398,7 @@ node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证�
 ```
 
 推送与发布（三条命令、push 前自检、常见报错对照）：见 [docs/PUSHING.md](docs/PUSHING.md)。
+远程排障（怎么把别人机器上的现场打包成一份可直接发出来的脱敏文本）：见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)。
 
 **消融实验（怎么证明比裸模型强）**：`ablation/` 下有 L0（裸模型，无工具）、L1（裸 agent + 通用工具 + 明确要求对拍）
 两个档位的跑分脚本，L2 就是 cf-coach 本体；判分用官方样例 + **外部 AC 提交**做差分对拍。

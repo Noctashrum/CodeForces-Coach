@@ -47,6 +47,12 @@ check('库：复盘聚合与罚时口径', 'lib/cfreview.js', ['penaltyApprox', 
 check('技能：五个工作流 + 人格', 'skills/_coach.md', ['证据优先', '追问就是追问']);
 check('技能：复盘流程', 'skills/cf-review/SKILL.md', ['赛后复盘', '不要编造']);
 
+// 诊断包：设置页按钮 → 服务端路由 → 采集库三段必须在包里（否则用户在最需要它的那台机器上导不出来）
+check('诊断包：采集库', 'lib/diagbundle.js', ['API key', 'pickDataDir', 'cf-diag.log', '##########']);
+check('诊断包：服务端路由', 'server.js', ['/api/diag/export', '/api/diag/save', 'diagbundle']);
+check('诊断包：设置页入口', 'public/js/app.js', ['data-ds-diag', 'data-ds-diagfile', '/api/diag/export']);
+check('诊断包：主进程交底 userData（免得靠猜 APPDATA）', 'electron/main.js', ['CFCOACH_USER_DATA']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);

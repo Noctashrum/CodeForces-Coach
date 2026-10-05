@@ -44,6 +44,8 @@ async function systemL1() {
     '   对拍发现不一致就修代码，然后重新对拍。不要跳过这一步。',
     '2. 最后把最终正解写入工作目录的 solution.py（或 solution.cpp，取决于本机可用运行时），',
     '   并在回答里给出这份最终代码（放在 ``` 代码块里）+ 思路 + 复杂度。',
+    '3. 步数有限（每一步一次工具调用）。**先把能 AC 的正解写进 solution.py，再做额外的验证**：',
+    '   宁可少写几个辅助脚本，也不要到最后一步还没落盘正解。',
     '不要输出与解题无关的内容。'
   ].join('\n');
 }
@@ -164,15 +166,41 @@ async function runL1(ctx) {
     const fromFile = readSolutionFile(dir, rt.python ? 'python' : 'cpp');
     const clean = agentloop.stripLeakMarkup(text);
     const fromText = record.extractFinalCode(clean);
+    // 公平的收尾机会：L1 的硬要求是"把正解写进 solution.py"，而 agentloop 自带的收尾
+    // 只要求"最终回答"。步数用尽的跑法常把最后一步花在调工具上（实测 2268A：第 20 步
+    // 还在写 check.cpp，整跑从没写过 solution.py），于是既没落盘文件、正文也没有代码块。
+    // 这里再给**一次**不要工具、只要代码的调用，并把这次调用如实记进 rec.finalize。
+    let finalClean = null;
+    let finalFile = null;
+    if (!fromFile && !fromText) {
+      const fin = await lastChanceCode({
+        provider: target.provider, model: target.model, system, problem, statement, maxTokens: params.maxTokens
+      });
+      usage.promptTokens += fin.usage.promptTokens;
+      usage.completionTokens += fin.usage.completionTokens;
+      usage.calls += 1;
+      finalClean = fin.text;
+      finalFile = run.saveAnswer(name + '-final', fin.text);
+      rec.finalize = { calls: 1, chars: fin.text.length, code: !!record.extractFinalCode(fin.text),
+        promptTokens: fin.usage.promptTokens, completionTokens: fin.usage.completionTokens };
+    }
+    const fromFinal = finalClean ? record.extractFinalCode(finalClean) : null;
     if (fromFile) {
       rec.code = fromFile.code; rec.codeLang = fromFile.lang; rec.codeSource = fromFile.source;
     } else if (fromText) {
       rec.code = fromText.code; rec.codeLang = fromText.lang; rec.codeSource = 'answer';
+    } else if (fromFinal) {
+      rec.code = fromFinal.code; rec.codeLang = fromFinal.lang; rec.codeSource = 'answer-final';
     } else {
       rec.code = null; rec.codeLang = null; rec.codeSource = null;
     }
     rec.ok = !!rec.code;
-    rec.error = rec.ok ? null : '既没有落盘的正解文件，回答里也没有代码块';
+    rec.error = rec.ok ? null : '既没有落盘的正解文件，回答里也没有代码块（收尾那次"只要代码"的调用也没给出代码块）';
+    if (finalFile) rec.finalAnswerFile = finalFile;
+    rec.calls = usage.calls || rec.calls;
+    rec.usage = { promptTokens: usage.promptTokens || (res.usage && res.usage.promptTokens) || 0,
+      completionTokens: usage.completionTokens || (res.usage && res.usage.completionTokens) || 0,
+      calls: rec.calls, estimated: !!(res.usage && res.usage.estimated) };
     rec.answerFile = run.saveAnswer(name, clean);
     rec.transcriptFile = run.saveTranscript(name, events);
     rec.ms = Date.now() - t0;
@@ -185,6 +213,36 @@ async function runL1(ctx) {
     rec.transcriptFile = run.saveTranscript(name, events);
     return run.add(rec);
   }
+}
+
+/**
+ * 收尾调用：不给工具、不给历史，只要最终正解代码。
+ *
+ * 与 agentloop 自带的收尾不同：那里带着整段工具历史（模型会继续"调工具"），
+ * 这里只重发题面 + 一句明确指令，让模型有机会把答案**写下来**。
+ * 返回的 usage 必须计入该档位成本——多花的这一次 token 是真实的。
+ */
+async function lastChanceCode(o) {
+  const prompt = userPrompt(o.problem, o.statement)
+    + '\n\n---\n【收尾·系统要求】不要再调用任何工具（现在也没有工具可用，你前面的工具过程已经结束）。'
+    + '请直接输出**最终正解**的完整代码，放在一个代码块里（```python 或 ```cpp，与你的解法语言一致）：'
+    + '代码要能直接编译/运行，读标准输入、写标准输出。除了这个代码块，不要再输出任何别的内容。';
+  const res = await llm.callModel({
+    provider: o.provider,
+    model: o.model,
+    system: o.system,
+    messages: [{ role: 'user', content: prompt }],
+    maxTokens: o.maxTokens || undefined,
+    stream: true
+  });
+  const text = agentloop.stripLeakMarkup(String((res && res.content) || ''));
+  return {
+    text,
+    usage: {
+      promptTokens: (res && res.usage && res.usage.promptTokens) || 0,
+      completionTokens: (res && res.usage && res.usage.completionTokens) || 0
+    }
+  };
 }
 
 function clipText(s, n) {

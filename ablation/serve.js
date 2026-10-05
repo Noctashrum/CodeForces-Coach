@@ -34,6 +34,13 @@ const mkgen = require('./lib/mkgen');
 const judgeLib = require('./judge');
 const workspace = require('../lib/workspace');
 const agentloop = require('../lib/agentloop');
+const diagbundle = require('../lib/diagbundle');
+
+// 项目根（注意与下面的 ROOT 区分：那个是跑分数据目录 store root）
+const PROJECT_ROOT = path.join(__dirname, '..');
+const APP_VERSION = (function () {
+  try { return JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8')).version; } catch { return null; }
+})();
 
 function usage() {
   console.log([
@@ -179,8 +186,10 @@ async function runJudge(o) {
   const iterations = o && o.iterations != null && o.iterations !== '' ? Number(o.iterations) : DEFAULTS.iterations;
   const problems = store.runtimeAll();
   if (!problems.length) throw new Error('题库是空的');
-  const withoutOracle = problems.filter((p) => !p.oracle || !p.gen);
-  if (withoutOracle.length) logEvent('⚠️ 这些题缺 oracle 或生成器，只能判样例、差分记 no-oracle：' + withoutOracle.map((p) => p.id).join(', '));
+  const noOracle = problems.filter((p) => !p.oracle);
+  const noGen = problems.filter((p) => p.oracle && !p.gen);
+  if (noOracle.length) logEvent('⚠️ 这些题缺 oracle（差分对拍跑不了，只能判样例，记 no-oracle）：' + noOracle.map((p) => p.id).join(', '));
+  if (noGen.length) logEvent('⚠️ 这些题有 oracle 但缺数据生成器（差分对拍跑不了，记 no-gen）：点「补生成器」可以自动写：' + noGen.map((p) => p.id).join(', '));
   emit({ type: 'judgeStart', iterations, problems: problems.length });
   const r = await judgeLib.judgeAll(
     { outDir: store.dir, problems, records: store.latestRecords(), iterations, human: store.human() },
@@ -400,6 +409,33 @@ const server = http.createServer(async (req, res) => {
       const file = path.join(store.dirs.answers, name);
       if (!fs.existsSync(file)) return sendText(res, 404, '没有这份回答', 'text/plain');
       return sendText(res, 200, fs.readFileSync(file, 'utf8'), 'text/plain');
+    }
+    if (req.method === 'GET' && p === '/api/diag/export') {
+      // 跑分这台机器上"到底发生了什么"的证据包：和应用的诊断包共用 lib/diagbundle.js，
+      // 额外把 ablation/out/ui 的跑分记录（summary/records/verdicts/transcript/sandbox）带上。
+      const b = diagbundle.collect({
+        dataDir: env.dataDir(),
+        rootDir: PROJECT_ROOT,
+        ablationOut: store.dir,
+        appVersion: APP_VERSION,
+        electronVersion: process.versions.electron || null,
+        chromeVersion: process.versions.chrome || null,
+        packed: /app\.asar/.test(String(process.resourcesPath || '')),
+        extra: [{
+          name: '测试台状态（题库 / 判分台账 / 内存里的运行状态）',
+          text: JSON.stringify({
+            dir: store.dir, defaults: DEFAULTS, targets: (stateOf().targets || []),
+            problems: store.list().map((x) => ({ id: x.id, hasOracle: !!x.oracle, hasGen: !!x.gen, samples: (x.samples || []).length })),
+            records: store.latestRecords().length, verdicts: store.verdicts().length,
+            running: !!(stateOf().job && stateOf().job.running), genBusy: !!stateOf().genBusy
+          }, null, 2)
+        }]
+      });
+      res.writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-disposition': 'attachment; filename="' + diagbundle.defaultFileName() + '"'
+      });
+      return res.end(b.text);
     }
     if (req.method === 'GET' && p === '/api/export') {
       return sendJson(res, 200, {

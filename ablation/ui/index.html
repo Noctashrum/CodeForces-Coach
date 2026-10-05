@@ -61,6 +61,7 @@
     <button id="btnJudge">判分 + 配对比较</button>
     <button id="btnGens" title="给「有 oracle 但没生成器」的题各写一个随机数据生成器（一题一次模型调用 + 跑代码体检）">补生成器</button>
     <button id="btnExport">导出 JSON</button>
+    <button id="btnDiag" title="导出这台机器上的完整证据包（纯文本）：环境、日志、题库与 oracle/生成器台账、每一跑的工具轨迹、判分与配对结果。key/cookie/邮箱/用户名已打码；不会带解题代码正文。">导出诊断包</button>
     <button id="btnCancel">取消</button>
   </div>
   <div id="progress" class="small dim" style="margin-top:6px"></div>
@@ -157,6 +158,7 @@ function verdictBadge(v) {
   if (!v) return '<span class="badge b-dim">未判分</span>';
   const map = {
     AC: ['b-ok', '差分 AC'], WA: ['b-bad', '差分 WA'], 'no-oracle': ['b-warn', '缺 oracle'],
+    'no-gen': ['b-warn', '缺生成器（只能看样例）'],
     'run-error': ['b-warn', '运行错误'], 'no-code': ['b-dim', '没抽到代码'], unknown: ['b-dim', '未知'], skipped: ['b-dim', '未判分']
   };
   const m = map[v.diffVerdict] || ['b-dim', v.diffVerdict];
@@ -437,6 +439,15 @@ $('btnExport').addEventListener('click', async () => {
   const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'ablation-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json'; a.click();
+});
+
+$('btnDiag').addEventListener('click', () => {
+  // 直接走浏览器的下载通道（服务端带 Content-Disposition），和「导出 JSON」不同：
+  // 这一份是纯文本，人可以直接读、也可以直接贴给开发者。
+  logLine('正在生成诊断包（环境 / 日志 / 题库台账 / 每一跑的工具轨迹 / 判分结果）…');
+  const a = document.createElement('a');
+  a.href = '/api/diag/export';
+  a.click();
 });
 
 async function startRun(ids, all) {

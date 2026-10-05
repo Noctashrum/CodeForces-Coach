@@ -13,7 +13,8 @@
  *   ⑤ 假自信率：链**声称已验证**但被外部 oracle 判 WA 的比例（cf-coach 最有价值的指标之一）
  *
  * 判"对"的口径（写在输出里，评审要看）：差分对拍 AC 为准；
- * 没有 oracle 只有官方样例的题，只能算"样例级通过"，单独计数、不与差分 AC 混为一谈。
+ * 差分跑不了（缺 oracle 或缺数据生成器）而只有官方样例的题，只能算"样例级通过"，
+ * 单独计数、不与差分 AC 混为一谈。
  */
 'use strict';
 
@@ -26,7 +27,10 @@ function pairKey(x) {
 function acOf(v) {
   if (!v) return { ac: false, strength: 'none' };
   if (v.diffVerdict === 'AC') return { ac: true, strength: 'diff' };
-  if (v.diffVerdict === 'no-oracle' && v.sampleVerdict === 'AC') return { ac: true, strength: 'samples' };
+  // 差分跑不了（缺 oracle 或缺生成器）时只能看官方样例：单独标成 samples 级证据，绝不与差分 AC 混为一谈
+  if ((v.diffVerdict === 'no-oracle' || v.diffVerdict === 'no-gen') && v.sampleVerdict === 'AC') {
+    return { ac: true, strength: 'samples' };
+  }
   return { ac: false, strength: 'none' };
 }
 

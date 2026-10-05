@@ -328,6 +328,17 @@ data/
   **C++ cannot be sandboxed that way** — only timeouts and process-tree cleanup apply, so use models you trust.
 - The rich document runs in a sandboxed iframe with a CSP that blocks all external requests.
 
+### When something breaks on someone else's machine
+
+Everything above stays on that machine — which is exactly why debugging it remotely used to be guesswork.
+**Settings → Data & storage → Diagnostics bundle** writes one plain-text `.txt` with the environment (app /
+Electron / Chromium version, data dirs), the model config, the app and fetch logs, the statement-cache ledger,
+every workspace's verification verdict, the tail of the last few conversations, and the ablation records
+including the **per-step tool trace** of each run. API keys, cookies, e-mails and OS usernames are masked, and
+no full statement or full solution text is included, so the file can be sent as-is. If the UI will not even
+start, the same file comes from the command line: `node scripts/diag.js --out diag.txt`
+(full details: [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)).
+
 ### Fetching from Codeforces
 
 Codeforces' plain HTML pages are behind Cloudflare, so a plain HTTP request can meet `403 + cf-mitigated:
@@ -380,9 +391,10 @@ lib/skills.js        skill discovery and loading (frontmatter, catalog/body spli
 lib/cfreview.js      post-contest review: submission aggregation, editorial fetch + per-problem slicing, source code
 lib/llm.js           provider calls (OpenAI- / Anthropic-compatible); lib/agentloop.js  the conversational tool loop
 lib/sandbox.js       Python/Node sandbox guards
+lib/diagbundle.js    diagnostics bundle: environment / logs / cache ledger / verdicts / per-step tool trace, masked
 skills/              skill library: one SKILL.md per directory (cf-explain / cf-fetch / cf-debug / cf-verify / cf-doc / cf-review)
 public/              build-free frontend: index.html, styles.css, js/app.js + js/md.js, rich/ (document stylesheet + script), vendor/
-scripts/             mock LLM/CF servers, unit & end-to-end tests, probes, packaging, icons
+scripts/             mock LLM/CF servers, unit & end-to-end tests, probes, packaging, icons, diagnostics CLI
 electron/            desktop shell: window, tray, menu, smoke self-test, CF fetch browser channel
 .probe/              developer probes (concurrency timing, document rendering/leaks, round auditing)
 ```
@@ -393,7 +405,7 @@ electron/            desktop shell: window, tray, menu, smoke self-test, CF fetc
 
 ```bash
 npm test                  # end-to-end: boots mock services with an isolated data dir, 258 checks
-npm run test:units        # 10 unit suites (harness / evidence gate / runner / ablation, …)
+npm run test:units        # 11 unit suites (anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation)
 npm run test:harness      # orchestrator unit tests (contract slicing, sample isolation, workspace, rich docs)
 npm run test:runner       # runner unit tests (compile / compare / timeout / C++23); also test:parallel | test:agentruns
 node scripts/run-smoke.js # desktop smoke test (hidden window; prints SMOKE_OVERALL PASS)
@@ -401,8 +413,10 @@ node scripts/run-smoke.js --packaged   # same, driving the packaged app's real U
 npm run mock              # mock LLM endpoint on :3999
 npm run mock-cf           # mock Codeforces on :3998
 npm run pack              # build the portable folder dist/CFCoach-win32-x64 (keeps data/ next to the exe)
-npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (34 files)
-npm run test:skills       # 78 skill checks (skill system + tool layer, no network)
+npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (35 files)
+npm run test:skills       # 79 skill checks (skill system + tool layer, no network)
+npm run test:diagbundle   # diagnostics-bundle tests (nothing sensitive survives, sections, truncation, CLI)
+npm run diag              # write a diagnostics bundle: node scripts/diag.js --out diag.txt
 npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/L2/judging/paired compare)
 npm run probe:ablation    # ablation probes: run / judge / import-l2 / selftest, all zero-token
 npm run probe:ui          # end-to-end probe of the manual ablation workbench (zero tokens)
@@ -414,6 +428,7 @@ node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: sub
 ```
 
 Pushing and releasing (three commands, a pre-push checklist, common errors): see [docs/PUSHING.md](docs/PUSHING.md).
+Debugging a machine you cannot reach (how to package the whole crime scene into one masked text file): see [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
 
 **Ablation study (how we show it beats a bare model)**: `ablation/` ships runners for L0 (bare model, no tools) and
 L1 (bare agent + generic tools + an explicit "stress-test it yourself" prompt); L2 is cf-coach itself. Judging uses the

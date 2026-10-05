@@ -81,8 +81,13 @@ async function judgeRecord(rec, problem, opts) {
     else if (r.status === 'ok') out.diffVerdict = 'AC';
     else if (r.status === 'mismatch') { out.diffVerdict = 'WA'; out.detail = out.detail || ('差分第 ' + r.iteration + ' 组不一致'); out.counterExample = { input: r.input, expected: r.expected, actual: r.actual }; }
     else { out.diffVerdict = 'run-error'; out.detail = out.detail || (r.which + '：' + r.detail); }
+  } else if (oracle) {
+    // 有 oracle、没有生成器：差分跑不了，但缺的**不是** oracle（测试台点「自动写生成器」就能补）
+    out.diffVerdict = 'no-gen';
+    out.detail = out.detail || '有 oracle 但没有数据生成器：差分对拍跑不了（先在测试台点「自动写生成器」/「补生成器」再判分）';
   } else {
     out.diffVerdict = 'no-oracle';
+    out.detail = out.detail || '没有 oracle：差分对拍跑不了（oracle 必须是外部提供的 AC 代码，不能是 cf-coach 自己的产出）';
   }
   // 假自信：链说"已验证"、外部 oracle 却判它错 —— 这是验证链最该被追问的一种失败
   if (out.assertedVerified) out.falseConfidence = (out.diffVerdict === 'WA');
@@ -145,13 +150,14 @@ async function judgeAll(opts, hooks) {
 
   const byLevel = {};
   for (const v of verdicts) {
-    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, asserted: 0, falseConfidence: 0 };
+    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0 };
     g.total++;
     if (v.sampleVerdict === 'AC') g.sampleAC++;
     if (v.diffVerdict === 'AC') g.diffAC++;
     if (v.diffVerdict === 'AC' && (v.sampleVerdict === 'AC' || v.sampleVerdict === 'skipped')) g.both++;
     if (v.sampleVerdict === 'no-code') g.noCode++;
     if (v.diffVerdict === 'no-oracle') g.noOracle++;
+    if (v.diffVerdict === 'no-gen') g.noGen++;
     if (v.assertedVerified === true) g.asserted++;
     if (v.falseConfidence) g.falseConfidence++;
   }
@@ -159,7 +165,7 @@ async function judgeAll(opts, hooks) {
   for (const [lv, g] of Object.entries(byLevel)) {
     const pct = (n) => g.total ? Math.round((n / g.total) * 100) + '%' : '—';
     log(lv.padEnd(3) + ' n=' + g.total + '  样例通过 ' + g.sampleAC + '(' + pct(g.sampleAC) + ')'
-      + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle
+      + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
       + (g.asserted ? '  声称已验证 ' + g.asserted + '（其中假自信 ' + g.falseConfidence + '）' : ''));
   }
 

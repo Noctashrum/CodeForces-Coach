@@ -65,6 +65,10 @@ if (app.isPackaged && !process.env.CHATBOX_DATA_DIR) {
 const DATA_DIR = process.env.CHATBOX_DATA_DIR || path.join(ROOT_DIR, 'data');
 process.env.HOST = '127.0.0.1';
 
+// 诊断包要读 userData 下的 cf-diag.log：这里把 Electron 的权威路径告诉服务进程，
+// 免得诊断包按 "APPDATA/codeforces-coach" 猜（改过 app 名就会猜错）。
+try { process.env.CFCOACH_USER_DATA = app.getPath('userData'); } catch { /* 拿不到就退回默认猜测 */ }
+
 // 必须在窗口创建前引入服务（server.js 顶部会读取 CHATBOX_DATA_DIR）
 const { startServer, setSubmissionBrowserFetch, setEditorialBrowserFetch, setChallengeWindowOpener, setCfLoginOpener, setCfWarmOpener } = require(path.join(ROOT_DIR, 'server.js'));
 const cfClient = require(path.join(ROOT_DIR, 'lib', 'cf.js'));

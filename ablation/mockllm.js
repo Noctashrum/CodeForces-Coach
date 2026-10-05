@@ -159,6 +159,12 @@ function scriptFor(body, opts) {
     return { text: mdExplain(code) };
   }
   const has = (n) => names.indexOf(n) >= 0;
+  if (opts.l1NoCode) {
+    // 模拟 2268A 那次**真实**失败：模型一直写辅助脚本，正解从未落盘，正文也没给代码块。
+    // 用途：验证 runL1 的收尾兜底（追问一次"只要最终代码"）真的能把交付物救回来。
+    if (steps === 0 && has('write_file')) return { call: { name: 'write_file', args: { path: 'brute.py', content: BRUTE } } };
+    return { text: '我先把枚举脚本和暴力解写好了，最终正解我还在整理，稍等一下。' };
+  }
   if (steps === 0 && has('write_file')) return { call: { name: 'write_file', args: { path: 'brute.py', content: BRUTE } } };
   if (steps === 1 && has('write_file')) return { call: { name: 'write_file', args: { path: 'gen.py', content: GEN } } };
   if (steps === 2 && has('write_file')) return { call: { name: 'write_file', args: { path: 'solution.py', content: code } } };
@@ -237,7 +243,8 @@ if (require.main === module) {
   const i = args.indexOf('--port');
   if (i >= 0) port = parseInt(args[i + 1], 10) || 3999;
   const wrong = args.indexOf('--wrong') >= 0;
-  startMockLlm({ port, wrong }).then((s) => {
+  const l1NoCode = args.indexOf('--l1-nocode') >= 0;
+  startMockLlm({ port, wrong, l1NoCode }).then((s) => {
     console.log('[mock-ablation] listening on ' + s.url);
     console.log('[mock-ablation] 用法示例：node ablation/run.js --base-url ' + s.url + ' --api-key mock --model mock-gpt-4 --level L0,L1 --problems example-ab');
   });
