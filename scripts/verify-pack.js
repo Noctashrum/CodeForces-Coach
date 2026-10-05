@@ -53,6 +53,10 @@ check('诊断包：服务端路由', 'server.js', ['/api/diag/export', '/api/dia
 check('诊断包：设置页入口', 'public/js/app.js', ['data-ds-diag', 'data-ds-diagfile', '/api/diag/export']);
 check('诊断包：主进程交底 userData（免得靠猜 APPDATA）', 'electron/main.js', ['CFCOACH_USER_DATA']);
 
+// 取题：可见窗口接管时的 -3 重试。158A 实测（2026-10-05）：hidden 阶段超时后，
+// 可见窗口因为 loadURL().catch 这条路径没过滤 -3，0.5 秒就判失败 → 表现为"稳定扒不到题"。
+check('取题：可见窗口接管时的 -3 重试', 'electron/main.js', ['isAbortError', 'startLoad', '初始导航被取代']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);

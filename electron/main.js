@@ -305,6 +305,35 @@ function fetchHtmlViaBrowserNow(url, opts) {
       diagFail('题面抓取：页面加载失败 ' + code + ' ' + desc + '（' + url + '）');
       done(new Error('页面加载失败 ' + code + ' ' + desc));
     };
+    /**
+     * ⚠️ `loadURL()` **自己返回的 promise** 也必须按同一口径过滤 -3。
+     *
+     * cf-diag.log 实证（2026-10-05，158A）：隐藏阶段超时后，两段式的第二段（可见窗口）
+     * 刚起步 0.5 秒就 `(-3) loading '...'` —— 走的是 `loadURL().catch(done)` 这条路径，
+     * 上面 onFail 里那层 -3 过滤根本没生效。后果很具体：可见窗口**不等用户点验证框**
+     * 就直接失败，用户看到的永远是"稳定取不出来"（挑战只有在隐藏窗口侥幸过了才成功）。
+     * 改成：-3 = "这次导航被取代"，隔 800ms 重来；连试 4 次仍被取代才交给本阶段的超时
+     * 裁决（可见窗口有 60 秒挑战预算，足够用户点一下 "Verify you are human"）。
+     */
+    const isAbortError = (e) => /-3\b|ERR_ABORTED|ERR_ABORT/i.test(
+      String((e && (e.message || e.code || e.errno)) || e || ''));
+    let navTries = 0;
+    const startLoad = () => {
+      navTries++;
+      win.loadURL(url).catch((e) => {
+        if (settled) return;
+        if (isAbortError(e)) {
+          if (navTries < 4) {
+            console.log('[cf] 初始导航被取代（-3），第 ' + navTries + ' 次重试: ' + url);
+            setTimeout(() => { if (!settled) startLoad(); }, 800);
+            return;
+          }
+          console.log('[cf] 初始导航连续 ' + navTries + ' 次被取代（-3），交给本阶段超时裁决: ' + url);
+          return;
+        }
+        done(e);
+      });
+    };
 
     try {
       // 隐藏窗口的预算**故意短**：它只是"安静的第一枪"，过不了挑战就赶紧交给可见窗口。
@@ -317,7 +346,7 @@ function fetchHtmlViaBrowserNow(url, opts) {
       console.log('[cf] 开始浏览器抓取: ' + url);
       win.webContents.on('did-finish-load', onFinish);
       win.webContents.on('did-fail-load', onFail);
-      win.loadURL(url).catch((e) => done(e));
+      startLoad();
     } catch (e) {
       done(e);
     }
