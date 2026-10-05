@@ -179,6 +179,23 @@ async function main() {
       !!cffetch.readAppCache('https://codeforces.com/contest/1800/problem/C', { dataDir: fakeData })
       && !!cffetch.readAppCache({ contestId: 1800, index: 'c' }, { dataDir: fakeData }));
 
+    // ⑧c 应用数据目录解析：工作台必须看**应用真正在用的**那个目录
+    //     （用户跑的是打包版 exe，providers 配置与题面缓存都在 dist/<...>/data/，不在仓库 data/）
+    const dNoCfg = path.join(tmp, 'data-no-cfg');
+    const dCfg = path.join(tmp, 'data-with-cfg');
+    fs.mkdirSync(dNoCfg, { recursive: true });
+    fs.mkdirSync(dCfg, { recursive: true });
+    fs.writeFileSync(path.join(dCfg, 'config.json'),
+      JSON.stringify({ providers: [{ id: 'p1', apiKey: 'k', models: ['m1'] }] }), 'utf8');
+    check('数据目录解析：优先挑"有 providers 配置"的那个（打包版 exe 的数据目录）', env.pickDataDir([dNoCfg, dCfg]) === dCfg);
+    check('数据目录解析：都没有配置时退回第一个存在的目录', env.pickDataDir([dNoCfg, path.join(tmp, '不存在')]) === dNoCfg);
+    check('数据目录解析：候选为空也不炸', String(env.pickDataDir([])).length > 0);
+    const keepData = process.env.CFCOACH_APP_DATA;
+    process.env.CFCOACH_APP_DATA = dNoCfg;
+    check('数据目录解析：CFCOACH_APP_DATA 显式覆盖必须赢（探针靠它隔离真实数据）',
+      env.dataDir() === path.resolve(dNoCfg) && cffetch.appDataDir() === path.resolve(dNoCfg));
+    if (keepData === undefined) delete process.env.CFCOACH_APP_DATA; else process.env.CFCOACH_APP_DATA = keepData;
+
     // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);

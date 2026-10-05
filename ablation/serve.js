@@ -63,6 +63,8 @@ const store = uistore.init(ROOT);
 const cfg = env.loadAppConfig();
 const targets = env.resolveTargets(args);
 const params = env.resolveParams(args);
+// 模型配置与题面缓存必须来自同一个应用数据目录（用户跑的是打包版 exe，配置就在 dist/.../data/）
+const APP_DATA = env.dataDir();
 const DEFAULTS = {
   iterations: env.num(args.iterations, 60),
   maxSteps: env.num(args.maxSteps, 20),
@@ -345,6 +347,8 @@ function stateOf() {
     genBusy,
     // 应用自己抓过的题面缓存（纯本地文件，导入不必再过 CF 反爬）—— 界面上列出来一键导入
     appCache: { dir: cffetch.appCacheDir(), ids: cffetch.listAppCache() },
+    // 模型配置与题面缓存来自哪个应用数据目录（界面上要能一眼看到，省得"配置在哪"变成猜谜）
+    appDataDir: APP_DATA,
     job: job ? { running: job.running, cancelled: job.cancelled, startedAt: job.startedAt, done: job.done, total: job.total, current: job.current, opts: job.opts } : null,
     problems: store.list().map((p) => ({
       id: p.id, title: p.title, rating: p.rating, url: p.url, note: p.note, source: p.source,
@@ -485,5 +489,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('人工消融测试台：http://127.0.0.1:' + PORT + '/');
   console.log('数据目录：' + store.dir);
   console.log('模型：' + targets.map((t) => t.providerId + '::' + t.model).join('  ') + '（对拍组数默认 ' + DEFAULTS.iterations + '，L2 语言 ' + DEFAULTS.lang + '，图文文档 ' + (DEFAULTS.rich ? '开' : '关') + '）');
+  const cacheIds = cffetch.listAppCache();
+  console.log('应用数据目录：' + APP_DATA + '（这里出模型配置；题面缓存 ' + (cacheIds.length ? cacheIds.join(', ') : '空') + '）');
   console.log('题库：' + store.problems.length + ' 题' + (store.problems.length ? ('（' + store.problems.map((p) => p.id).join(', ') + '）') : '（先在界面上加题）'));
 });

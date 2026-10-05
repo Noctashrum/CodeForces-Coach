@@ -454,9 +454,11 @@ async function refresh() {
   const cache = (S && S.appCache) || { ids: [] };
   const ids = cache.ids || [];
   if ($('cacheHint')) {
-    $('cacheHint').textContent = ids.length
+    const dir = (S && S.appDataDir) || (cache && cache.dir) || '';
+    $('cacheHint').textContent = (ids.length
       ? ('应用抓过的题：' + ids.join('、') + '（点「导应用缓存」直接导入，不用再过反爬）')
-      : '应用题面缓存是空的：在应用里成功打开一次某道题，题面就会落盘到 data/cf-problems/';
+      : '应用题面缓存是空的：在应用里成功打开一次某道题，题面就会落盘')
+      + (dir ? ('｜应用数据目录：' + dir) : '');
   }
 }
 

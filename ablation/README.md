@@ -49,8 +49,15 @@ node ablation/run.js --base-url http://127.0.0.1:3999/v1 --api-key mock --model 
 
 ```bash
 npm run ablation:serve            # 默认 http://127.0.0.1:4311
-# 只监听 127.0.0.1；模型走 data/config.json（也可以用 --model/--base-url/--api-key 覆盖）
+# 只监听 127.0.0.1
+# 模型与题面缓存都取自**应用真正在用的数据目录**：仓库 data/ 或打包产物 dist/<...>/data/，
+# 哪个里有 providers 配置就用哪个（所以你跑打包版 exe 时不必再配一遍 key）；
+# 想临时换模型：npm run ablation:serve -- --model deepseek-v4-pro（也支持 --base-url/--api-key）
 ```
+
+启动时会打印用了哪个应用数据目录、哪个模型、缓存里已有哪些题；`/api/state` 的 `appDataDir`
+也是同一个值（页面上「导应用缓存」那一行会显示）。如果两个目录都没有 providers，脚本会报错并列出
+它找过哪些路径 —— 要么在应用里配一个服务商，要么用 `--base-url/--api-key/--model` 直接给。
 
 页面上能做的事：
 

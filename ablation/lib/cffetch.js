@@ -23,6 +23,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const env = require('./env');
 
 const ROOT = path.join(__dirname, '..', '..');
 
@@ -191,10 +192,11 @@ function toStoreProblem(p) {
  * 缓存结构和 fetchProblem 返回的 problem 完全一样，所以 toStoreProblem 能直接复用。
  * ------------------------------------------------------------------ */
 
-/** 应用数据目录（默认仓库里的 data/，可用 CFCOACH_APP_DATA 或 opts.dataDir 覆盖） */
+/** 应用数据目录：与模型配置同一个目录（env.dataDir 负责挑：仓库 data/ 或打包产物 dist/<...>/data/），
+ *  这样"模型配置来自 A、题面缓存却去 B 找"这种自相矛盾不会发生 */
 function appDataDir(opts) {
   const o = opts || {};
-  return o.dataDir || process.env.CFCOACH_APP_DATA || path.join(ROOT, 'data');
+  return o.dataDir || env.dataDir();
 }
 
 /** 题面缓存目录 */

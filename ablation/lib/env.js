@@ -17,10 +17,51 @@ const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..', '..');
 
+/**
+ * 应用数据目录的解析顺序（**工作台必须看应用真正在用的那个目录**）：
+ *   1. `CHATBOX_DATA_DIR` / `CFCOACH_APP_DATA`（显式覆盖，探针与自测靠它隔离）；
+ *   2. 仓库里的 `data/`（开发态跑应用时用的就是它）；
+ *   3. 打包产物 `dist/<...>/data/`（**用户跑的是打包版 exe，配置与题面缓存都在这里**）。
+ * 2 与 3 里挑"有 providers 配置"的那个 —— 模型服务、题面缓存、工作区都从同一个目录来，
+ * 否则会出现"模型配置来自 A、题面缓存却去 B 找"这种自相矛盾的状态。
+ */
+function hasProviders(dir) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+    return Array.isArray(cfg.providers) && cfg.providers.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function packedDataDirs() {
+  const out = [];
+  try {
+    for (const name of fs.readdirSync(path.join(ROOT, 'dist'))) {
+      if (/^(CFCoach|cfcoach)/i.test(name)) out.push(path.join(ROOT, 'dist', name, 'data'));
+    }
+  } catch { /* 没打过包 */ }
+  return out;
+}
+
+/** 候选目录（按优先级），供报错信息与探针使用 */
+function dataDirCandidates() {
+  const env = process.env.CHATBOX_DATA_DIR || process.env.CFCOACH_APP_DATA;
+  if (env) return [path.resolve(env)];
+  return [path.join(ROOT, 'data')].concat(packedDataDirs());
+}
+
+/** 从候选里挑一个：优先"有 providers 配置"的，其次第一个存在的，兜底最后一个 */
+function pickDataDir(cands) {
+  const list = Array.isArray(cands) ? cands.filter(Boolean) : [];
+  if (!list.length) return path.join(ROOT, 'data');
+  const withProviders = list.find((d) => hasProviders(d));
+  if (withProviders) return withProviders;
+  return list.find((d) => fs.existsSync(d)) || list[list.length - 1];
+}
+
 function dataDir() {
-  return process.env.CHATBOX_DATA_DIR
-    ? path.resolve(process.env.CHATBOX_DATA_DIR)
-    : path.join(ROOT, 'data');
+  return pickDataDir(dataDirCandidates());
 }
 
 function loadAppConfig() {
@@ -100,7 +141,9 @@ function resolveTargets(args) {
       || providers.find((p) => p.apiKey)
       || providers[0];
     if (!provider) {
-      throw new Error('没有可用模型服务：data/config.json 里没有 providers，且没给 --base-url');
+      throw new Error('没有可用模型服务：' + dataDirCandidates().join(' / ')
+        + ' 里都没有 config.json 的 providers。两种修法：① 在应用里配一个服务商（配置就写在应用的数据目录里）；'
+        + '② 直接给命令行参数，例如 --base-url https://api.deepseek.com --api-key sk-… --model deepseek-flash');
     }
   }
   const models = listOf(args.model);
@@ -128,6 +171,9 @@ function resolveParams(args) {
 module.exports = {
   ROOT,
   dataDir,
+  dataDirCandidates,
+  pickDataDir,
+  hasProviders,
   loadAppConfig,
   parseArgs,
   listOf,
