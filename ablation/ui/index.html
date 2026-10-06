@@ -14,6 +14,9 @@
   h2 { font-size:14px; margin:0 0 8px; color:var(--dim); font-weight:600; }
   .toolbar { display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; }
   .toolbar label { color:var(--dim); display:flex; gap:4px; align-items:center; }
+  .lvpick { display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:4px 8px; }
+  .lvpick label { color:var(--fg); }
+  .ladder td.lv-cell { white-space:nowrap; }
   input,select,textarea,button { background:var(--panel2); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font:inherit; }
   textarea { width:100%; min-height:120px; font-family:Consolas,monospace; font-size:12px; }
   button { cursor:pointer; }
@@ -54,22 +57,35 @@
     <label>L2 语言 <select id="lang"><option value="python">python</option><option value="cpp">cpp</option></select></label>
     <label>讲解深度 <select id="depth"><option>L3</option><option>L2</option><option>L1</option></select></label>
     <label><input id="rich" type="checkbox" checked> 生成图文文档</label>
-    <label><input id="withL1" type="checkbox"> 也跑 L1（工具 agent 档）</label>
+    <span class="lvpick">
+      <span class="dim small">档位</span>
+      <label title="L0 裸模型：一次调用、没有工具、没有循环、没有验证。厂商宣称的 rating 上限就是这一档。"><input id="lvL0" type="checkbox" checked> L0 裸模</label>
+      <label title="L0C：与 L0 逐字相同的题面与 system，只多一句「这一轮只输出一个代码块」。用来把「不懂」和「没交出来」分开 —— 实测同一份提示词加这一句，r2300/r2600 从 0/2 AC 变 2/2 AC。"><input id="lvL0C" type="checkbox"> L0 只给代码块</label>
+      <label title="L1 裸 agent：同一个工具循环 + 通用工具面（写文件/读文件/运行/对拍）。"><input id="lvL1" type="checkbox"> L1 agent</label>
+      <label title="L2 cf-coach 本体：工具链 + 三件套 + 判据 + 证据门 + 图文文档。"><input id="lvL2" type="checkbox" checked> L2 cf-coach</label>
+    </span>
+    <label title="同一 (题×档) 跑几遍。单次调用方差很大（实测同一题同一档有 1/3 的概率交不出代码），只跑一遍的「通过/不通过」当不了证据。">重复次数 <input id="reps" type="number" min="1" max="20" value="1" style="width:52px"></label>
+    <label title="单次模型调用超时（分钟）。12 是历史默认值：实测难题单次思考 681–716s，撞上就被中止，而且那不是答错。跑 r2300+ 建议 32。">单次超时 <input id="timeout" type="number" min="1" max="180" value="12" style="width:56px"> 分钟</label>
     <button id="btnAdd">＋ 加题</button>
     <button id="btnRunSel" class="primary">跑选中题</button>
-    <button id="btnRunAll">跑全部（缺的档）</button>
+    <button id="btnRunAll">跑全部（勾的档位）</button>
     <button id="btnJudge">判分 + 配对比较</button>
     <button id="btnGens" title="给「有 oracle 但没生成器」的题各写一个随机数据生成器（一题一次模型调用 + 跑代码体检）">补生成器</button>
     <button id="btnExport">导出 JSON</button>
-    <button id="btnDiag" title="导出这台机器上的完整证据包（纯文本）：环境、日志、题库与 oracle/生成器台账、每一跑的工具轨迹、判分与配对结果。key/cookie/邮箱/用户名已打码；不会带解题代码正文。">导出诊断包</button>
+    <button id="btnDiag" title="导出一个纯文本证据包（这台机器上的完整现场）：环境与机器名、工作台运行日志（终端输出）、本轮设置、rating 阶梯、每一跑的明细（含重复次数/撞顶/中止）、题库与 oracle/生成器台账、工具轨迹、判分与配对结果。apiKey/cookie/邮箱/用户名已打码，不含解题代码正文。测试在别的机器上跑时，把这个文件发回来就行。">导出诊断包（发回日志）</button>
     <button id="btnCancel">取消</button>
   </div>
   <div id="progress" class="small dim" style="margin-top:6px"></div>
+  <div id="hostHint" class="small dim" style="margin-top:2px"></div>
 </header>
 
 <main>
   <div>
     <section id="summary"></section>
+    <section id="ceilingSection">
+      <h2>rating 阶梯（这一档的 rating 上限在哪）</h2>
+      <div id="ceiling"></div>
+    </section>
     <section>
       <h2>题目（勾选 → 跑 / 点标题 → 看对比）</h2>
       <div id="problems"></div>
@@ -211,10 +227,78 @@ function renderSummary() {
   $('summary').innerHTML = html;
 }
 
+/* ---------------- rating 阶梯：直面"这一档的上限在哪" ---------------- */
+
+/**
+ * 阶梯的**规则不在这里**：服务端 `ablation/lib/ladder.js` 是唯一实现，
+ * 随 /api/state 的 `ladder` 字段送过来（诊断包里也是同一份）。
+ * 界面只负责渲染 —— 读数规则一旦被抄成第二份，走样的方向永远是"把上限报低"。
+ */
+const KIND_CLS = {
+  ac: 'b-ok', fail: 'b-bad', unfinished: 'b-warn', nocode: 'b-dim',
+  unreliable: 'b-warn', noruler: 'b-warn', ran: 'b-dim', none: 'b-dim'
+};
+
+function renderCeiling() {
+  const L = S.ladder;
+  if (!L) {
+    $('ceiling').innerHTML = '<div class="dim">没有收到 rating 阶梯数据（工作台服务是旧的）：重启 <code>node ablation/serve.js</code> 再刷新这一页。</div>';
+    return;
+  }
+  if (!(L.rows || []).length) { $('ceiling').innerHTML = '<div class="dim">还没有题：加题（带 rating）后这里会按 rating 排成阶梯。</div>'; return; }
+
+  const levels = (L.levels || []).map((g) => g.level);
+  const t = L.totals || {};
+  let html = '<div class="kpi">';
+  for (const g of (L.levels || [])) {
+    const st = g.stats || { n: 0 };
+    html += '<div>' + esc(g.level) + '<span class="small dim"> ' + esc(g.hint || (S.levelHint && S.levelHint[g.level]) || '') + '</span>'
+      + '<b>' + (g.acMax ? 'r' + g.acMax.rating : '—') + '</b>'
+      + '<span class="small dim">' + (g.acMax ? '最高差分 AC：' + esc(g.acMax.id) : '还没有差分 AC') + '</span>'
+      + '<span class="small dim">' + (g.failMin ? '首次可信失败：r' + g.failMin.rating + '（' + esc(g.failMin.id) + '）' : '没有可信失败') + '</span>'
+      + '<span class="small dim">' + esc(g.verdict || '') + '（' + (st.n || 0) + ' 次）</span></div>';
+  }
+  html += '</div>';
+  html += '<div class="small dim" style="margin:6px 0">读法：' + esc(L.note || '') + '</div>';
+  html += '<div class="small dim" style="margin:6px 0">稳健性：' + esc(L.evidence || '') + '</div>';
+
+  html += '<table class="ladder"><thead><tr><th style="width:70px">rating</th><th style="width:110px">题</th>'
+    + levels.map((lv) => '<th>' + esc(lv) + '</th>').join('') + '<th>跑况（token / 中止 / 撞顶 / 花费）</th></tr></thead><tbody>';
+  for (const r of (L.rows || [])) {
+    html += '<tr><td><b>' + (r.rating ? r.rating : '—') + '</b></td><td><a href="#" data-open="' + esc(r.id) + '">' + esc(r.id) + '</a></td>';
+    for (const lv of levels) {
+      const c = (r.cells && r.cells[lv]) || { kind: 'none', text: '未跑' };
+      let cell = '<span class="badge ' + (KIND_CLS[c.kind] || 'b-dim') + '">' + esc(c.text) + '</span>';
+      if (c.n > 1) cell += ' <span class="small dim">' + c.n + ' 遍·有码 ' + (c.withCode || 0) + '</span>';
+      if (c.falseConfidence) cell += ' <span class="badge b-bad">假自信</span>';
+      html += '<td class="lv-cell">' + cell + '</td>';
+    }
+    // 跑况取所有档的合计（一眼看出这道题是不是在"烧钱没结果"）
+    const s = r.stats || { n: 0 };
+    const mins = s.n ? Math.round((s.ms || 0) / 60000) : 0;
+    html += '<td class="small">' + (s.n ? (s.n + ' 次 · 输出 ' + (s.out || 0).toLocaleString() + ' tok · ' + mins + ' 分钟'
+      + (s.priced ? ' · ' + money(s.cost) + (s.priced < s.n ? '<span class="dim">（' + (s.n - s.priced) + ' 次未计费/中止）</span>' : '') : '')
+      + (s.aborted ? ' · <span style="color:var(--warn)">中止 ' + s.aborted + '</span>' : '')
+      + (s.truncated ? ' · <span style="color:var(--warn)">撞顶 ' + s.truncated + '</span>' : '')) : '<span class="dim">—</span>') + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+
+  if (t.aborted || t.truncated) {
+    html += '<div class="small" style="color:var(--warn);margin-top:6px">⚠️ 这批数据里有 <b>' + (t.aborted || 0) + '</b> 次被中止、<b>' + (t.truncated || 0) + '</b> 次撞长度上限：'
+      + '它们不是答错，统计时别算进"不会做"。跑难题把上面的「单次超时」调到 32 分钟。</div>';
+  }
+  if (t.unpriced) html += '<div class="small dim" style="margin-top:4px">另有 ' + t.unpriced + ' 次没有花费记录（中止/异常），成本统计会偏低。</div>';
+  const lower = (L.levels || []).filter((g) => g.acMax).map((g) => g.level + ' 至少 r' + g.acMax.rating);
+  if (lower.length) html += '<div class="small dim" style="margin-top:4px">下界（已证能到这）：' + esc(lower.join('；')) + '。</div>';
+  $('ceiling').innerHTML = html;
+  document.querySelectorAll('#ceiling [data-open]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openDetail(a.dataset.open); }));
+}
+
 function renderProblems() {
   const rows = (S.problems || []).map((p) => {
-    const r0 = recOf('L0', p.id); const r2 = recOf('L2', p.id); const r1 = recOf('L1', p.id);
-    const v0 = verdictOf('L0', p.id); const v2 = verdictOf('L2', p.id);
+    const r0 = recOf('L0', p.id); const r2 = recOf('L2', p.id); const r1 = recOf('L1', p.id); const r0c = recOf('L0C', p.id);
+    const v0 = verdictOf('L0', p.id); const v2 = verdictOf('L2', p.id); const v0c = verdictOf('L0C', p.id);
     const h = humanOf(p.id);
     const choiceTxt = h ? ({ coach: 'L2 更好', l2: 'L2 更好', tie: '打平', l0: 'L0 更好', base: 'L0 更好', 'both-bad': '两个都不行', 'both-good': '两个都好' }[String(h.choice).toLowerCase()] || h.choice) : '';
     return '<tr class="' + (detailId === p.id ? 'sel' : '') + '">'
@@ -223,7 +307,9 @@ function renderProblems() {
       + '<td><a href="#" data-open="' + esc(p.id) + '">' + esc(p.title || '') + '</a>'
       + (p.url ? ' <a class="small" href="' + esc(p.url) + '" target="_blank">CF</a>' : '')
       + '<div class="small dim">' + (p.samples || []).length + ' 组样例 · ' + (p.hasOracle ? 'oracle ' + esc(p.oracleLang) : '<span style="color:var(--warn)">无 oracle</span>') + (p.hasGen ? ' · 有生成器' : ' · <span style="color:var(--warn)">无生成器</span>') + (p.note ? ' · ' + esc(p.note) : '') + '</div></td>'
-      + '<td>' + (r0 ? verdictBadge(v0) : '<span class="badge b-dim">未跑</span>') + '</td>'
+      + '<td>' + (r0 ? verdictBadge(v0) : '<span class="badge b-dim">未跑</span>')
+      + (r0c ? '<div class="small" style="margin-top:3px">L0C ' + verdictBadge(v0c) + '</div>' : '')
+      + (r1 ? '<div class="small" style="margin-top:3px">L1 ' + verdictBadge(verdictOf('L1', p.id)) + '</div>' : '') + '</td>'
       + '<td>' + (r2 ? verdictBadge(v2) + (r2.assertedVerified ? '<div class="small"><span class="badge ' + (r2.verificationStatus === 'ok' && r2.scopeComplete ? 'b-ok' : 'b-warn') + '">' + esc(r2.verificationStatus || '') + (r2.scopeComplete ? '（完整）' : '（不完整）') + '</span></div>' : '') : '<span class="badge b-dim">未跑</span>') + '</td>'
       + '<td class="small">' + (choiceTxt ? esc(choiceTxt) : '<span class="dim">—</span>') + (h && h.note ? '<div class="dim">' + esc(h.note) + '</div>' : '') + '</td>'
       + '<td><button data-edit="' + esc(p.id) + '">编辑</button></td>'
@@ -235,7 +321,7 @@ function renderProblems() {
   document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => openEdit(b.dataset.edit)));
 }
 
-function render() { if (!S) return; $('modelInfo').textContent = (S.targets || []).map((t) => t.providerId + '::' + t.model).join('　'); renderSummary(); renderProblems(); if (detailId) openDetail(detailId); }
+function render() { if (!S) return; $('modelInfo').textContent = (S.targets || []).map((t) => t.providerId + '::' + t.model).join('　'); renderSummary(); renderCeiling(); renderProblems(); if (detailId) openDetail(detailId); }
 
 async function openDetail(id) {
   detailId = id;
@@ -463,21 +549,46 @@ $('btnExport').addEventListener('click', async () => {
   a.download = 'ablation-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json'; a.click();
 });
 
-$('btnDiag').addEventListener('click', () => {
-  // 直接走浏览器的下载通道（服务端带 Content-Disposition），和「导出 JSON」不同：
-  // 这一份是纯文本，人可以直接读、也可以直接贴给开发者。
-  logLine('正在生成诊断包（环境 / 日志 / 题库台账 / 每一跑的工具轨迹 / 判分结果）…');
-  const a = document.createElement('a');
-  a.href = '/api/diag/export';
-  a.click();
+$('btnDiag').addEventListener('click', async () => {
+  // 测试是在别的机器上跑的：这个按钮是"把现场装进一个文件"的唯一出口。
+  // 走 fetch 而不是直接 <a href="/api/diag/export">，是为了拿到回执 ——
+  // 测试者要知道"我发出去的是什么、多大、含哪些段"，否则他只能猜自己该发什么。
+  logLine('正在生成诊断包（环境 / 运行日志 / 题库台账 / 每一跑的工具轨迹 / 判分与 rating 阶梯）…');
+  try {
+    const r = await fetch('/api/diag/export');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const text = await r.text();
+    const name = (String(r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/) || [])[1]
+      || ('cfcoach-diag' + (S && S.host ? '-' + S.host : '') + '.txt');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    const kb = Math.max(1, Math.round(text.length / 1024));
+    const sections = (text.match(/^#+ .+? #+$/gm) || []).map((s) => s.replace(/#+/g, '').trim());
+    logLine('诊断包已下载：<b>' + esc(name) + '</b>（' + kb + ' KB，' + text.split('\n').length + ' 行）'
+      + (sections.length ? '<br>含 ' + sections.length + ' 段：' + esc(sections.slice(0, 12).join(' / ')) : ''));
+    logLine('把<b>这一个文件</b>发回来就行（纯文本，可直接贴聊天窗口）。它已打码 apiKey/cookie/邮箱/用户名，'
+      + '并且不含你写的解题代码正文；同目录还留着完整日志：' + esc((S && S.logFile) || 'server.log'));
+  } catch (e) {
+    logLine('诊断包生成失败：' + esc(e.message) + '（也可以直接开 ' + esc((S && S.logFile) || '数据目录/server.log') + ' 发回来）');
+  }
 });
 
 async function startRun(ids, all) {
   if (!ids.length) return logLine('先勾选要跑的题（或点「跑全部」）');
-  const levels = ['L0', 'L2'].concat($('withL1').checked ? ['L1'] : []);
+  const pick = [['lvL0', 'L0'], ['lvL0C', 'L0C'], ['lvL1', 'L1'], ['lvL2', 'L2']];
+  const levels = pick.filter(([id]) => $(id) && $(id).checked).map(([, lv]) => lv);
+  if (!levels.length) return logLine('先勾一个档位（L0 裸模 / L0 只给代码块 / L1 agent / L2 cf-coach）');
+  const reps = Number($('reps').value) || 1;
+  const callTimeoutMin = Number($('timeout').value) || 12;
   try {
-    await api('/api/run', { ids, levels, iterations: Number($('it').value) || 60, lang: $('lang').value, depth: $('depth').value, rich: $('rich').checked });
-    logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/'));
+    await api('/api/run', {
+      ids, levels, reps, callTimeoutMin,
+      iterations: Number($('it').value) || 60, lang: $('lang').value, depth: $('depth').value, rich: $('rich').checked
+    });
+    logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/') + (reps > 1 ? ' × ' + reps + ' 遍' : '')
+      + '（单次超时 ' + callTimeoutMin + ' 分钟）');
   } catch (e) { logLine('启动失败：' + e.message); }
 }
 
@@ -493,6 +604,13 @@ async function refresh() {
       : '应用题面缓存是空的：在应用里成功打开一次某道题，题面就会落盘')
       + (dir ? ('｜应用数据目录：' + dir) : '');
   }
+  // 这台机器是谁 + 日志在哪：测试在别的机器上跑，收包的人与发包的人都要一眼看得到
+  if ($('hostHint')) {
+    $('hostHint').innerHTML = '这台机器：<b>' + esc((S && S.host) || '?') + '</b>'
+      + '｜数据目录：' + esc((S && S.root) || '?')
+      + '｜运行日志：' + esc((S && S.logFile) || 'server.log')
+      + '　—— 出问题就点「导出诊断包（发回日志）」，把下载到的那个 <b>.txt</b> 发回来。';
+  }
 }
 
 const es = new EventSource('/api/events');
@@ -504,7 +622,9 @@ es.onmessage = (ev) => {
   if (e.type === 'log') logLine(e.text);
   else if (e.type === 'jobStart') { $('progress').textContent = '跑 ' + e.name + '（' + e.done + '/' + e.total + '）…'; logLine('▶ ' + e.name); }
   else if (e.type === 'jobDone') {
-    logLine((e.ok ? '✓' : '✗') + ' ' + e.name + '  ' + Math.round((e.ms || 0) / 1000) + 's' + (e.error ? '  ' + e.error : '') + (e.verification ? '  链自评 ' + (e.verification.status || '') : ''));
+    logLine((e.ok ? '✓' : '✗') + ' ' + e.name + '  ' + Math.round((e.ms || 0) / 1000) + 's' + (e.error ? '  ' + e.error : '') + (e.verification ? '  链自评 ' + (e.verification.status || '') : '')
+      + (e.truncated ? '  ⚠️ 撞长度上限（finish_reason=' + esc(e.finishReason || 'length') + '）' : ''));
+    if (/单次模型调用超时/.test(String(e.error || ''))) logLine('　↳ 这次是撞上单次调用超时被中止，<b>不是答错</b>：把「单次超时」调大（难题 32 分钟）再跑。');
     refresh().catch(() => {});
   }
   else if (e.type === 'runEnd') { $('progress').textContent = '跑完了：' + e.done + '/' + e.total + (e.cancelled ? '（已取消）' : ''); logLine('跑分结束'); refresh().catch(() => {}); }

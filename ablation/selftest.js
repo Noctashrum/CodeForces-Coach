@@ -16,6 +16,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
+const net = require('net');
+const { spawn } = require('child_process');
 const env = require('./lib/env');
 const record = require('./lib/record');
 const levels = require('./lib/levels');
@@ -25,7 +28,10 @@ const cffetch = require('./lib/cffetch');
 const mkgen = require('./lib/mkgen');
 const uistore = require('./lib/uistore');
 const problemsLib = require('./lib/problems');
+const ladderLib = require('./lib/ladder');
+const runlog = require('./lib/runlog');
 const judge = require('./judge');
+const diagbundle = require('../lib/diagbundle');
 const { startMockLlm } = require('./mockllm');
 const runner = require('../lib/runner');
 
@@ -371,6 +377,260 @@ async function main() {
     check('去重：被跳过的记录留了账（latestAudit 能说清谁被顶掉了）',
       dedupe.latestAudit().length === 1 && dedupe.latestAudit()[0].dropped.length === 1
       && dedupe.latestAudit()[0].dropped[0].startedAt === 'T2', JSON.stringify(dedupe.latestAudit()));
+
+    // ⑩ 新档位 L0C = 裸模型 + "只输出一个代码块"（成本 A/B 里唯一有效的干预：0/2 → 2/2）
+    //     唯一变量必须是那段格式要求本身：system 一旦不一样，"不会做"和"没交出来"就混在一起了。
+    {
+      const runC = record.openRun(path.join(tmp, 'l0c'));
+      const base = { problem, statement: problem.statement, target, params, run: runC, maxSteps: 4, iterations: 4 };
+      const recL0 = await levels.runL0(Object.assign({}, base, { name: 'l0' }));
+      const recL0C = await levels.runL0(Object.assign({}, base, { name: 'l0c', codeOnly: true }));
+      check('档位 L0C：level/codeOnly 写进记录，且与 L0 的 system 完全相同（唯一变量只有那段格式要求）',
+        recL0.level === 'L0' && recL0C.level === 'L0C' && recL0C.codeOnly === true && !recL0.codeOnly
+        && recL0.system === recL0C.system,
+        JSON.stringify([recL0.level, recL0C.level, recL0C.codeOnly, recL0.system === recL0C.system]));
+      check('档位 L0C：那段格式要求就是"只输出一个代码块"（与探针里那句同源）',
+        /【格式硬要求】/.test(levels.CODE_ONLY) && levels.CODE_ONLY.indexOf('只输出一个代码块') >= 0);
+      check('档位 L0C：两档在假模型下都抽得到代码（这条路本身跑得通）',
+        !!recL0.code && !!recL0C.code, JSON.stringify([!!recL0.code, !!recL0C.code]));
+      check('档位 L0C：记录里带 finishReason/truncated（撞长度上限要能与"答错"分开）',
+        'finishReason' in recL0C && recL0C.truncated === false,
+        JSON.stringify([recL0C.finishReason, recL0C.truncated]));
+    }
+
+    // ⑪ 工作台界面：rating 阶梯。index.html 里的 JS 以前没有任何测试覆盖，而"裸模 rating 上限"全靠它读。
+    //     用假 DOM 把 <script> 真跑一遍，喂一份构造好的 state，断言阶梯把
+    //     "答错" / "没跑完（中止、撞顶）" / "不可判（多解题、尺子坏了）" 分开 —— 这是读数的命门：
+    //     把中止当成"不会做"，rating 上限就会被系统性低估。
+    {
+      const html = fs.readFileSync(path.join(__dirname, 'ui', 'index.html'), 'utf8');
+      const code = (html.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || '';
+      let syntaxOk = false;
+      try { new vm.Script(code); syntaxOk = true; } catch (e) { /* 下面报 */ }
+      check('工作台：index.html 里的脚本能取到且语法通过', !!code && syntaxOk);
+      check('工作台：四个档位勾选框 + 重复次数 + 单次超时控件都在，旧的 withL1 已清干净',
+        ['lvL0', 'lvL0C', 'lvL1', 'lvL2', 'reps', 'timeout'].every((id) => html.indexOf('id="' + id + '"') >= 0)
+        && html.indexOf('withL1') < 0);
+
+      const P = (id, rating) => ({ id, title: 'T' + id, rating, samples: [{}], hasOracle: true, hasGen: true, oracleLang: 'cpp' });
+      const rec = (level, id, o) => Object.assign({ level, problem: id, model: 'mock', ok: true, hasCode: true, ms: 60000, cost: { amount: 0.1 } }, o || {});
+      const state = {
+        levels: ['L0', 'L0C', 'L1', 'L2'],
+        levelHint: { L0: '裸模型', L0C: '裸模型·只给代码块', L1: '裸 agent', L2: 'cf-coach' },
+        problems: [P('p800', 800), P('p1100', 1100), P('p2300', 2300), P('p2600', 2600), P('p2900', 2900)],
+        records: [], verdicts: [], human: [], compare: null,
+        defaults: { iterations: 60, lang: 'cpp', depth: 'L3', rich: false },
+        root: 'smoke', targets: [{ providerId: 'mock', model: 'mock-gpt-4' }],
+        job: null, appCache: { ids: [], dir: '' }, appDataDir: '', events: [],
+        // L0：r800 AC → r1100 真答错 → r2300 撞长度上限 → r2600 单次调用中止（尺子还不可判）→ r2900 未跑
+        // L0C：AC 到 r2300 为止 → r2600 真答错；r2900 未跑
+        runs: [
+          Object.assign(rec('L0', 'p800'), { usage: { completionTokens: 1200 } }),
+          Object.assign(rec('L0', 'p1100'), { usage: { completionTokens: 2000 } }),
+          Object.assign(rec('L0', 'p2300'), { ok: false, hasCode: false, truncated: true, usage: { completionTokens: 65536 } }),
+          Object.assign(rec('L0', 'p2600'), { ok: false, hasCode: false, cost: null, usage: { completionTokens: 0 }, error: '单次模型调用超时（已到 12 分钟，中止 —— 这不是答错，是没跑完）' }),
+          Object.assign(rec('L0C', 'p800'), { usage: { completionTokens: 900 } }),
+          Object.assign(rec('L0C', 'p1100'), { usage: { completionTokens: 1000 } }),
+          Object.assign(rec('L0C', 'p2300'), { usage: { completionTokens: 1500 } }),
+          Object.assign(rec('L0C', 'p2600'), { usage: { completionTokens: 1800 } })
+        ],
+        verdicts: [
+          { level: 'L0', problem: 'p800', diffVerdict: 'AC', sampleVerdict: 'AC' },
+          { level: 'L0', problem: 'p1100', diffVerdict: 'WA', sampleVerdict: 'AC' },
+          { level: 'L0', problem: 'p2300', diffVerdict: 'no-code', sampleVerdict: 'skipped' },
+          { level: 'L0', problem: 'p2600', diffVerdict: 'unknown', diffUnreliable: true, sampleVerdict: 'skipped' },
+          { level: 'L0C', problem: 'p800', diffVerdict: 'AC', sampleVerdict: 'AC' },
+          { level: 'L0C', problem: 'p1100', diffVerdict: 'AC', sampleVerdict: 'AC' },
+          { level: 'L0C', problem: 'p2300', diffVerdict: 'AC', sampleVerdict: 'AC' },
+          { level: 'L0C', problem: 'p2600', diffVerdict: 'WA', sampleVerdict: 'AC' }
+        ]
+      };
+      state.records = state.runs.map((r) => Object.assign({}, r, { cost: { amount: 0.1 } }));
+      // 阶梯是**服务端**算的（ablation/lib/ladder.js 是唯一实现）—— 这里就喂真算出来的那份：
+      // 于是这段同时守着"规则"和"渲染"，而不是守着一份界面里的抄件。
+      state.ladder = ladderLib.compute({
+        problems: state.problems, runs: state.runs, verdicts: state.verdicts,
+        levels: state.levels, levelHint: state.levelHint
+      });
+      const rows = state.ladder.rows;
+      const kindOf = (id, lv) => (rows.find((r) => r.id === id) || { cells: {} }).cells[lv].kind;
+      check('阶梯规则：撞长度上限的 no-code 记"中止/撞顶"，不是"没交出来"（r2300）',
+        kindOf('p2300', 'L0') === 'unfinished', kindOf('p2300', 'L0'));
+      check('阶梯规则：不可判（尺子坏了）优先于一切，既不算 AC 也不算失败（r2600）',
+        kindOf('p2600', 'L0') === 'unreliable', kindOf('p2600', 'L0'));
+      check('阶梯规则：真答错才是 fail（r1100 的差分 WA）', kindOf('p1100', 'L0') === 'fail', kindOf('p1100', 'L0'));
+      check('阶梯规则：没跑的题是 none（r2900 任何档都没跑）',
+        ['L0', 'L0C'].every((lv) => kindOf('p2900', lv) === 'none'));
+      check('阶梯规则：AC 只是下界 / 首次可信失败给上限（L0 下界 r800、上限 r1100）',
+        (rows.find((r) => r.id === 'p800') || {}).cells.L0.kind === 'ac'
+        && state.ladder.levels[0].acMax.rating === 800 && state.ladder.levels[0].failMin.rating === 1100,
+        JSON.stringify([state.ladder.levels[0].acMax, state.ladder.levels[0].failMin]));
+      // 有"正常跑完"的那次才谈得上可信失败：全部被中止/撞顶时，WA 也不作数。
+      const onlyAborted = ladderLib.compute({
+        problems: [{ id: 'x', rating: 2000 }],
+        runs: [{ level: 'L0', problem: 'x', ok: false, hasCode: false, truncated: true, error: '' }],
+        verdicts: [{ level: 'L0', problem: 'x', diffVerdict: 'WA' }], levels: ['L0']
+      });
+      check('阶梯规则：整题只跑出"中止/撞顶"时，即使差分 WA 也不算可信失败（否则上限被报低）',
+        onlyAborted.levels[0].failMin === null && onlyAborted.levels[0].cells[0].kind === 'unfinished',
+        JSON.stringify(onlyAborted.levels[0].cells));
+      check('阶梯规则：缺 oracle/生成器记"缺尺子"，不能被读成"不会做"',
+        ladderLib.compute({
+          problems: [{ id: 'y', rating: 1500 }],
+          runs: [{ level: 'L0', problem: 'y', ok: true, hasCode: true }],
+          verdicts: [{ level: 'L0', problem: 'y', diffVerdict: 'no-gen' }], levels: ['L0']
+        }).levels[0].cells[0].kind === 'noruler');
+      check('阶梯规则：规则只在这一处实现（界面里不许再抄一份 cellState/CELL_TXT）',
+        !/function cellState|CELL_TXT/.test(fs.readFileSync(path.join(__dirname, 'ui', 'index.html'), 'utf8')));
+
+      const nodes = {};
+      const mkEl = (id) => ({
+        id, innerHTML: '', textContent: '', value: '', checked: false, disabled: false, dataset: {}, style: {},
+        scrollTop: 0, scrollHeight: 0, classList: { add() {}, remove() {} },
+        addEventListener() {}, close() {}, click() {}, insertAdjacentHTML() {}
+      });
+      const sandbox = {
+        document: {
+          getElementById: (id) => (nodes[id] = nodes[id] || mkEl(id)),
+          createElement: () => mkEl('a'), querySelectorAll: () => [], querySelector: () => null,
+          body: { appendChild() {} }
+        },
+        fetch: async () => ({ ok: true, json: async () => state }),
+        EventSource: function () { return { onmessage: null }; },
+        URL: { createObjectURL: () => 'blob:x' },
+        console: { log() {}, warn() {}, error() {} }
+      };
+      vm.createContext(sandbox);
+      vm.runInContext(code, sandbox, { filename: 'ablation/ui/index.html' });
+      await new Promise((r) => setTimeout(r, 40));   // 脚本尾部的 refresh() 是异步的
+      const ladder = String((nodes.ceiling || {}).innerHTML || '');
+      check('工作台：阶梯渲染出来了（state → 视图这条路是通的）',
+        ladder.indexOf('<table class="ladder">') >= 0 && ladder.length > 200, 'len=' + ladder.length);
+      check('工作台：行按 rating 升序（阶梯必须从下往上读）',
+        ['p800', 'p1100', 'p2300', 'p2600', 'p2900'].every((id, i, arr) => i === 0 || ladder.indexOf(arr[i - 1]) < ladder.indexOf(id)));
+      check('工作台：✓ AC / ✗ 差分 WA / 中止·撞顶 / 不可判 四种格子都分开了',
+        ladder.indexOf('✓ AC') >= 0 && ladder.indexOf('✗ 差分 WA') >= 0
+        && ladder.indexOf('中止/撞顶') >= 0 && ladder.indexOf('不可判') >= 0);
+      const acMax = (ladder.match(/最高差分 AC：p\d+/g) || []).join('|');
+      const failMin = (ladder.match(/首次可信失败：r\d+/g) || []).join('|');
+      check('工作台：上限只由可信失败给出 —— L0 的首次失败是 r1100（真答错），中止(r2600)/撞顶(r2300) 都不算失败',
+        acMax === '最高差分 AC：p800|最高差分 AC：p2300' && failMin === '首次可信失败：r1100|首次可信失败：r2600',
+        JSON.stringify([acMax, failMin]));
+      check('工作台：未跑的题显示"未跑"，并提示中止/撞顶不是答错',
+        ladder.indexOf('未跑') >= 0 && ladder.indexOf('它们不是答错') >= 0);
+      check('工作台：花费按 cost.amount 累加（cost 是对象，直接相加会变成字符串拼接），中止那次标"未计费"',
+        /¥0\.2/.test(ladder) && ladder.indexOf('未计费') >= 0, (ladder.match(/¥[\d.]+/g) || []).slice(0, 4).join(','));
+      check('工作台：输出 token 读的是 usage.completionTokens（记录里是 camelCase，读 snake_case 会恒为 0）',
+        ladder.indexOf('输出 2,100 tok') >= 0, (ladder.match(/输出 [\d,]+ tok/g) || []).slice(0, 3).join(' | '));
+      check('工作台：渲染没有把异常吞进日志（加载失败）', String((nodes.log || {}).innerHTML || '').indexOf('加载失败') < 0);
+    }
+
+    // ⑫ 运行日志：测试在**别人机器**上跑，终端里滚过去的现场必须落盘，否则出问题时没有东西可发。
+    {
+      const logFile = path.join(tmp, 'server.log');
+      const origLog = console.log;
+      const rl = runlog.start(logFile, { banner: '工作台启动 v0.0.0-test' });
+      console.log('第一行：普通日志');
+      console.warn('第二行：警告');
+      rl.stop();
+      const text = fs.readFileSync(logFile, 'utf8');
+      check('运行日志：启动横幅 + console.log/warn 都落盘（带时间戳与级别）',
+        text.indexOf('工作台启动 v0.0.0-test') >= 0 && text.indexOf('第一行：普通日志') >= 0
+        && text.indexOf('第二行：警告') >= 0 && /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)
+        && text.indexOf('[warn]') >= 0);
+      check('运行日志：stop() 之后 console 被还原（不能把进程输出一直接管着不放）', console.log === origLog);
+      check('运行日志：note() 能报出日志在哪、多大（界面要拿它告诉测试者发什么）',
+        /server\.log/.test(rl.note()) && /(KB|MB|字节|B)/.test(rl.note()), rl.note());
+      // 日志写不进去时必须只降级：日志不能变成新的故障点
+      // （那条"写不进去"的提醒本来就是要打到屏幕上的，这里只是别让它污染自测输出）
+      const notADir = path.join(tmp, 'plain.txt');
+      fs.writeFileSync(notADir, 'x');
+      const origWarn = console.warn;
+      console.warn = () => {};
+      const bad = runlog.start(path.join(notADir, 'sub', 'server.log'), { banner: 'x' });
+      const badNote = bad.note();
+      const badStopOk = (() => { try { bad.stop(); return true; } catch (e) { return false; } })();
+      console.warn = origWarn;
+      check('运行日志：目录建不出来时只降级（note() 如实说、stop() 不抛、屏幕照常）',
+        badStopOk && /写不|不可|无法|失败/.test(badNote) && console.log === origLog, badNote);
+      check('诊断包文件名是无依赖纯文本（测试者能直接贴聊天窗口，不用解压）',
+        /^cfcoach-diag-\d{8}-\d{6}\.txt$/.test(diagbundle.defaultFileName()), diagbundle.defaultFileName());
+    }
+
+    // ⑬ 工作台端到端：真把 serve.js 起起来走一遍 HTTP。
+    //     用户 m11748 要的是"日志打包功能方便发送" —— 所以这里直接断言 server.log 落盘、诊断包里带着它。
+    {
+      const freePort = await new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.on('error', reject);
+        srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+      });
+      const uiRoot = path.join(tmp, 'ui-e2e');
+      const child = spawn(process.execPath, [
+        path.join(__dirname, 'serve.js'), '--port', String(freePort), '--root', uiRoot,
+        '--base-url', mock.url, '--api-key', 'mock', '--model', 'mock-gpt-4'
+      ], { stdio: 'ignore' });
+      const base = 'http://127.0.0.1:' + freePort;
+      let up = null;
+      try {
+        for (let i = 0; i < 120 && !up; i++) {
+          try {
+            const r = await fetch(base + '/api/state');
+            if (r.ok) up = await r.json();
+          } catch (e) { /* 还没起来 */ }
+          if (!up) await new Promise((r) => setTimeout(r, 100));
+        }
+        check('工作台端到端：serve.js 起得来，/api/state 给出 host / logFile / ladder',
+          !!up && !!up.host && !!up.logFile && !!up.ladder && Array.isArray(up.ladder.rows));
+        const serverLog = path.join(uiRoot, 'server.log');
+        const logText = fs.existsSync(serverLog) ? fs.readFileSync(serverLog, 'utf8') : '';
+        check('工作台端到端：终端输出真的落到 <数据目录>/server.log（屏幕上滚掉也还有）',
+          logText.indexOf('工作台启动') >= 0, serverLog);
+
+        const post = (p, body) => fetch(base + p, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const pr = await post('/api/problems', {
+          id: 'e2e800', title: 'E2E', rating: 800, statement: '给两个数，输出和', samples: [{ input: '1\n', output: '1\n' }],
+          oracleCode: oracleSrc, oracleLang: 'python'
+        });
+        check('工作台端到端：能往题库塞一道题（界面上的"加题"走的就是这条路）', pr.ok);
+        await post('/api/run', { levels: ['L0', 'L0C'], reps: 2, callTimeoutMin: 1, iterations: 1, lang: 'python' });
+        let done = null;
+        for (let i = 0; i < 200 && !done; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          const st = await (await fetch(base + '/api/state')).json();
+          if (st.runs && st.runs.length >= 4) done = st;
+        }
+        const runs = (done || {}).runs || [];
+        const reps = runs.map((r) => r.rep).sort().join(',');
+        check('工作台端到端：L0 + L0C × 重复 2 次 = 4 条记录，rep 落进记录（同题多跑才看得到抖动）',
+          runs.length === 4 && reps === '1,1,2,2' && runs.some((r) => r.level === 'L0C'),
+          runs.length + ' 条 rep=' + reps);
+        check('工作台端到端：阶梯随记录更新（跑过的题不再是"未跑"，裸模上限靠它读）',
+          !!done && done.ladder.rows.length >= 1 && done.ladder.rows[0].cells.L0.kind !== 'none',
+          done ? JSON.stringify(done.ladder.rows[0].cells.L0) : '服务没起来');
+
+        const dr = await fetch(base + '/api/diag/export');
+        const dtext = await dr.text();
+        const disp = dr.headers.get('content-disposition') || '';
+        check('工作台端到端：诊断包里带着运行日志 / rating 阶梯 / 跑分明细（含 rep）',
+          dtext.indexOf('工作台运行日志') >= 0 && dtext.indexOf('rating 阶梯') >= 0
+          && dtext.indexOf('跑分明细') >= 0 && dtext.indexOf('rep=') >= 0);
+        check('工作台端到端：诊断包里写明是**哪台机器**（多机同时测时能分清谁发的）',
+          dtext.indexOf('机器：' + os.hostname()) >= 0, 'host=' + os.hostname());
+        check('工作台端到端：下载文件名也带机器名',
+          disp.indexOf(os.hostname()) >= 0, disp);
+        // 界面的回执要用这个正则数"含几段" —— 分隔符格式变了而正则没跟着改，回执就会说"含 0 段"
+        const sections = (dtext.match(/^#+ .+? #+$/gm) || []);
+        check('工作台端到端：诊断包的段落分隔与界面回执的正则对得上（回执要能数出段数）',
+          sections.length >= 5, sections.length + ' 段');
+      } catch (e) {
+        check('工作台端到端：整个过程没有抛异常', false, (e && e.stack) || String(e));
+      } finally {
+        try { child.kill(); } catch (e) { /* 已经退了 */ }
+      }
+    }
 
     // ⑨ 记录与汇总
     run.writeSummary({ selftest: true });

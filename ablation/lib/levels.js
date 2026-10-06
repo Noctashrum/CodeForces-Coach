@@ -34,6 +34,18 @@ const SYSTEM_L0 = [
   '请给出解题思路与最终代码，用中文说明。'
 ].join('\n');
 
+/**
+ * 「这一轮只输出一个代码块」硬要求 —— L0C 档（裸模 + 代码先行）追加在用户问法末尾。
+ *
+ * 与 .probe/probe-dilution.js 里的 CODE_ONLY **逐字相同**：报告里"同一份提示词 0/2 AC → 2/2 AC、
+ * token −18%、花费 −18%"就是这个开关带来的，改一个字就不是同一个实验了。
+ *
+ * 为什么需要它：输出 token 上限（服务商默认 65,536）截断时保住的是回答的**头部**，
+ * 所以"先讲思路再给代码"在难题上会稳定地一条代码都交不出来。
+ */
+const CODE_ONLY = '\n\n---\n【格式硬要求】这一轮**只输出一个代码块**（```python 或 ```cpp）。'
+  + '不要写任何解释、思路、复杂度、前言或后记 —— 只有代码块。';
+
 async function systemL1() {
   return [
     '你是一位算法竞赛选手。',
@@ -69,23 +81,28 @@ function readSolutionFile(dir, preferLang) {
 
 /**
  * L0：一次调用，不提供任何工具。
- * @param {{problem:object, statement:string, target:object, params:object, run:object, name:string}} ctx
+ * ctx.codeOnly = true 时是 L0C 档（同一份题面 + 「只输出一个代码块」）—— 这两档的差别
+ * 只有那一段格式要求，用来把"到底是不懂还是没交出来"分开。
+ * @param {{problem:object, statement:string, target:object, params:object, run:object, name:string, codeOnly?:boolean}} ctx
  */
 async function runL0(ctx) {
   const { problem, statement, target, params, run, name } = ctx;
+  const codeOnly = !!ctx.codeOnly;
+  const LEVEL = codeOnly ? 'L0C' : 'L0';
   const t0 = Date.now();
   const rec = {
-    level: 'L0', problem: problem.id, model: target.model, providerId: target.providerId,
+    level: LEVEL, problem: problem.id, model: target.model, providerId: target.providerId,
     startedAt: new Date(t0).toISOString(), system: SYSTEM_L0, tools: [],
+    codeOnly,
     statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
-    request: { stream: true, maxTokens: params.maxTokens || null, hasTools: false }
+    request: { stream: true, maxTokens: params.maxTokens || null, hasTools: false, codeOnly }
   };
   try {
     const res = await llm.callModel({
       provider: target.provider,
       model: target.model,
       system: SYSTEM_L0,
-      messages: [{ role: 'user', content: userPrompt(problem, statement) }],
+      messages: [{ role: 'user', content: userPrompt(problem, statement) + (codeOnly ? CODE_ONLY : '') }],
       maxTokens: params.maxTokens || undefined,
       stream: true
     });
@@ -96,13 +113,22 @@ async function runL0(ctx) {
     rec.steps = 1;
     rec.calls = 1;
     rec.toolsUsed = [];
+    // 长度上限是"没跑完"，不是"答错"：记下来，判分/统计时不能把它算成能力证据
+    rec.finishReason = res.finishReason || null;
+    rec.truncated = /length|max_tokens/i.test(String(res.finishReason || ''));
     if (agentloop.hasLeakMarkup(text)) rec.leakMarkup = true;
     const clean = agentloop.stripLeakMarkup(text);
     const code = record.extractFinalCode(clean);
     rec.code = code ? code.code : null;
     rec.codeLang = code ? code.lang : null;
     rec.codeSource = code ? (code.blockIndex >= 0 ? 'answer-block#' + code.blockIndex : 'answer-inline') : null;
-    if (!code) rec.ok = false, rec.error = '回答里没有可用的代码块';
+    if (!code) {
+      rec.ok = false;
+      rec.codeMissing = true;
+      rec.error = rec.truncated
+        ? '回答里没有可用的代码块（输出撞到长度上限 finish_reason=length，正文被截断 —— 这不是答错）'
+        : '回答里没有可用的代码块';
+    }
     rec.answerFile = run.saveAnswer(name, clean);
     rec.transcriptFile = null;
     rec.ms = Date.now() - t0;
@@ -255,4 +281,4 @@ function clipArgs(args) {
   return t.length > 500 ? t.slice(0, 500) + '…' : t;
 }
 
-module.exports = { SYSTEM_L0, systemL1, userPrompt, runL0, runL1, readSolutionFile };
+module.exports = { SYSTEM_L0, CODE_ONLY, systemL1, userPrompt, runL0, runL1, readSolutionFile };

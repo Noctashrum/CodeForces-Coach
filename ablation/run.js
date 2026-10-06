@@ -24,14 +24,16 @@ const levels = require('./lib/levels');
 const l2 = require('./lib/l2');
 const problemsLib = require('./lib/problems');
 const agentloop = require('../lib/agentloop');
+const llm = require('../lib/llm');
 
-const LEVELS = ['L0', 'L1', 'L2'];
+const LEVELS = ['L0', 'L0C', 'L1', 'L2'];
 
 function usage() {
   console.log([
     '消融实验跑分：node ablation/run.js [选项]',
     '',
-    '  --level L0,L1,L2     跑哪些档（默认 L0,L1；L2 = cf-coach 本体无头跑）',
+    '  --level L0,L0C,L1,L2 跑哪些档（默认 L0,L1；L2 = cf-coach 本体无头跑；',
+    '                       L0C = 与 L0 同一份题面，只多一句「这一轮只输出一个代码块」）',
     '  --problems all|1800C,1800D   跑哪些题（默认 all）',
     '  --problems-file PATH 题库清单（默认 ablation/problems.json，缺则用 example）',
     '  --limit N            只跑前 N 题（先做 pilot 用）',
@@ -44,6 +46,7 @@ function usage() {
     '  --max-steps N        L1 工具循环上限（默认 20）',
     '  --iterations N       L1 对拍默认组数（默认 30）',
     '  --jobs N             并行跑几个 (题×档)（默认 1）',
+    '  --call-timeout-min N 单次模型调用超时分钟数（默认 12；难题建议 32）',
     '  --lang python|cpp    L2 用哪种语言交题解（默认 python；L0/L1 由模型自己决定）',
     '  --rich               L2 生成图文文档（更贵；默认关，判分不需要它）',
     '  --depth L1|L2|L3     L2 的讲解深度（默认 L3 = 与产品默认一致；L3 会多一次提纲 Agent）',
@@ -88,6 +91,9 @@ async function main() {
   const maxSteps = env.num(args.maxSteps, 20);
   const iterations = env.num(args.iterations, 30);
   const jobs = Math.max(1, env.num(args.jobs, 1));
+  // 单次调用超时：12 分钟是历史默认值，难题实测会撞上（681–716s 跑完 / 720,0xx ms 被中止）
+  const callTimeoutMin = Math.max(1, env.num(args.callTimeoutMin, 12));
+  llm.setDefaultCallTimeoutMs(callTimeoutMin * 60 * 1000);
 
   console.log('=== 消融实验 ===');
   console.log('题库清单：' + lc.file + (lc.isExample ? '（警告：这是示例清单，请复制成 problems.json 填自己的题）' : ''));
@@ -95,7 +101,8 @@ async function main() {
   if (lc.skipped.length) lc.skipped.forEach((s) => console.log('  · 跳过 ' + s.id + '：' + s.reason));
   console.log('模型：' + targets.map((t) => t.providerId + '::' + t.model).join('  '));
   console.log('档位：' + levelList.join(', ') + '（L2 用 cf-coach 本体跑）');
-  console.log('参数：maxTokens=' + (params.maxTokens || '未设置') + '，stream=true（lib/llm.js 的请求体不含 temperature，三档一致）');
+  console.log('参数：maxTokens=' + (params.maxTokens || '未设置') + '，stream=true（lib/llm.js 的请求体不含 temperature，三档一致）'
+    + '，单次调用超时 ' + callTimeoutMin + ' 分钟');
   console.log('输出：' + outDir);
   if (args.dryRun) {
     for (const p of lc.problems) console.log('  · ' + p.id + ' 题面 ' + (p.statementSha || '缺') + ' 样例 ' + p.samples.length + ' 组 oracle ' + (p.oracle ? '有' : '无'));
@@ -125,7 +132,8 @@ async function main() {
     const name = j.level + '-' + j.problem.id + (targets.length > 1 ? '-' + j.target.model : '');
     const ctx = { problem: j.problem, statement: j.problem.statement, target: j.target, params, run, name, maxSteps, iterations };
     const t0 = Date.now();
-    const rec = j.level === 'L0' ? await levels.runL0(ctx)
+    const rec = (j.level === 'L0' || j.level === 'L0C')
+      ? await levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }))
       : (j.level === 'L1' ? await levels.runL1(ctx) : await l2.runL2(Object.assign({}, ctx, l2opts)));
     const cost = record.costOf(cfg, j.target.providerId, j.target.model, rec.usage);
     rec.cost = cost;

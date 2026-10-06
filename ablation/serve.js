@@ -22,6 +22,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const env = require('./lib/env');
@@ -31,9 +32,12 @@ const l2 = require('./lib/l2');
 const uistore = require('./lib/uistore');
 const cffetch = require('./lib/cffetch');
 const mkgen = require('./lib/mkgen');
+const ladder = require('./lib/ladder');
+const runlog = require('./lib/runlog');
 const judgeLib = require('./judge');
 const workspace = require('../lib/workspace');
 const agentloop = require('../lib/agentloop');
+const llm = require('../lib/llm');
 const diagbundle = require('../lib/diagbundle');
 
 // 项目根（注意与下面的 ROOT 区分：那个是跑分数据目录 store root）
@@ -53,6 +57,8 @@ function usage() {
     '  --base-url URL       直接指定服务商地址（测试用，如本地 mock）+ --api-key KEY',
     '  --max-tokens N       单次输出上限（0/缺省 = 不发这个字段）',
     '  --iterations N       默认对拍组数（默认 60）',
+    '  --reps N             同一 (题×档) 跑几遍（默认 1；界面上的"重复次数"同义）',
+    '  --call-timeout-min N 单次模型调用超时分钟数（默认 12；难题建议 32 —— 实测 12 分钟会砍掉 r2300+）',
     '  --max-steps N        L1 工具循环上限（默认 20）',
     '  --lang python|cpp    L2 交题解的语言（默认 python）',
     '  --depth L1|L2|L3     L2 讲解深度（默认 L3）',
@@ -78,8 +84,80 @@ const DEFAULTS = {
   lang: args.lang === 'cpp' ? 'cpp' : 'python',
   depth: args.depth ? String(args.depth).toUpperCase() : 'L3',
   rich: args.rich === false || args.noRich ? false : env.bool(args.rich, true),
-  maxStressMs: env.num(args.maxStressMs, 90000)
+  maxStressMs: env.num(args.maxStressMs, 90000),
+  // 同一 (题×档) 跑几遍：单次调用的方差很大（实测同一题同一档 1/3 概率交不出代码），
+  // 只跑一遍的"通过/不通过"当不了证据。
+  reps: env.num(args.reps, 1),
+  // 单次模型调用超时（分钟）。默认 12 是 lib/llm.js 的历史默认值，但实测难题上
+  // 单次思考 681–716s、余量只有 0.6%，所以要能在界面上直接调大。
+  callTimeoutMin: env.num(args.callTimeoutMin, 12)
 };
+
+/**
+ * 可跑的档位：
+ *  L0  裸模型（一次调用，无工具）           —— "厂商宣称的 rating 上限"就是这一档
+ *  L0C 裸模型 + 只输出一个代码块            —— 唯一差别是那段格式要求，用来分开"不懂"和"没交出来"
+ *  L1  裸 agent（工具循环 + 通用工具面）
+ *  L2  cf-coach 本体
+ */
+const LEVELS = ['L0', 'L0C', 'L1', 'L2'];
+const LEVEL_HINT = { L0: '裸模型', L0C: '裸模型·只给代码块', L1: '裸 agent', L2: 'cf-coach' };
+
+/* ---------------- 运行日志落盘 ----------------
+ * 测试是在**别人的机器**上跑的：屏幕上滚过去的东西必须留一份在数据目录里，
+ * 否则"我这边跑出来不对"这句话连个现场都没有（诊断包也带不走已经滚掉的屏幕）。
+ * 日志文件跟着跑分数据目录走 —— 那个目录本来就是"这次测试的全部证据"。
+ */
+const RUNLOG = runlog.start(path.join(store.dir, 'server.log'), {
+  banner: '工作台启动 v' + (APP_VERSION || '?') + ' 端口 ' + PORT + ' 数据目录 ' + store.dir
+});
+
+/** 诊断包文件名带上机器名：一台机器一个包，收回来不用猜是谁的。 */
+function diagFileName(now) {
+  const host = String(os.hostname() || '').replace(/[^\w.-]+/g, '-').slice(0, 24);
+  return diagbundle.defaultFileName(now).replace(/^cfcoach-diag-/, 'cfcoach-diag-' + (host ? host + '-' : ''));
+}
+
+/** 运行日志的尾部（诊断包用；文件本身可能已经几 MB，只带尾巴）。 */
+function logTail(maxChars) {
+  try {
+    const text = fs.readFileSync(RUNLOG.file, 'utf8');
+    if (text.length <= maxChars) return text;
+    return '…（只保留最后 ' + Math.round(maxChars / 1000) + 'k 字符；完整文件在数据目录的 server.log）\n'
+      + text.slice(-maxChars);
+  } catch (e) {
+    return '（读不到运行日志：' + ((e && e.message) || e) + '）';
+  }
+}
+
+/** 跑分明细（逐条，含 rep/撞顶/中止 —— 这些字段决定"失败"可不可信）。 */
+function runDetailLines() {
+  return store.records().map((r, i) => {
+    const u = r.usage || {};
+    const out = u.completionTokens != null ? u.completionTokens : u.completion_tokens;
+    return (i + 1) + '. ' + (r.startedAt || '') + ' ' + r.level + '/' + r.problem
+      + (r.rep ? ' #' + r.rep : '')
+      + ' ok=' + (r.ok !== false)
+      + ' code=' + (r.code ? (r.codeLang || '?') : '无')
+      + (r.codeSource ? '(' + r.codeSource + ')' : '')
+      + (r.codeOnly ? ' codeOnly=1' : '')
+      + ' ms=' + (r.ms || 0)
+      + ' out=' + (typeof out === 'number' ? out : '?')
+      + ' cost=' + (r.cost && typeof r.cost.amount === 'number' ? r.cost.amount : '未计费')
+      + (r.finishReason ? ' finish=' + r.finishReason : '')
+      + (r.truncated ? ' 撞长度上限' : '')
+      + (r.verificationStatus ? ' verify=' + r.verificationStatus : '')
+      + (r.error ? ' error=' + String(r.error).replace(/\n/g, ' ') : '');
+  }).join('\n');
+}
+
+/** 阶梯（服务端算好；界面与诊断包都用这一份，规则不会走样）。 */
+function ladderOf() {
+  return ladder.compute({
+    problems: store.list(), runs: store.records(), verdicts: store.verdicts(),
+    levels: LEVELS, levelHint: LEVEL_HINT
+  });
+}
 
 /* ---------------- 事件流（SSE）：跑分与判分的实时进度 ---------------- */
 const clients = new Set();
@@ -115,28 +193,44 @@ function rewriteRecords(run) {
   fs.writeFileSync(run.recordsFile, run.records.map((r) => JSON.stringify(r)).join('\n') + (run.records.length ? '\n' : ''), 'utf8');
 }
 
+function clampInt(v, lo, hi, dflt) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
 async function startRun(o) {
   if (job && job.running) throw new Error('已经有一个跑分任务在跑（先等它结束或点取消）');
   const ids = Array.isArray(o.ids) && o.ids.length ? o.ids : store.problems.map((p) => p.id);
   const wanted = (Array.isArray(o.levels) && o.levels.length ? o.levels : ['L0', 'L2']).map((s) => String(s).toUpperCase());
-  for (const l of wanted) if (['L0', 'L1', 'L2'].indexOf(l) < 0) throw new Error('未知档位：' + l);
+  for (const l of wanted) if (LEVELS.indexOf(l) < 0) throw new Error('未知档位：' + l + '（可跑：' + LEVELS.join('/') + '）');
   const opts = Object.assign({}, DEFAULTS, {
     iterations: o.iterations != null && o.iterations !== '' ? Number(o.iterations) : DEFAULTS.iterations,
     lang: o.lang ? (String(o.lang) === 'cpp' ? 'cpp' : 'python') : DEFAULTS.lang,
     depth: o.depth ? String(o.depth).toUpperCase() : DEFAULTS.depth,
-    rich: o.rich != null ? !!o.rich : DEFAULTS.rich
+    rich: o.rich != null ? !!o.rich : DEFAULTS.rich,
+    reps: clampInt(o.reps != null && o.reps !== '' ? o.reps : DEFAULTS.reps, 1, 20, 1),
+    callTimeoutMin: clampInt(o.callTimeoutMin != null && o.callTimeoutMin !== '' ? o.callTimeoutMin : DEFAULTS.callTimeoutMin, 1, 180, 12)
   });
+  // 单次调用超时是 lib/llm.js 的进程级默认值：L0/L1/L2 三条路都从这里生效
+  llm.setDefaultCallTimeoutMs(opts.callTimeoutMin * 60 * 1000);
   const problems = store.runtimeAll(ids).filter((p) => p.statement && p.statement.trim());
   if (!problems.length) throw new Error('没有可跑的题：先在界面上加题（题面必须有）');
 
   const jobs = [];
-  for (const p of problems) for (const lv of wanted) jobs.push({ problem: p, level: lv, name: lv + '-' + p.id });
+  for (const p of problems) for (const lv of wanted) {
+    for (let rep = 1; rep <= opts.reps; rep++) {
+      const suffix = opts.reps > 1 ? '#' + rep : '';
+      jobs.push({ problem: p, level: lv, rep: opts.reps > 1 ? rep : null, name: lv + '-' + p.id + suffix });
+    }
+  }
   const run = record.openRun(store.dir);
   store.records().forEach((r) => run.records.push(r));   // 保住历史（最后整体重写 records.jsonl）
   const target = targets[0];
   job = { running: true, cancelled: false, startedAt: Date.now(), done: 0, total: jobs.length, current: null, opts };
   emit({ type: 'runStart', total: jobs.length, levels: wanted, problems: problems.map((p) => p.id), model: target.providerId + '::' + target.model, opts });
-  logEvent('用 ' + target.providerId + '::' + target.model + ' 跑 ' + jobs.length + ' 个 (题×档)，并发 1（L2 内部本来就多角色，串行才能看清）');
+  logEvent('用 ' + target.providerId + '::' + target.model + ' 跑 ' + jobs.length + ' 个 (题×档'
+    + (opts.reps > 1 ? '×' + opts.reps + ' 遍' : '') + ')，并发 1（L2 内部本来就多角色，串行才能看清）；单次调用超时 ' + opts.callTimeoutMin + ' 分钟');
 
   for (const j of jobs) {
     if (job.cancelled) break;
@@ -146,7 +240,7 @@ async function startRun(o) {
     const t0 = Date.now();
     let rec;
     try {
-      if (j.level === 'L0') rec = await levels.runL0(ctx);
+      if (j.level === 'L0' || j.level === 'L0C') rec = await levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }));
       else if (j.level === 'L1') rec = await levels.runL1(ctx);
       else {
         // 每次都要干净的工作区：否则链会走"上次已对拍通过"的快通道 —— 测出来的就不是模型，而是缓存
@@ -157,12 +251,14 @@ async function startRun(o) {
       rec = { level: j.level, problem: j.problem.id, model: target.model, ok: false, error: String((e && e.message) || e), usage: null, ms: Date.now() - t0 };
       run.add(rec);
     }
+    if (j.rep) rec.rep = j.rep;
     fitRec(rec, target, j.problem, t0);
     job.done++;
     emit({
-      type: 'jobDone', name: j.name, level: j.level, problem: j.problem.id,
+      type: 'jobDone', name: j.name, level: j.level, problem: j.problem.id, rep: j.rep || null,
       ok: rec.ok !== false, ms: Date.now() - t0, usage: rec.usage || null, cost: rec.cost || null,
       codeSource: rec.codeSource || null, error: rec.error || null,
+      truncated: rec.truncated === true, finishReason: rec.finishReason || null,
       verification: rec.level === 'L2' ? {
         status: rec.verificationStatus || null, assertedVerified: rec.assertedVerified === true,
         scopeComplete: rec.scopeComplete === true, delivered: rec.delivered || null, scopeNote: rec.scopeNote || null,
@@ -380,6 +476,24 @@ function stateOf() {
       scopeComplete: r.scopeComplete === true, delivered: r.delivered || null, scopeNote: r.scopeNote || null,
       trajectory: (r.trajectory || []).slice(-12), notes: r.notes || [], startedAt: r.startedAt || null
     })),
+    levels: LEVELS,
+    levelHint: LEVEL_HINT,
+    // 这台机器是谁：测试会在不同机器上跑，收包的人第一眼要知道是哪台
+    host: os.hostname(),
+    logFile: RUNLOG.file,
+    diagName: diagFileName(),
+    // rating 阶梯：规则在 ablation/lib/ladder.js，只有那一份实现（界面只渲染）
+    ladder: ladderOf(),
+    // 全部跑分记录（不是一个 (题×档) 只留最新那条）："rating 上限"和"跑 N 遍成功几次"都必须看全部，
+    // 否则 latest 口径会把"3 遍里只有 1 遍交得出代码"抹成"交出来了"。只给统计需要的字段，不带代码正文。
+    runs: store.records().map((r) => ({
+      level: r.level, problem: r.problem, rep: r.rep || null, ok: r.ok !== false,
+      hasCode: !!(r.code && String(r.code).trim()), codeLang: r.codeLang || null,
+      codeSource: r.codeSource || null, error: r.error || null,
+      finishReason: r.finishReason || null, truncated: r.truncated === true,
+      usage: r.usage || null, cost: r.cost || null, ms: r.ms || 0,
+      verificationStatus: r.verificationStatus || null, startedAt: r.startedAt || null
+    })),
     verdicts: store.verdicts(),
     compare: store.compare(),
     human: store.human(),
@@ -430,16 +544,48 @@ const server = http.createServer(async (req, res) => {
         extra: [{
           name: '测试台状态（题库 / 判分台账 / 内存里的运行状态）',
           text: JSON.stringify({
-            dir: store.dir, defaults: DEFAULTS, targets: (stateOf().targets || []),
-            problems: store.list().map((x) => ({ id: x.id, hasOracle: !!x.oracle, hasGen: !!x.gen, samples: (x.samples || []).length })),
-            records: store.latestRecords().length, verdicts: store.verdicts().length,
-            running: !!(stateOf().job && stateOf().job.running), genBusy: !!stateOf().genBusy
+            dir: store.dir, host: os.hostname(), defaults: DEFAULTS, targets: (stateOf().targets || []),
+            problems: store.list().map((x) => ({ id: x.id, title: x.title, rating: x.rating || null, hasOracle: !!x.oracle, hasGen: !!x.gen, samples: (x.samples || []).length })),
+            records: store.latestRecords().length, runs: store.records().length, verdicts: store.verdicts().length,
+            running: !!(stateOf().job && stateOf().job.running), genBusy: !!stateOf().genBusy,
+            runningOpts: (stateOf().job && stateOf().job.opts) || null
           }, null, 2)
+        }, {
+          name: 'rating 阶梯（这一档的 rating 上限在哪）',
+          text: (function () {
+            const L = ladderOf();
+            const lines = [L.note, '', L.evidence, '', '机器：' + os.hostname() + '，数据目录：' + store.dir, ''];
+            for (const lv of L.levels) {
+              lines.push('【' + lv.level + '】' + (lv.hint ? lv.hint + ' — ' : '') + lv.verdict);
+              lines.push('  跑 ' + lv.stats.n + ' 次（有代码 ' + lv.stats.withCode + '）'
+                + '，AC ' + lv.counts.ac + '，可信失败 ' + lv.counts.fail
+                + '，中止/撞顶 ' + lv.counts.unfinished + '，不可判 ' + lv.counts.undecidable
+                + '，没交出来 ' + lv.counts.nocode + '，未跑 ' + lv.counts.none
+                + '；输出 ' + lv.stats.out + ' tok，花费 ' + (lv.stats.priced ? lv.stats.cost.toFixed(4) : '未计费'));
+              lines.push('  按 rating：' + lv.cells.filter((c) => c.kind !== 'none')
+                .map((c) => 'r' + (c.rating || '?') + ' ' + c.id + '=' + c.kind).join('  '));
+              lines.push('');
+            }
+            lines.push('（同 rating 明细）');
+            for (const r of L.rows) {
+              lines.push('  r' + (r.rating || '?') + ' ' + r.id + '  ' + Object.keys(r.cells).map((k) => k + '=' + r.cells[k].kind).join('  '));
+            }
+            lines.push('', '原始 JSON（界面按它渲染）：', JSON.stringify(L, null, 2));
+            return lines.join('\n');
+          })()
+        }, {
+          name: '跑分明细（逐条：重复次数 / 撞长度上限 / 中止 / 超时文案）',
+          text: '全部 ' + store.records().length + ' 条记录（不含代码正文）。\n'
+            + '读法：error 里出现"超时"的那条是**没跑完**，不是答错；撞长度上限同理。\n\n'
+            + runDetailLines()
+        }, {
+          name: '工作台运行日志（server.log，本次终端输出）',
+          text: '文件：' + RUNLOG.file + '\n' + RUNLOG.note() + '\n\n' + logTail(180000)
         }]
       });
       res.writeHead(200, {
         'content-type': 'text/plain; charset=utf-8',
-        'content-disposition': 'attachment; filename="' + diagbundle.defaultFileName() + '"'
+        'content-disposition': 'attachment; filename="' + diagFileName() + '"'
       });
       return res.end(b.text);
     }
@@ -538,6 +684,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log('人工消融测试台：http://127.0.0.1:' + PORT + '/');
   console.log('数据目录：' + store.dir);
+  console.log('运行日志：' + RUNLOG.note() + '（界面上的"诊断包"会把它一起打包）');
   console.log('模型：' + targets.map((t) => t.providerId + '::' + t.model).join('  ') + '（对拍组数默认 ' + DEFAULTS.iterations + '，L2 语言 ' + DEFAULTS.lang + '，图文文档 ' + (DEFAULTS.rich ? '开' : '关') + '）');
   const cacheIds = cffetch.listAppCache();
   console.log('应用数据目录：' + APP_DATA + '（这里出模型配置；题面缓存 ' + (cacheIds.length ? cacheIds.join(', ') : '空') + '）');
