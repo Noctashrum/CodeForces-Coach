@@ -66,6 +66,9 @@
     </span>
     <label title="同一 (题×档) 跑几遍。单次调用方差很大（实测同一题同一档有 1/3 的概率交不出代码），只跑一遍的「通过/不通过」当不了证据。">重复次数 <input id="reps" type="number" min="1" max="20" value="1" style="width:52px"></label>
     <label title="单次模型调用超时（分钟）。12 是历史默认值：实测难题单次思考 681–716s，撞上就被中止，而且那不是答错。跑 r2300+ 建议 32。">单次超时 <input id="timeout" type="number" min="1" max="180" value="12" style="width:56px"> 分钟</label>
+    <label title="并发跑几道题：不同题同时跑，同一道题的多档/多遍永远串行（同题共享工作区，并行会互相清目录，数据会废得看不出来）。实测单条 L2 中位 681s，串行跑 30 题要 35 小时。">并发 <input id="conc" type="number" min="1" max="8" value="4" style="width:46px"> 题</label>
+    <label title="重复方案。每格都跑 N 遍：每个 (题×档) 都跑上面那个「重复次数」。先各跑 1 遍：全池先拿到一张全景图，再按需补。只补阶梯缝：只给 rating 阶梯缝附近（已知最高 AC 与首次可信失败之间，含紧邻一档）的题跑 N 遍，其余各 1 遍。">重复方案 <select id="plan"><option value="full">每格都跑 N 遍</option><option value="sweep">先各跑 1 遍</option><option value="ladder">只补阶梯缝</option></select></label>
+    <label title="默认跳过题表里标了「判不了」的题（多解但没有 checker、或尺子贴错题）。它们只烧钱不产数据：实测 2267B + 2268F 两道烧掉 91 分钟 / ¥10.6。"><input id="includeSkipped" type="checkbox"> 连判不了的题一起跑</label>
     <button id="btnAdd">＋ 加题</button>
     <button id="btnRunSel" class="primary">跑选中题</button>
     <button id="btnRunAll">跑全部（勾的档位）</button>
@@ -296,17 +299,29 @@ function renderCeiling() {
 }
 
 function renderProblems() {
+  /** 这题能不能判出结论（不能判的题烧钱不产数据，实测两道就吃掉 91 分钟 / ¥10.6）。 */
+  function undecidableOf(id) {
+    const vs = (S.verdicts || []).filter((v) => v.problem === id);
+    if (!vs.length) return null;
+    if (vs.some((v) => v.oracleSampleMismatch)) return '尺子与官方样例不符（多解的另一种合法答案，或贴错题）→ 核对 oracle';
+    const multi = vs.every((v) => v.specialJudge);
+    if (multi && !vs.some((v) => v.diffVerdict === 'AC')) return '多解题且没有 checker → 差分跑不起来';
+    return null;
+  }
   const rows = (S.problems || []).map((p) => {
     const r0 = recOf('L0', p.id); const r2 = recOf('L2', p.id); const r1 = recOf('L1', p.id); const r0c = recOf('L0C', p.id);
     const v0 = verdictOf('L0', p.id); const v2 = verdictOf('L2', p.id); const v0c = verdictOf('L0C', p.id);
     const h = humanOf(p.id);
+    const und = undecidableOf(p.id);
     const choiceTxt = h ? ({ coach: 'L2 更好', l2: 'L2 更好', tie: '打平', l0: 'L0 更好', base: 'L0 更好', 'both-bad': '两个都不行', 'both-good': '两个都好' }[String(h.choice).toLowerCase()] || h.choice) : '';
     return '<tr class="' + (detailId === p.id ? 'sel' : '') + '">'
       + '<td><input type="checkbox" data-id="' + esc(p.id) + '"' + (sel.has(p.id) ? ' checked' : '') + '></td>'
       + '<td><b>' + esc(p.id) + '</b>' + (p.rating ? '<div class="small dim">' + esc(p.rating) + '</div>' : '') + '</td>'
       + '<td><a href="#" data-open="' + esc(p.id) + '">' + esc(p.title || '') + '</a>'
       + (p.url ? ' <a class="small" href="' + esc(p.url) + '" target="_blank">CF</a>' : '')
-      + '<div class="small dim">' + (p.samples || []).length + ' 组样例 · ' + (p.hasOracle ? 'oracle ' + esc(p.oracleLang) : '<span style="color:var(--warn)">无 oracle</span>') + (p.hasGen ? ' · 有生成器' : ' · <span style="color:var(--warn)">无生成器</span>') + (p.note ? ' · ' + esc(p.note) : '') + '</div></td>'
+      + '<div class="small dim">' + (p.samples || []).length + ' 组样例 · ' + (p.hasOracle ? 'oracle ' + esc(p.oracleLang) : '<span style="color:var(--warn)">无 oracle</span>') + (p.hasGen ? ' · 有生成器' : ' · <span style="color:var(--warn)">无生成器</span>') + (p.note ? ' · ' + esc(p.note) : '') + '</div>'
+      + (und ? '<div class="small" style="color:var(--warn)">判不了：' + esc(und) + '</div>' : '')
+      + '<label class="small dim" title="标了跳过就不会进跑分队列（左上角勾「连判不了的题一起跑」可以临时收回）。判不了的题只烧钱不产数据：实测两道吃掉 91 分钟 / ¥10.6。"><input type="checkbox" data-skip="' + esc(p.id) + '"' + (p.skip ? ' checked' : '') + '> 跳过这题</label></td>'
       + '<td>' + (r0 ? verdictBadge(v0) : '<span class="badge b-dim">未跑</span>')
       + (r0c ? '<div class="small" style="margin-top:3px">L0C ' + verdictBadge(v0c) + '</div>' : '')
       + (r1 ? '<div class="small" style="margin-top:3px">L1 ' + verdictBadge(verdictOf('L1', p.id)) + '</div>' : '') + '</td>'
@@ -317,6 +332,14 @@ function renderProblems() {
   }).join('');
   $('problems').innerHTML = '<table><thead><tr><th style="width:28px"></th><th>题号</th><th>标题 / 素材</th><th>L0</th><th>L2（cf-coach）</th><th>人工判定</th><th></th></tr></thead><tbody>' + (rows || '<tr><td colspan="7" class="dim">还没有题：点右上角「＋ 加题」，粘题面 + 贴一份题解当 oracle。</td></tr>') + '</tbody></table>';
   document.querySelectorAll('input[data-id]').forEach((cb) => cb.addEventListener('change', () => { cb.checked ? sel.add(cb.dataset.id) : sel.delete(cb.dataset.id); }));
+  document.querySelectorAll('input[data-skip]').forEach((cb) => cb.addEventListener('change', async () => {
+    const id = cb.dataset.skip;
+    try {
+      await api('/api/problems', { id, skip: cb.checked });
+      logLine((cb.checked ? '已标记跳过：' : '已取消跳过：') + id + '（其余字段沿用原记录）');
+      await refresh();
+    } catch (e) { logLine('改跳过标记失败：' + e.message); }
+  }));
   document.querySelectorAll('[data-open]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); openDetail(a.dataset.open); }));
   document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => openEdit(b.dataset.edit)));
 }
@@ -582,13 +605,17 @@ async function startRun(ids, all) {
   if (!levels.length) return logLine('先勾一个档位（L0 裸模 / L0 只给代码块 / L1 agent / L2 cf-coach）');
   const reps = Number($('reps').value) || 1;
   const callTimeoutMin = Number($('timeout').value) || 12;
+  const conc = Number($('conc') && $('conc').value) || 4;
+  const plan = ($('plan') && $('plan').value) || 'full';
+  const includeSkipped = !!($('includeSkipped') && $('includeSkipped').checked);
   try {
     await api('/api/run', {
-      ids, levels, reps, callTimeoutMin,
+      ids, levels, reps, callTimeoutMin, conc, plan, includeSkipped,
       iterations: Number($('it').value) || 60, lang: $('lang').value, depth: $('depth').value, rich: $('rich').checked
     });
-    logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/') + (reps > 1 ? ' × ' + reps + ' 遍' : '')
-      + '（单次超时 ' + callTimeoutMin + ' 分钟）');
+    logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/')
+      + (plan === 'full' ? (reps > 1 ? ' × ' + reps + ' 遍' : '') : '（' + (plan === 'sweep' ? '先各跑 1 遍' : '只补阶梯缝 ' + reps + ' 遍') + '）')
+      + '（并发 ' + conc + ' 题，同题串行；单次超时 ' + callTimeoutMin + ' 分钟）');
   } catch (e) { logLine('启动失败：' + e.message); }
 }
 
@@ -611,23 +638,38 @@ async function refresh() {
       + '｜运行日志：' + esc((S && S.logFile) || 'server.log')
       + '　—— 出问题就点「导出诊断包（发回日志）」，把下载到的那个 <b>.txt</b> 发回来。';
   }
+  // 刷新页面时把"正在跑哪几道题"接回来（并发下只看最后一条会误判成串行）
+  if (S && S.job && S.job.running) {
+    const a = S.job.active || [];
+    $('progress').textContent = '跑 ' + (a.length ? a.join(' ＋ ') : (S.job.current || '—'))
+      + '（' + S.job.done + '/' + S.job.total + (a.length > 1 ? '，并发 ' + a.length : '') + '）…';
+  }
 }
 
 const es = new EventSource('/api/events');
 const seen = new Set();
+// 现在是并发的：进度条只显示最后一条会看不出同时在跑几道题，所以自己维护"正在跑"的集合
+const activeJobs = new Set();
+function tickProgress(done, total) {
+  const a = Array.from(activeJobs);
+  $('progress').textContent = '跑 ' + (a.length ? a.join(' ＋ ') : '—')
+    + '（' + done + '/' + total + (a.length > 1 ? '，并发 ' + a.length : '') + '）…';
+}
 es.onmessage = (ev) => {
   let e; try { e = JSON.parse(ev.data); } catch { return; }
   const key = e.type + '|' + (e.name || '') + '|' + (e.done != null ? e.done : '') + '|' + e.at;
   if (seen.has(key)) return; seen.add(key);
   if (e.type === 'log') logLine(e.text);
-  else if (e.type === 'jobStart') { $('progress').textContent = '跑 ' + e.name + '（' + e.done + '/' + e.total + '）…'; logLine('▶ ' + e.name); }
+  else if (e.type === 'jobStart') { activeJobs.add(e.name); tickProgress(e.done, e.total); logLine('▶ ' + e.name); }
   else if (e.type === 'jobDone') {
+    activeJobs.delete(e.name);
+    if (activeJobs.size) tickProgress(Math.min(e.done, e.total), e.total);
     logLine((e.ok ? '✓' : '✗') + ' ' + e.name + '  ' + Math.round((e.ms || 0) / 1000) + 's' + (e.error ? '  ' + e.error : '') + (e.verification ? '  链自评 ' + (e.verification.status || '') : '')
       + (e.truncated ? '  ⚠️ 撞长度上限（finish_reason=' + esc(e.finishReason || 'length') + '）' : ''));
     if (/单次模型调用超时/.test(String(e.error || ''))) logLine('　↳ 这次是撞上单次调用超时被中止，<b>不是答错</b>：把「单次超时」调大（难题 32 分钟）再跑。');
     refresh().catch(() => {});
   }
-  else if (e.type === 'runEnd') { $('progress').textContent = '跑完了：' + e.done + '/' + e.total + (e.cancelled ? '（已取消）' : ''); logLine('跑分结束'); refresh().catch(() => {}); }
+  else if (e.type === 'runEnd') { activeJobs.clear(); $('progress').textContent = '跑完了：' + e.done + '/' + e.total + (e.cancelled ? '（已取消）' : ''); logLine('跑分结束'); refresh().catch(() => {}); }
   else if (e.type === 'verdict') { $('progress').textContent = '判分 ' + e.done + '/' + e.total + '　' + e.verdict.problem + ' ' + e.verdict.level + ' → ' + e.verdict.diffVerdict; }
   else if (e.type === 'judgeStart') { $('progress').textContent = '判分中（每题最多 ' + e.iterations + ' 组对拍）…'; }
   else if (e.type === 'judgeEnd') { $('progress').textContent = '判分完成'; logLine('判分完成：配对 ' + (e.compare && e.compare.n || 0) + ' 题'); refresh().catch(() => {}); }

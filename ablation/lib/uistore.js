@@ -126,6 +126,9 @@ function init(rootDir) {
         url: String(p.url != null ? p.url : (prev.url || '')),
         source: String(p.source != null ? p.source : (prev.source || 'manual')),
         note: String(p.note != null ? p.note : (prev.note || '')),
+        // 判不了的题（多解没 checker / 尺子贴错题）：标一下，跑分默认跳过。
+        // 它们只烧钱不产数据 —— 实测 2267B+2268F 两道就吃掉 91 分钟 / ¥10.6。
+        skip: p.skip != null ? !!p.skip : prev.skip === true,
         statement,
         samples: Array.isArray(p.samples) && p.samples.length ? p.samples.map((s) => ({ input: String(s.input == null ? '' : s.input), output: String(s.output == null ? '' : s.output) }))
           : (p.samples == null ? (prev.samples || []) : []),
@@ -199,6 +202,8 @@ function init(rootDir) {
       if (!p) return null;
       return {
         id: p.id, title: p.title, rating: p.rating, url: p.url, source: p.source, note: p.note,
+      // 跑分队列从这里读题 —— skip 不带上，"判不了的题默认跳过"就是一句空话
+      skip: p.skip === true,
         statement: p.statement, statementSha: p.statementSha, statementFile: p.statementFile,
         samples: p.samples || [], oracle: p.oracle ? Object.assign({}, p.oracle) : null, gen: p.gen ? Object.assign({}, p.gen) : null
       };

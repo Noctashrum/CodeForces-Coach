@@ -197,6 +197,8 @@ async function handle(req, res, opts) {
     return;
   }
   const plan = scriptFor(body, opts);
+  // --delay MS：每次调用先睡一会儿。用来验证"并发跑题"是真并发（时间窗重叠），而不是日志看起来像。
+  if (opts.delay > 0) await new Promise((r) => setTimeout(r, opts.delay));
   sseHead(res);
   const send = (obj) => res.write('data: ' + JSON.stringify(obj) + '\n\n');
   const model = body.model || 'mock-gpt-4';
@@ -244,8 +246,10 @@ if (require.main === module) {
   if (i >= 0) port = parseInt(args[i + 1], 10) || 3999;
   const wrong = args.indexOf('--wrong') >= 0;
   const l1NoCode = args.indexOf('--l1-nocode') >= 0;
-  startMockLlm({ port, wrong, l1NoCode }).then((s) => {
-    console.log('[mock-ablation] listening on ' + s.url);
+  const di = args.indexOf('--delay');
+  const delay = di >= 0 ? (parseInt(args[di + 1], 10) || 0) : 0;
+  startMockLlm({ port, wrong, l1NoCode, delay }).then((s) => {
+    console.log('[mock-ablation] listening on ' + s.url + (delay ? '（每次调用先睡 ' + delay + 'ms）' : ''));
     console.log('[mock-ablation] 用法示例：node ablation/run.js --base-url ' + s.url + ' --api-key mock --model mock-gpt-4 --level L0,L1 --problems example-ab');
   });
 }

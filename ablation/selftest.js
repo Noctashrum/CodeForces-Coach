@@ -411,6 +411,12 @@ async function main() {
       check('工作台：四个档位勾选框 + 重复次数 + 单次超时控件都在，旧的 withL1 已清干净',
         ['lvL0', 'lvL0C', 'lvL1', 'lvL2', 'reps', 'timeout'].every((id) => html.indexOf('id="' + id + '"') >= 0)
         && html.indexOf('withL1') < 0);
+      check('工作台：并发 / 重复方案 / 连判不了的一起跑 三个控件都在（跑不完的解法在调度上）',
+        ['conc', 'plan', 'includeSkipped'].every((id) => html.indexOf('id="' + id + '"') >= 0)
+        && /<select id="plan">[\s\S]*?value="sweep"[\s\S]*?value="ladder"/.test(html));
+      check('工作台：题表里有"跳过这题"的勾选框（判不了的题要能一键剔掉）', html.indexOf('data-skip=') >= 0);
+      check('工作台：并发进度显示的是"正在跑哪几道"，不是最后一条（否则看不出并发）',
+        html.indexOf('activeJobs') >= 0 && html.indexOf('tickProgress') >= 0);
 
       const P = (id, rating) => ({ id, title: 'T' + id, rating, samples: [{}], hasOracle: true, hasGen: true, oracleLang: 'cpp' });
       const rec = (level, id, o) => Object.assign({ level, problem: id, model: 'mock', ok: true, hasCode: true, ms: 60000, cost: { amount: 0.1 } }, o || {});
@@ -442,7 +448,9 @@ async function main() {
           { level: 'L0C', problem: 'p800', diffVerdict: 'AC', sampleVerdict: 'AC' },
           { level: 'L0C', problem: 'p1100', diffVerdict: 'AC', sampleVerdict: 'AC' },
           { level: 'L0C', problem: 'p2300', diffVerdict: 'AC', sampleVerdict: 'AC' },
-          { level: 'L0C', problem: 'p2600', diffVerdict: 'WA', sampleVerdict: 'AC' }
+          { level: 'L0C', problem: 'p2600', diffVerdict: 'WA', sampleVerdict: 'AC' },
+          // 判不了的一种：尺子自己就过不了官方样例（多解的另一种合法答案，或干脆贴错题）
+          { level: 'L0', problem: 'p2900', diffVerdict: 'WA', sampleVerdict: 'special-judge', specialJudge: true, oracleSampleMismatch: true }
         ]
       };
       state.records = state.runs.map((r) => Object.assign({}, r, { cost: { amount: 0.1 } }));
@@ -523,6 +531,12 @@ async function main() {
       check('工作台：输出 token 读的是 usage.completionTokens（记录里是 camelCase，读 snake_case 会恒为 0）',
         ladder.indexOf('输出 2,100 tok') >= 0, (ladder.match(/输出 [\d,]+ tok/g) || []).slice(0, 3).join(' | '));
       check('工作台：渲染没有把异常吞进日志（加载失败）', String((nodes.log || {}).innerHTML || '').indexOf('加载失败') < 0);
+      const problemsHtml = String((nodes.problems || {}).innerHTML || '');
+      check('工作台：判不了的题在题表里被点名（尺子与样例不符 → 提示核对 oracle），并带"跳过这题"开关',
+        problemsHtml.indexOf('判不了：') >= 0 && problemsHtml.indexOf('核对 oracle') >= 0
+        && problemsHtml.indexOf('data-skip="p2900"') >= 0
+        && problemsHtml.indexOf('data-skip="p800"') >= 0,
+        'len=' + problemsHtml.length);
     }
 
     // ⑫ 运行日志：测试在**别人机器**上跑，终端里滚过去的现场必须落盘，否则出问题时没有东西可发。
@@ -595,7 +609,7 @@ async function main() {
           oracleCode: oracleSrc, oracleLang: 'python'
         });
         check('工作台端到端：能往题库塞一道题（界面上的"加题"走的就是这条路）', pr.ok);
-        await post('/api/run', { levels: ['L0', 'L0C'], reps: 2, callTimeoutMin: 1, iterations: 1, lang: 'python' });
+        await post('/api/run', { levels: ['L0', 'L0C'], reps: 2, callTimeoutMin: 1, iterations: 1, lang: 'python', conc: 2 });
         let done = null;
         for (let i = 0; i < 200 && !done; i++) {
           await new Promise((r) => setTimeout(r, 100));
@@ -610,6 +624,39 @@ async function main() {
         check('工作台端到端：阶梯随记录更新（跑过的题不再是"未跑"，裸模上限靠它读）',
           !!done && done.ladder.rows.length >= 1 && done.ladder.rows[0].cells.L0.kind !== 'none',
           done ? JSON.stringify(done.ladder.rows[0].cells.L0) : '服务没起来');
+
+        // ④ 判不了的题默认不跑 + 阶梯式 reps（sweep = 全池先各 1 遍，与"重复次数"解耦）
+        await post('/api/problems', {
+          id: 'e2e1300', title: 'E2E-跳过', rating: 1300, statement: '给两个数，输出和',
+          samples: [{ input: '1\n', output: '1\n' }], oracleCode: oracleSrc, oracleLang: 'python', skip: true
+        });
+        await post('/api/run', { levels: ['L0'], reps: 3, plan: 'sweep', iterations: 1, lang: 'python', conc: 2 });
+        let swept = null;
+        for (let i = 0; i < 200 && !swept; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          const st = await (await fetch(base + '/api/state')).json();
+          if (st.runs && st.runs.length >= 5 && (!st.job || !st.job.running)) swept = st;
+        }
+        const after = (swept || {}).runs || [];
+        const l0Before = runs.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length;
+        const l0After = after.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length;
+        check('工作台端到端：标了跳过的题默认不进队列（判不了的题只烧钱不产数据）',
+          after.length === 5 && !after.some((r) => r.problem === 'e2e1300'),
+          after.length + ' 条，含 1300：' + after.some((r) => r.problem === 'e2e1300'));
+        check('工作台端到端：重复方案 sweep = 全池先各跑 1 遍（不再受"重复次数 3"影响）',
+          l0After === l0Before + 1, 'e2e800/L0 ' + l0Before + ' → ' + l0After);
+        const logAll = fs.existsSync(path.join(uiRoot, 'server.log')) ? fs.readFileSync(path.join(uiRoot, 'server.log'), 'utf8') : '';
+        check('工作台端到端：跳过与并发都写进日志（事后能从日志里复原调度）',
+          logAll.indexOf('跳过') >= 0 && logAll.indexOf('并发 2') >= 0);
+        await post('/api/run', { levels: ['L0'], plan: 'sweep', includeSkipped: true, iterations: 1, lang: 'python', conc: 2 });
+        let forced = null;
+        for (let i = 0; i < 200 && !forced; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          const st = await (await fetch(base + '/api/state')).json();
+          if (st.runs && st.runs.length >= 6 && (!st.job || !st.job.running)) forced = st;
+        }
+        check('工作台端到端：勾"连判不了的题一起跑"时还能强制跑（默认跳过不是硬拦）',
+          !!forced && (forced.runs || []).some((r) => r.problem === 'e2e1300'));
 
         const dr = await fetch(base + '/api/diag/export');
         const dtext = await dr.text();

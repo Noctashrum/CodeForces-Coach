@@ -58,6 +58,8 @@ function usage() {
     '  --max-tokens N       单次输出上限（0/缺省 = 不发这个字段）',
     '  --iterations N       默认对拍组数（默认 60）',
     '  --reps N             同一 (题×档) 跑几遍（默认 1；界面上的"重复次数"同义）',
+    '  --conc N             并发跑几道题（默认 4；同一道题的多档/多遍永远串行）',
+    '  --plan full|sweep|ladder  重复方案：full=每格都跑 reps 遍（默认）/ sweep=先各跑 1 遍 / ladder=只补阶梯缝附近',
     '  --call-timeout-min N 单次模型调用超时分钟数（默认 12；难题建议 32 —— 实测 12 分钟会砍掉 r2300+）',
     '  --max-steps N        L1 工具循环上限（默认 20）',
     '  --lang python|cpp    L2 交题解的语言（默认 python）',
@@ -88,6 +90,9 @@ const DEFAULTS = {
   // 同一 (题×档) 跑几遍：单次调用的方差很大（实测同一题同一档 1/3 概率交不出代码），
   // 只跑一遍的"通过/不通过"当不了证据。
   reps: env.num(args.reps, 1),
+  // 并发跑几道题：单条 L2 记录中位 681s，串行跑 30 题 ≈ 35 小时（实测推演），三台机器也跑不完。
+  // 只改调度、不改模型能看到的东西 —— 同题仍然串行（见 startRun 里的题级锁）。
+  conc: env.num(args.conc, 4),
   // 单次模型调用超时（分钟）。默认 12 是 lib/llm.js 的历史默认值，但实测难题上
   // 单次思考 681–716s、余量只有 0.6%，所以要能在界面上直接调大。
   callTimeoutMin: env.num(args.callTimeoutMin, 12)
@@ -159,6 +164,32 @@ function ladderOf() {
   });
 }
 
+/** 阶梯式重复：只有"已知最高 AC"与"首次可信失败"之间那道缝附近的题值得多跑几遍。 */
+function ladderBoundary(problems, wanted) {
+  const out = new Set();
+  const ratings = [...new Set(problems.map((p) => Number(p.rating)).filter((r) => Number.isFinite(r)))].sort((a, b) => a - b);
+  const neighbour = (r) => {
+    const below = ratings.filter((x) => x < r).pop();
+    const above = ratings.filter((x) => x > r)[0];
+    return [below, above].filter((x) => x != null);
+  };
+  for (const lv of ladderOf().levels) {
+    if (wanted.indexOf(lv.level) < 0) continue;
+    const lo = lv.acMax ? Number(lv.acMax.rating) : NaN;
+    const hi = lv.failMin ? Number(lv.failMin.rating) : NaN;
+    if (!Number.isFinite(lo) && !Number.isFinite(hi)) continue;
+    const L = Number.isFinite(lo) ? lo : -Infinity;
+    const H = Number.isFinite(hi) ? hi : Infinity;
+    const want = new Set();
+    ratings.forEach((r) => { if (r >= L && r <= H) want.add(r); });
+    // 缝外紧邻的那一档也算：跨档结论常常只差一个样本
+    if (Number.isFinite(lo)) neighbour(lo).forEach((r) => want.add(r));
+    if (Number.isFinite(hi)) neighbour(hi).forEach((r) => want.add(r));
+    problems.forEach((p) => { if (want.has(Number(p.rating))) out.add(p.id); });
+  }
+  return out;
+}
+
 /* ---------------- 事件流（SSE）：跑分与判分的实时进度 ---------------- */
 const clients = new Set();
 const ring = [];
@@ -169,7 +200,9 @@ function emit(ev) {
   const line = 'data: ' + JSON.stringify(e) + '\n\n';
   for (const res of clients) { try { res.write(line); } catch { /* 断了就算了 */ } }
 }
-function logEvent(text) { emit({ type: 'log', text: String(text) }); }
+// 事件面板与终端日志是同一份叙事：屏幕上滚掉的"跳过了哪几道 / 并发几个 / 为什么这么调度"，
+// 事后只能从 server.log（界面上的诊断包）里找回来 —— 所以顺手也写一份到终端，runlog 会带时间戳落盘。
+function logEvent(text) { emit({ type: 'log', text: String(text) }); console.log(text); }
 
 /* ---------------- 跑分 ---------------- */
 let job = null;
@@ -210,43 +243,77 @@ async function startRun(o) {
     depth: o.depth ? String(o.depth).toUpperCase() : DEFAULTS.depth,
     rich: o.rich != null ? !!o.rich : DEFAULTS.rich,
     reps: clampInt(o.reps != null && o.reps !== '' ? o.reps : DEFAULTS.reps, 1, 20, 1),
+    conc: clampInt(o.conc != null && o.conc !== '' ? o.conc : DEFAULTS.conc, 1, 8, DEFAULTS.conc),
     callTimeoutMin: clampInt(o.callTimeoutMin != null && o.callTimeoutMin !== '' ? o.callTimeoutMin : DEFAULTS.callTimeoutMin, 1, 180, 12)
   });
   // 单次调用超时是 lib/llm.js 的进程级默认值：L0/L1/L2 三条路都从这里生效
   llm.setDefaultCallTimeoutMs(opts.callTimeoutMin * 60 * 1000);
-  const problems = store.runtimeAll(ids).filter((p) => p.statement && p.statement.trim());
-  if (!problems.length) throw new Error('没有可跑的题：先在界面上加题（题面必须有）');
+  const all = store.runtimeAll(ids).filter((p) => p.statement && p.statement.trim());
+  if (!all.length) throw new Error('没有可跑的题：先在界面上加题（题面必须有）');
+  // 判不了的题（多解没 checker / 尺子贴错题）：默认跳过。实测 2267B + 2268F 两道就烧掉 91 分钟 / ¥10.6，
+  // 而且永远给不出可用结论 —— 那不是"数据点少一个"，是纯损失。
+  const skipped = all.filter((p) => p.skip === true);
+  const problems = o.includeSkipped === true ? all : all.filter((p) => p.skip !== true);
+  if (skipped.length && o.includeSkipped !== true) {
+    logEvent('跳过 ' + skipped.length + ' 道标记为"判不了"的题（连它们一起跑就勾上选项）：' + skipped.map((p) => p.id).join(', '));
+  }
+  if (!problems.length) throw new Error('选中的题都被标成"判不了"了（题表里取消勾选，或勾上"连判不了的题一起跑"）');
+
+  // 重复方案：full = 每格都跑 N 遍（原行为）；sweep = 全池先各跑 1 遍；ladder = 只有阶梯缝附近的题跑 N 遍
+  const plan = o.plan === 'sweep' ? 'sweep' : (o.plan === 'ladder' ? 'ladder' : 'full');
+  const boundary = plan === 'ladder' ? ladderBoundary(problems, wanted) : null;
+  const repsOf = (p) => {
+    if (plan === 'full') return opts.reps;
+    if (plan === 'sweep') return 1;
+    return boundary.has(p.id) ? opts.reps : 1;
+  };
+  if (plan === 'ladder') logEvent('阶梯式重复：缝附近的 ' + boundary.size + ' 道跑 ' + opts.reps + ' 遍，其余各 1 遍');
 
   const jobs = [];
   for (const p of problems) for (const lv of wanted) {
-    for (let rep = 1; rep <= opts.reps; rep++) {
-      const suffix = opts.reps > 1 ? '#' + rep : '';
-      jobs.push({ problem: p, level: lv, rep: opts.reps > 1 ? rep : null, name: lv + '-' + p.id + suffix });
+    const n = repsOf(p);
+    for (let rep = 1; rep <= n; rep++) {
+      jobs.push({ problem: p, level: lv, rep: n > 1 ? rep : null, name: lv + '-' + p.id + (n > 1 ? '#' + rep : '') });
     }
   }
   const run = record.openRun(store.dir);
   store.records().forEach((r) => run.records.push(r));   // 保住历史（最后整体重写 records.jsonl）
   const target = targets[0];
-  job = { running: true, cancelled: false, startedAt: Date.now(), done: 0, total: jobs.length, current: null, opts };
+  job = { running: true, cancelled: false, startedAt: Date.now(), done: 0, total: jobs.length, current: null, active: [], opts };
   emit({ type: 'runStart', total: jobs.length, levels: wanted, problems: problems.map((p) => p.id), model: target.providerId + '::' + target.model, opts });
   logEvent('用 ' + target.providerId + '::' + target.model + ' 跑 ' + jobs.length + ' 个 (题×档'
-    + (opts.reps > 1 ? '×' + opts.reps + ' 遍' : '') + ')，并发 1（L2 内部本来就多角色，串行才能看清）；单次调用超时 ' + opts.callTimeoutMin + ' 分钟');
+    + (opts.reps > 1 ? '×' + opts.reps + ' 遍' : '') + ')，并发 ' + Math.max(1, Math.min(opts.conc, jobs.length))
+    + '（**同一道题永远串行**：同题的工作区是共享的，并行会互相清目录）；单次调用超时 ' + opts.callTimeoutMin + ' 分钟');
 
-  for (const j of jobs) {
-    if (job.cancelled) break;
-    job.current = j.name;
-    emit({ type: 'jobStart', name: j.name, level: j.level, problem: j.problem.id, done: job.done, total: job.total });
+  /** 跑一条 (题×档×遍)：不含锁，锁在外面。 */
+  async function runJobOnce(j) {
     const ctx = { problem: j.problem, statement: j.problem.statement, target, params, run, name: j.name, maxSteps: opts.maxSteps, iterations: opts.iterations };
+    if (j.level === 'L0' || j.level === 'L0C') return levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }));
+    if (j.level === 'L1') return levels.runL1(ctx);
+    // 每次都要干净的工作区：否则链会走"上次已对拍通过"的快通道 —— 测出来的就不是模型，而是缓存
+    try { workspace.removeWorkspace(workspace.keyFor(l2.convFor(j.problem))); } catch { /* 没有就算了 */ }
+    return l2.runL2(Object.assign({}, ctx, { lang: opts.lang, rich: !!opts.rich, depth: opts.depth, maxStressMs: opts.maxStressMs }));
+  }
+
+  async function runJob(j) {
+    if (job.cancelled) return;
     const t0 = Date.now();
     let rec;
     try {
-      if (j.level === 'L0' || j.level === 'L0C') rec = await levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }));
-      else if (j.level === 'L1') rec = await levels.runL1(ctx);
-      else {
-        // 每次都要干净的工作区：否则链会走"上次已对拍通过"的快通道 —— 测出来的就不是模型，而是缓存
-        try { workspace.removeWorkspace(workspace.keyFor(l2.convFor(j.problem))); } catch { /* 没有就算了 */ }
-        rec = await l2.runL2(Object.assign({}, ctx, { lang: opts.lang, rich: !!opts.rich, depth: opts.depth, maxStressMs: opts.maxStressMs }));
-      }
+      // 题级锁：同题排队、异题并行。键加了前缀 —— 锁键与 L2 内部自己用的工作区锁同名会互相等待（死锁）。
+      // jobStart 在**拿到锁之后**才发：同题的两个 job 被两个 worker 同时拿走时，后一个是在排队、
+      // 还没开始跑，界面不该把它显示成"正在跑"，job.active 也不该把它算进并发。
+      rec = await workspace.withKeyLock('abq:' + String(j.problem.id), async () => {
+        job.active.push(j.name);
+        job.current = j.name;
+        emit({ type: 'jobStart', name: j.name, level: j.level, problem: j.problem.id, done: job.done, total: job.total });
+        try {
+          return await runJobOnce(j);
+        } finally {
+          job.active = job.active.filter((n) => n !== j.name);
+          if (job.current === j.name) job.current = job.active.length ? job.active[0] : null;
+        }
+      });
     } catch (e) {
       rec = { level: j.level, problem: j.problem.id, model: target.model, ok: false, error: String((e && e.message) || e), usage: null, ms: Date.now() - t0 };
       run.add(rec);
@@ -267,6 +334,22 @@ async function startRun(o) {
     });
     rewriteRecords(run);   // 每题都落盘：中途崩了也不丢
   }
+
+  // 并发池：N 个 worker 抢同一个队列（不是 Promise.all(jobs.map(...)) —— 那会把几百个任务一次性全发出去）
+  let cursor = 0;
+  const width = Math.max(1, Math.min(opts.conc, jobs.length));
+  const workers = [];
+  for (let w = 0; w < width; w++) {
+    workers.push((async () => {
+      for (;;) {
+        if (job.cancelled) return;
+        const j = jobs[cursor++];
+        if (!j) return;
+        await runJob(j);
+      }
+    })());
+  }
+  await Promise.all(workers);
   rewriteRecords(run);
   const cancelled = job.cancelled;
   const done = job.done;
@@ -460,9 +543,10 @@ function stateOf() {
     appCache: { dir: cffetch.appCacheDir(), ids: cffetch.listAppCache() },
     // 模型配置与题面缓存来自哪个应用数据目录（界面上要能一眼看到，省得"配置在哪"变成猜谜）
     appDataDir: APP_DATA,
-    job: job ? { running: job.running, cancelled: job.cancelled, startedAt: job.startedAt, done: job.done, total: job.total, current: job.current, opts: job.opts } : null,
+    job: job ? { running: job.running, cancelled: job.cancelled, startedAt: job.startedAt, done: job.done, total: job.total, current: job.current, conc: (job.opts && job.opts.conc) || 1, active: job.active || [], opts: job.opts } : null,
     problems: store.list().map((p) => ({
       id: p.id, title: p.title, rating: p.rating, url: p.url, note: p.note, source: p.source,
+      skip: p.skip === true,
       statement: p.statement, samples: p.samples || [], statementSha: p.statementSha,
       oracleLang: p.oracleLang, genLang: p.genLang,
       oracleCode: readCode(p.oracle), genCode: readCode(p.gen),
