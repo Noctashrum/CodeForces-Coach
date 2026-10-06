@@ -67,7 +67,7 @@
     <label title="同一 (题×档) 跑几遍。单次调用方差很大（实测同一题同一档有 1/3 的概率交不出代码），只跑一遍的「通过/不通过」当不了证据。">重复次数 <input id="reps" type="number" min="1" max="20" value="1" style="width:52px"></label>
     <label title="单次模型调用超时（分钟）。12 是历史默认值：实测难题单次思考 681–716s，撞上就被中止，而且那不是答错。跑 r2300+ 建议 32。">单次超时 <input id="timeout" type="number" min="1" max="180" value="12" style="width:56px"> 分钟</label>
     <label title="并发跑几道题：不同题同时跑，同一道题的多档/多遍永远串行（同题共享工作区，并行会互相清目录，数据会废得看不出来）。实测单条 L2 中位 681s，串行跑 30 题要 35 小时。">并发 <input id="conc" type="number" min="1" max="8" value="4" style="width:46px"> 题</label>
-    <label title="重复方案。每格都跑 N 遍：每个 (题×档) 都跑上面那个「重复次数」。先各跑 1 遍：全池先拿到一张全景图，再按需补。只补阶梯缝：只给 rating 阶梯缝附近（已知最高 AC 与首次可信失败之间，含紧邻一档）的题跑 N 遍，其余各 1 遍。">重复方案 <select id="plan"><option value="full">每格都跑 N 遍</option><option value="sweep">先各跑 1 遍</option><option value="ladder">只补阶梯缝</option></select></label>
+    <label title="重复方案。补齐（默认推荐）：同一 (题×档) 已经有「重复次数」那么多条同模型记录就跳过，只跑缺的格 —— 跑过几轮之后无脑重跑等于花钱重跑已经结算的格子（实测那台机器有一整轮是在重跑上一轮的格子）。每格都跑 N 遍：改过提示词/换过判据口径后用这个，别把新旧口径混进一张表。先各跑 1 遍：全池先拿到一张全景图，再按需补。只补阶梯缝：只给 rating 阶梯缝附近（已知最高 AC 与首次可信失败之间，含紧邻一档）的题跑 N 遍，其余各 1 遍。">重复方案 <select id="plan"><option value="fill">补齐（只跑缺的格）</option><option value="full">每格都跑 N 遍</option><option value="sweep">先各跑 1 遍</option><option value="ladder">只补阶梯缝</option></select></label>
     <label title="默认跳过题表里标了「判不了」的题（多解但没有 checker、或尺子贴错题）。它们只烧钱不产数据：实测 2267B + 2268F 两道烧掉 91 分钟 / ¥10.6。"><input id="includeSkipped" type="checkbox"> 连判不了的题一起跑</label>
     <button id="btnAdd">＋ 加题</button>
     <button id="btnRunSel" class="primary">跑选中题</button>
@@ -614,7 +614,8 @@ async function startRun(ids, all) {
       iterations: Number($('it').value) || 60, lang: $('lang').value, depth: $('depth').value, rich: $('rich').checked
     });
     logLine('开始跑分：' + ids.length + ' 题 × ' + levels.join('/')
-      + (plan === 'full' ? (reps > 1 ? ' × ' + reps + ' 遍' : '') : '（' + (plan === 'sweep' ? '先各跑 1 遍' : '只补阶梯缝 ' + reps + ' 遍') + '）')
+      + (plan === 'full' ? (reps > 1 ? ' × ' + reps + ' 遍' : '')
+        : '（' + (plan === 'sweep' ? '先各跑 1 遍' : (plan === 'ladder' ? '只补阶梯缝 ' + reps + ' 遍' : '补齐到每格 ' + reps + ' 条，已有记录的格跳过')) + '）')
       + '（并发 ' + conc + ' 题，同题串行；单次超时 ' + callTimeoutMin + ' 分钟）');
   } catch (e) { logLine('启动失败：' + e.message); }
 }

@@ -469,7 +469,7 @@ async function main() {
         && html.indexOf('withL1') < 0);
       check('工作台：并发 / 重复方案 / 连判不了的一起跑 三个控件都在（跑不完的解法在调度上）',
         ['conc', 'plan', 'includeSkipped'].every((id) => html.indexOf('id="' + id + '"') >= 0)
-        && /<select id="plan">[\s\S]*?value="sweep"[\s\S]*?value="ladder"/.test(html));
+        && /<select id="plan">[\s\S]*?value="fill"[\s\S]*?value="sweep"[\s\S]*?value="ladder"/.test(html));
       check('工作台：题表里有"跳过这题"的勾选框（判不了的题要能一键剔掉）', html.indexOf('data-skip=') >= 0);
       check('工作台：并发进度显示的是"正在跑哪几道"，不是最后一条（否则看不出并发）',
         html.indexOf('activeJobs') >= 0 && html.indexOf('tickProgress') >= 0);
@@ -713,6 +713,35 @@ async function main() {
         }
         check('工作台端到端：勾"连判不了的题一起跑"时还能强制跑（默认跳过不是硬拦）',
           !!forced && (forced.runs || []).some((r) => r.problem === 'e2e1300'));
+
+        // ⑤ 补齐模式（用户 m13790「为什么一直在重跑」）：同一 (题×档) 已经有足够多同模型记录就不重跑。
+        const nBefore = (forced.runs || []).length;
+        await post('/api/run', { levels: ['L0'], reps: 2, plan: 'fill', iterations: 1, lang: 'python', conc: 2 });
+        await new Promise((r) => setTimeout(r, 600));
+        const stF1 = await (await fetch(base + '/api/state')).json();
+        check('工作台端到端：补齐模式没有要补的格子时**不起跑**、记录数不变（不再无脑重跑已结算的格）',
+          (stF1.runs || []).length === nBefore && !(stF1.job && stF1.job.running),
+          (stF1.runs || []).length + ' 条（前一轮 ' + nBefore + ' 条）');
+        const logF1 = fs.readFileSync(path.join(uiRoot, 'server.log'), 'utf8');
+        check('工作台端到端：日志里写清楚"跳过了几格 / 本次补几条"（事后能复原调度）',
+          logF1.indexOf('补齐模式') >= 0 && logF1.indexOf('不起跑') >= 0);
+
+        const e800Before = (stF1.runs || []).filter((r) => r.problem === 'e2e800' && r.level === 'L0').length;
+        await post('/api/run', { levels: ['L0'], reps: 3, plan: 'fill', includeSkipped: true, iterations: 1, lang: 'python', conc: 2 });
+        let stF2 = null;
+        for (let i = 0; i < 200 && !stF2; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          const st = await (await fetch(base + '/api/state')).json();
+          if (st.runs && st.runs.length >= nBefore + 2 && (!st.job || !st.job.running)) stF2 = st;
+        }
+        const fr = (stF2 || {}).runs || [];
+        const e1300 = fr.filter((r) => r.problem === 'e2e1300' && r.level === 'L0');
+        check('工作台端到端：补齐模式只补差额（e2e1300 已有 1 条 → 补到 3 条，重复编号接着已有的往下排）',
+          e1300.length === 3 && e1300.some((r) => r.rep === 2) && e1300.some((r) => r.rep === 3),
+          'e2e1300/L0 ' + e1300.length + ' 条 rep=' + e1300.map((r) => r.rep).join(','));
+        check('工作台端到端：补齐模式不碰已经够了的格（e2e800/L0 没被重跑）',
+          e800Before >= 3 && fr.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length === e800Before,
+          'e2e800/L0 ' + e800Before + ' → ' + fr.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length + ' 条');
 
         const dr = await fetch(base + '/api/diag/export');
         const dtext = await dr.text();

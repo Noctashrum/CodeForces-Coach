@@ -59,7 +59,7 @@ function usage() {
     '  --iterations N       默认对拍组数（默认 60）',
     '  --reps N             同一 (题×档) 跑几遍（默认 1；界面上的"重复次数"同义）',
     '  --conc N             并发跑几道题（默认 4；同一道题的多档/多遍永远串行）',
-    '  --plan full|sweep|ladder  重复方案：full=每格都跑 reps 遍（默认）/ sweep=先各跑 1 遍 / ladder=只补阶梯缝附近',
+    '  --plan full|sweep|ladder|fill  重复方案：full=每格都跑 reps 遍（默认）/ sweep=先各跑 1 遍 / ladder=只补阶梯缝附近 / fill=补齐（已有足够记录就跳过，只跑缺的格）',
     '  --call-timeout-min N 单次模型调用超时分钟数（默认 12；难题建议 32 —— 实测 12 分钟会砍掉 r2300+）',
     '  --max-steps N        L1 工具循环上限（默认 20）',
     '  --lang python|cpp    L2 交题解的语言（默认 python）',
@@ -259,26 +259,53 @@ async function startRun(o) {
   }
   if (!problems.length) throw new Error('选中的题都被标成"判不了"了（题表里取消勾选，或勾上"连判不了的题一起跑"）');
 
-  // 重复方案：full = 每格都跑 N 遍（原行为）；sweep = 全池先各跑 1 遍；ladder = 只有阶梯缝附近的题跑 N 遍
-  const plan = o.plan === 'sweep' ? 'sweep' : (o.plan === 'ladder' ? 'ladder' : 'full');
+  // 重复方案：full = 每格都跑 N 遍（原行为）；sweep = 全池先各跑 1 遍；ladder = 只有阶梯缝附近的题跑 N 遍；
+  // fill = **补齐**：同一 (题×档) 已有足够多"同模型同参数"的记录就跳过，只补差额。
+  // 为什么要有 fill：跑过几轮之后，无脑重跑等于把钱花在已经结算的格子上 —— 那台机器实测有一个整轮
+  // （R2，两格）就是在重跑上一轮已经跑过的格子。判分是零成本的单独一步，和"要不要重跑"无关。
+  const plan = o.plan === 'sweep' ? 'sweep' : (o.plan === 'ladder' ? 'ladder' : (o.plan === 'fill' ? 'fill' : 'full'));
   const boundary = plan === 'ladder' ? ladderBoundary(problems, wanted) : null;
+  const target = targets[0];
   const repsOf = (p) => {
-    if (plan === 'full') return opts.reps;
     if (plan === 'sweep') return 1;
-    return boundary.has(p.id) ? opts.reps : 1;
+    if (plan === 'ladder') return boundary.has(p.id) ? opts.reps : 1;
+    return opts.reps;                    // full 与 fill 都是"每格目标 reps 条"
   };
   if (plan === 'ladder') logEvent('阶梯式重复：缝附近的 ' + boundary.size + ' 道跑 ' + opts.reps + ' 遍，其余各 1 遍');
 
+  // 已有记录计数（补齐模式用）。只认"同模型、同服务商、同 maxTokens"的记录。
+  // 注意指纹里**没有提示词版本** —— 改过提示词或改过判据口径，请选 full（全部重跑）或换一个跑分目录，
+  // 否则新旧口径会混进同一张表（既有的教训：换问法前后的数据不能混表）。
+  const fpOf = (r) => [r && r.model, r && r.providerId, (r && r.requestFingerprint && r.requestFingerprint.maxTokens) || null].join('|');
+  const wantFp = fpOf({ model: target.model, providerId: target.providerId, requestFingerprint: { maxTokens: params.maxTokens || null } });
+  const haveOf = new Map();
+  if (plan === 'fill') {
+    for (const r of store.records()) {
+      if (fpOf(r) !== wantFp) continue;
+      const k = String(r.level || '').toUpperCase() + '|' + String(r.problem);
+      haveOf.set(k, (haveOf.get(k) || 0) + 1);
+    }
+  }
+
   const jobs = [];
+  let skippedCells = 0;
   for (const p of problems) for (const lv of wanted) {
     const n = repsOf(p);
-    for (let rep = 1; rep <= n; rep++) {
-      jobs.push({ problem: p, level: lv, rep: n > 1 ? rep : null, name: lv + '-' + p.id + (n > 1 ? '#' + rep : '') });
+    const have = haveOf.get(lv + '|' + p.id) || 0;
+    const need = plan === 'fill' ? Math.max(0, n - have) : n;
+    if (plan === 'fill' && need === 0) { skippedCells++; continue; }
+    for (let rep = 1; rep <= need; rep++) {
+      const label = n > 1 ? have + rep : null;      // 补齐时编号接着已有的往下排（#2、#3…）
+      jobs.push({ problem: p, level: lv, rep: label, name: lv + '-' + p.id + (label ? '#' + label : '') });
     }
+  }
+  if (plan === 'fill') {
+    logEvent('补齐模式：' + skippedCells + ' 个 (题×档) 已经够了（同模型同参数已有 ' + opts.reps + ' 条）→ 跳过；本次补 ' + jobs.length + ' 条'
+      + (jobs.length ? '' : '。没有要补的格子，这次不起跑 —— 判分是单独一步，零成本。'));
+    if (!jobs.length) return { skipped: true, reason: 'fill', skippedCells, total: 0 };
   }
   const run = record.openRun(store.dir);
   store.records().forEach((r) => run.records.push(r));   // 保住历史（最后整体重写 records.jsonl）
-  const target = targets[0];
   job = { running: true, cancelled: false, startedAt: Date.now(), done: 0, total: jobs.length, current: null, active: [], opts };
   emit({ type: 'runStart', total: jobs.length, levels: wanted, problems: problems.map((p) => p.id), model: target.providerId + '::' + target.model, opts });
   logEvent('用 ' + target.providerId + '::' + target.model + ' 跑 ' + jobs.length + ' 个 (题×档'
