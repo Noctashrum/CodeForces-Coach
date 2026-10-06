@@ -30,6 +30,12 @@ function acOf(v) {
   if (v.diffVerdict === 'oracle-broken') return { ac: false, strength: 'none', undecidable: true, why: 'oracle-broken' };
   // 多解题 + 没有 checker：差分不一致时两边都可能是对的 → 不可判
   if (v.diffVerdict === 'WA' && v.specialJudge) return { ac: false, strength: 'none', undecidable: true, why: 'special-judge' };
+  // 多解题 + 差分根本跑不起来（缺生成器/缺 oracle）：**样例关对多解题本来就不是判据**，
+  // 所以这一格同样只能算"判不了"（2026-10-06，2268F：题面"不要求最小化" + 缺生成器 → 原来被算成打平）
+  if (v.specialJudge && (v.diffVerdict === 'no-gen' || v.diffVerdict === 'no-oracle'
+    || v.diffVerdict === 'run-error' || v.sampleVerdict === 'special-judge') && v.diffVerdict !== 'AC') {
+    return { ac: false, strength: 'none', undecidable: true, why: 'special-judge（多解题且没有 checker）' };
+  }
   if (v.diffVerdict === 'AC') return { ac: true, strength: 'diff' };
   // 差分跑不了（缺 oracle 或缺生成器）时只能看官方样例：单独标成 samples 级证据，绝不与差分 AC 混为一谈
   if ((v.diffVerdict === 'no-oracle' || v.diffVerdict === 'no-gen') && v.sampleVerdict === 'AC') {

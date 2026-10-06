@@ -49,10 +49,10 @@ function readPart(part, fallbackLang) {
  * 连自己的 4 组官方样例都过不了（期望 9/3/1/19，它给 10/8/2/20）；判分器照样拿它当标尺，
  * 把 L0 与 L2 两侧（用按题面独立写的暴力解验过：400+120 组全对）都判成"差分 WA"。
  *
- * @returns {Promise<{status:'ok'|'no-oracle'|'unverified'|'oracle-broken'|'special-judge', detail:?string, special:boolean}>}
+ * @returns {Promise<{status:'ok'|'no-oracle'|'unverified'|'oracle-broken'|'special-judge', detail:?string, special:boolean, sampleMismatch:?object}>}
  */
 async function oracleGate(problem) {
-  const out = { status: 'ok', detail: null, special: !!(problem && mkgen.looksSpecialJudge(problem.statement)) };
+  const out = { status: 'ok', detail: null, special: !!(problem && mkgen.looksSpecialJudge(problem.statement)), sampleMismatch: null };
   const samples = ((problem && problem.samples) || []).filter((s) => s && String(s.input || '').trim() && String(s.output || '').trim());
   const oracle = readPart(problem && problem.oracle, 'cpp');
   if (!oracle) { out.status = 'no-oracle'; return out; }
@@ -74,6 +74,11 @@ async function oracleGate(problem) {
   const idx = (b.index || 1) - 1;
   const got = String(b.actual == null ? '' : b.actual).trim().slice(0, 120);
   const want = String((samples[idx] || {}).output || '').trim().slice(0, 120);
+  /* 尺子自己过不了官方样例 —— 这是**独立于候选**的事实，无论这题是不是多解题都要留证：
+   * 多解题的豁免（special-judge）说的是"样例不能当判错依据"，不是"尺子没问题"。
+   * 2268F 的 oracle 就是另一道题的代码（给 3/4/2、样例期望 7 行），如果只留 special-judge，
+   * 这条"贴错题"就永远查不出来了。 */
+  out.sampleMismatch = { index: b.index || 1, got: got, want: want };
   if (out.special) {
     out.status = 'special-judge';
     out.detail = '这题是多解题（题面允许输出任意合法答案）：样例第 ' + (b.index || 1) + ' 组它给「' + got
@@ -101,7 +106,13 @@ async function judgeRecord(rec, problem, opts) {
   if (gate) {
     if (gate.status === 'oracle-broken') out.oracleBroken = true;
     if (gate.status === 'special-judge') out.specialJudge = true;
+    // 尺子**过了**样例、但题面判定是"输出任意合法答案"：字面比对同样不能当判错依据。
+    // 这里曾漏掉 —— 于是"oracle 正确 + 多解题"（最常见的那种组合）反而按严格字面比对判，
+    // 把合法答案判成 WA（2268F 的构造答案就是这么被误判的）。
+    if (gate.status === 'ok' && gate.special) { out.specialJudge = true; out.specialJudgeFromText = true; }
     if (gate.status === 'unverified') out.oracleUnverified = true;
+    // 尺子自己过不了样例：多解题豁免不代表尺子没问题（可能贴错题）→ 单独留证
+    if (gate.sampleMismatch) out.oracleSampleMismatch = true;
   }
 
   if (problem.samples && problem.samples.length) {
@@ -119,8 +130,19 @@ async function judgeRecord(rec, problem, opts) {
         + (bad[0].actual != null ? '（实际输出 ' + String(bad[0].actual).slice(0, 200) + '）' : '');
       // 多解题：样例对不上 ≠ 错（题面允许任意合法答案），不能记成 WA
       if (bad.length && out.specialJudge) {
+        const idxS = (bad[0].index || 1) - 1;
+        const gotS = String(bad[0].actual == null ? '' : bad[0].actual).trim().slice(0, 120);
+        const wantS = String((problem.samples[idxS] || {}).output || '').trim().slice(0, 120);
         out.sampleVerdict = 'special-judge';
-        out.detail = gate && gate.detail ? gate.detail : out.detail;
+        let base = (gate && gate.detail) || ('这题是多解题（题面允许输出任意合法答案）：样例第 ' + (bad[0].index || 1)
+          + ' 组它给「' + gotS + '」、样例是「' + wantS + '」，两者都可能是对的 → 样例关不作为判错依据（要判得靠 checker）');
+        // 多解豁免只说明"样例不能当判错依据"，**不说明尺子没问题**：这里再点一句，别让贴错题混过去
+        if (gate && gate.status === 'special-judge' && gate.sampleMismatch) {
+          base += '；⚠️ 另外：这把 oracle **自己也过不了官方样例**（第 ' + gate.sampleMismatch.index + ' 组：样例「'
+            + gate.sampleMismatch.want + '」、它给「' + gate.sampleMismatch.got + '」）→ 如果这题其实不多解，那就是贴错题了，'
+            + '建议核对 oracle';
+        }
+        out.detail = base;
       }
     }
   }
@@ -230,6 +252,7 @@ async function judgeAll(opts, hooks) {
     verdicts.push(v);
     log([v.level, v.problem, (v.model || '')].join(' ') + ' → 样例 ' + v.sampleVerdict + '｜差分 ' + v.diffVerdict
       + (v.oracleBroken ? '｜⛔尺子不可信' : '') + (v.specialJudge ? '｜多解题' : '')
+      + (v.oracleSampleMismatch && !v.oracleBroken ? '｜⚠️尺子样例不符' : '')
       + (v.assertedVerified != null ? '｜链声称已验证 ' + (v.assertedVerified ? '是' : '否') : '')
       + (v.falseConfidence ? '  ⚠️假自信' : '') + (v.detail ? '  ' + v.detail : ''));
     if (h.onVerdict) h.onVerdict(v, i, records.length);
@@ -239,7 +262,7 @@ async function judgeAll(opts, hooks) {
 
   const byLevel = {};
   for (const v of verdicts) {
-    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0 };
+    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0, oracleSampleMismatch: 0 };
     g.total++;
     if (v.sampleVerdict === 'AC') g.sampleAC++;
     if (v.diffVerdict === 'AC') g.diffAC++;
@@ -249,6 +272,7 @@ async function judgeAll(opts, hooks) {
     if (v.diffVerdict === 'no-gen') g.noGen++;
     if (v.oracleBroken) g.oracleBroken++;
     if (v.specialJudge) g.specialJudge++;
+    if (v.oracleSampleMismatch) g.oracleSampleMismatch++;
     if (v.assertedVerified === true) g.asserted++;
     if (v.falseConfidence) g.falseConfidence++;
   }
@@ -258,6 +282,7 @@ async function judgeAll(opts, hooks) {
     log(lv.padEnd(3) + ' n=' + g.total + '  样例通过 ' + g.sampleAC + '(' + pct(g.sampleAC) + ')'
       + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
       + (g.oracleBroken ? '  ⛔尺子不可信 ' + g.oracleBroken : '') + (g.specialJudge ? '  多解题 ' + g.specialJudge : '')
+      + (g.oracleSampleMismatch && !g.oracleBroken ? '  ⚠️尺子样例不符 ' + g.oracleSampleMismatch + '（多解的另一种合法答案、或贴错题 —— 请人工核对 oracle）' : '')
       + (g.asserted ? '  声称已验证 ' + g.asserted + '（其中假自信 ' + g.falseConfidence + '）' : ''));
   }
 

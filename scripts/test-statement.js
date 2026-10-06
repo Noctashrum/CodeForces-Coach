@@ -229,6 +229,28 @@ ok('中文：答案不唯一 / 多解 / 输出任意 → 多解题', () => {
   assert.strictEqual(st.looksSpecialJudge('输出字典序最小的方案。'), false);
 });
 
+/* 第二次事故（2026-10-06，3500 分题 2268F「Deglado」）：题面里一个 any / 多解 的字眼都没有，
+ * 只写了 "Note that you do not need to minimize the number of operations." + "print k then k lines of i j"
+ * → 判成普通题做逐字比对，一条合法的构造答案（同样 k=3，只是操作顺序不同）被判"样例 WA"，
+ * 链条照着"样例没过"往下走，最后降级交了暴力解。这属于"判据的判据"漏了一整个类别。*/
+ok('英文：不要求最优（do not need to minimize）→ 构造型多解题', () => {
+  assert.strictEqual(st.looksSpecialJudge('Note that you do not need to minimize the number of operations.'), true);
+  assert.strictEqual(st.looksSpecialJudge("You don't need to minimize the total cost.\nPrint k and then k lines."), true);
+  assert.strictEqual(st.looksSpecialJudge('It is not required to minimize the number of swaps.'), true);
+  assert.strictEqual(st.looksSpecialJudge('You need not minimize the number of operations.'), true);
+  // 但"不用最小化"旁边如果另立了平局规则，仍按普通题判（宁可窄）
+  assert.strictEqual(st.looksSpecialJudge('You do not need to minimize k. Output the lexicographically smallest sequence.'), false);
+  assert.strictEqual(st.looksSpecialJudge('You do not need to minimize the sum, output the minimum possible value.'), false);
+});
+
+ok('中文：不要求最小化 → 构造型多解题', () => {
+  assert.strictEqual(st.looksSpecialJudge('注意，本题不要求最小化操作次数，输出任意一种方案即可。'), true);
+  assert.strictEqual(st.looksSpecialJudge('无需最小化总代价。'), true);
+  // "不要求最小化"不误伤"要输出最小值"
+  assert.strictEqual(st.looksSpecialJudge('不要求最小化，但请输出字典序最小的方案。'), false);
+  assert.strictEqual(st.looksSpecialJudge('输出最小可能值。'), false);
+});
+
 console.log('statement: 假样例识别与清理（旧会话里存着"题面格式段被当成样例 1"的污染）');
 
 ok('假样例：输入格式段落 + 输出格式段落（2026-10 事故原样）→ 判定为假', () => {

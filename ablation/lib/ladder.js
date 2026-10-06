@@ -28,8 +28,14 @@ const KIND_TEXT = {
   none: '未跑'
 };
 
-/** 中止 = 模型调用被超时/取消掐断（lib/llm.js 的文案），不是答错。 */
-const ABORT_RE = /超时|abort/i;
+/**
+ * 中止 = **不是因为"答错"而结束**：单次调用超时（lib/llm.js 的文案）、被取消、传输层中断。
+ *
+ * 传输层也算中止，是踩过的坑（2026-10-06，3500 分题 2268F）：L0 报 `terminated`、L0C 报 `fetch failed`
+ * （都只跑了 10 秒、0 token、0 成本、一个字都没收到），当时的规则只认 `超时|abort`，于是这两条被记成
+ * "没交出来"（= 这一档做不出来），而不是"这次没跑完"—— 记错方向的代价就是把整档上限报低。
+ */
+const ABORT_RE = /超时|abort|传输层|terminated|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|other side closed/i;
 
 function num(v) { return typeof v === 'number' && Number.isFinite(v) ? v : 0; }
 
