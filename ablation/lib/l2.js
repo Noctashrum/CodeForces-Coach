@@ -108,7 +108,8 @@ async function runL2(ctx) {
     request: {
       stream: true, hasTools: false, pipeline: 'cf-coach/runPipeline',
       intent: 'full', rich: !!ctx.rich, lang, wsKey: key,
-      perTier: ctx.iterations || 30, maxStressMs: ctx.maxStressMs || 90000, depth: ctx.depth || 'L3'
+      perTier: ctx.iterations || 30, maxStressMs: ctx.maxStressMs || 90000, depth: ctx.depth || 'L3',
+      docEffort: ctx.docEffort || ''   // '' = 默认（讲解带思考）；'none' = 实验臂"关思考写文档"
     }
   };
 
@@ -124,7 +125,15 @@ async function runL2(ctx) {
         model: target.model,
         system: o.system,
         messages: [{ role: 'user', content: o.user }],
-        maxTokens: (o && o.maxTokens) || params.maxTokens || undefined,
+        // 输出上限：harness 现在会给代码类角色显式请求上限（首轮 32,768、截断后的"落码抢救" 65,536），
+        // 但 `--max-tokens N` 是消融实验声明的"信息预算"，是**硬天花板** —— 设了它，L0/L1/L2 都不得超过它，
+        // 否则跨档对比就不是同一个预算了。没设（默认，文档里的标准跑法）时完全按 harness 的请求走。
+        maxTokens: (params.maxTokens && (o && o.maxTokens))
+          ? Math.min(o.maxTokens, params.maxTokens)
+          : ((o && o.maxTokens) || params.maxTokens || undefined),
+        // reasoningEffort：harness 的"落码抢救"要靠它把关思考的请求传到服务商（内容为 'none'）。
+        // 不转发这里，抢救就只是换了个问法，钱照烧（见 .probe/probe-sol-unblock.js）。
+        reasoningEffort: (o && o.reasoningEffort) || undefined,
         stream: (o && o.stream) !== false,
         signal: o && o.signal,
         onUsage: (u) => {
@@ -156,6 +165,7 @@ async function runL2(ctx) {
       level: ctx.depth || 'L3',
       rich: !!ctx.rich,
       richTheme: 'dark',
+      docEffort: ctx.docEffort === 'none' ? 'none' : '',
       perTier: ctx.iterations || 30,
       maxStressMs: ctx.maxStressMs || 90000,
       log: () => {},

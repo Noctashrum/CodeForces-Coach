@@ -51,6 +51,8 @@ function usage() {
     '  --rich               L2 生成图文文档（更贵；默认关，判分不需要它）',
     '  --depth L1|L2|L3     L2 的讲解深度（默认 L3 = 与产品默认一致；L3 会多一次提纲 Agent）',
     '  --max-stress-ms N    L2 单次对拍时长上限（默认 90000）',
+    '  --doc-effort none    L2 讲解 Agent 关思考写文档（**实验臂**：实测一份文档 3.5-5K 输出 token，',
+    '                       带思考要 30-65K；代价是"想得少"，默认关。记录里写进 request.docEffort）',
     '  --out DIR            输出目录（默认 ablation/out/<时间戳>）',
     '  --dry-run            只打印计划，不调模型'
   ].join('\n'));
@@ -126,6 +128,7 @@ async function main() {
     lang: args.lang === 'cpp' ? 'cpp' : 'python',
     rich: env.bool(args.rich, false),
     depth: args.depth ? String(args.depth).toUpperCase() : 'L3',
+    docEffort: args.docEffort ? String(args.docEffort).toLowerCase() : '',
     maxStressMs: env.num(args.maxStressMs, 90000)
   };
   await pool(jobsList, jobs, async (j) => {

@@ -690,6 +690,9 @@ function makeAgentCall(deps) {
         // 单次输出上限：harness 可以在"上次被截断"的重试里显式要个更大的值
         // （服务商不接受会自动去掉该字段重试，见 callAgentLLM）
         maxTokens: (opts.maxTokens != null && opts.maxTokens > 0) ? opts.maxTokens : (cfg.maxOutputTokens || 0),
+        // 关思考：harness 的"落码抢救"在"上一轮被长度上限截断且正文为空"时把它设成 'none'
+        // （把思考尾巴喂回去、只让它落成代码；见 lib/harness.js 的注释）
+        reasoningEffort: opts.reasoningEffort || undefined,
         // token 记账：上游给了 usage 就用真值（在 harness 侧汇总成"这题花了多少"）
         onUsage: (u) => { if (typeof opts.onUsage === 'function') opts.onUsage(u); },
         // 收尾原因（finish_reason=length 表示被长度上限截断）：harness 据此换"压缩输出"的重试话术
@@ -1102,6 +1105,11 @@ function resolveAgentTarget(cfg, provider, model, role) {
 async function callAgentLLM(o) {
   const cu = coachUpstream(o.provider, o.model, o.messages, o.system, { maxTokens: o.maxTokens || 0 });
   const bodyObj = Object.assign({}, cu.base, { temperature: 0.2 });
+  // 关思考（'none'）：harness 的"落码抢救"用。推理模型被长度上限截断时正文 0 字符、预算全在思考上，
+  // 唯一有效的解药是"把上一轮思考喂回去 + 关掉思考让它只落码"（见 lib/harness.js 的注释与
+  // .probe/probe-sol-unblock.js）：`thinking:{type:'disabled'}` / `enable_thinking:false` / `minimal`
+  // 这些写法实测都被忽略，只有 reasoning_effort 认。
+  if (o.reasoningEffort) bodyObj.reasoning_effort = o.reasoningEffort;
   if (o.provider.type === 'anthropic') {
     bodyObj.system = cu.system;
     bodyObj.messages = cu.messages;
@@ -1132,7 +1140,7 @@ async function callAgentLLM(o) {
   }
   // 个别服务不认识 stream_options.include_usage / max_tokens 上限更小 → 去掉/调小后重试一次
   // （token 统计会退化为估算、输出上限回到服务默认值，都不影响讲解本身）
-  if (!res.ok && (bodyObj.stream_options || bodyObj.max_tokens)) {
+  if (!res.ok && (bodyObj.stream_options || bodyObj.max_tokens || bodyObj.reasoning_effort)) {
     const detail = await upstreamErrorText(res).catch(() => '');
     let retry = false;
     if (bodyObj.stream_options && /stream_options|include_usage|unknown|unrecognized|invalid.*(field|param)/i.test(detail)) {
@@ -1141,6 +1149,11 @@ async function callAgentLLM(o) {
     if (bodyObj.max_tokens && /max_?tokens|max_completion_tokens|too large|exceed/i.test(detail)) {
       // 服务商不接受这个上限 → **整个去掉**，改用它的默认值（硬压到 8192 反而会把富讲解截断）
       delete bodyObj.max_tokens; retry = true;
+    }
+    // 不认 reasoning_effort 的服务商（"关思考"是 DeepSeek 系的方言）：去掉重试一次 ——
+    // 这一轮就退化成"会思考"的调用（更贵，但比直接失败好）。
+    if (bodyObj.reasoning_effort && /reasoning_effort|reasoning effort|unknown|unrecognized|invalid.*(field|param)/i.test(detail)) {
+      delete bodyObj.reasoning_effort; retry = true;
     }
     if (retry) {
       res = await fetch(cu.url, {
@@ -1151,14 +1164,17 @@ async function callAgentLLM(o) {
     }
   }
   let finishReason = '';
+  let reasonTail = '';    // 思考的尾巴：被截断时 harness 要把它当输入喂回去（只留尾巴，整段太长）
   const pumpOnce = async () => {
     let text = '';
+    reasonTail = '';
     await pumpUpstream(res, (ev) => {
       if (ev.type === 'delta') {
         text += ev.text;
         if (o.onDelta) o.onDelta(ev.text);
-      } else if (ev.type === 'reasoningDelta' && o.onReasoning) {
-        o.onReasoning(ev.text);
+      } else if (ev.type === 'reasoningDelta') {
+        reasonTail = (reasonTail + String(ev.text || '')).slice(-4000);
+        if (o.onReasoning) o.onReasoning(ev.text);
       } else if (ev.type === 'usage' && o.onUsage) {
         o.onUsage(ev);
       } else if (ev.type === 'finish' && ev.reason) {
@@ -1179,8 +1195,9 @@ async function callAgentLLM(o) {
       if (o.onMeta) o.onMeta({ capRetrySkipped: true });
     }
     // 无论哪种情况都把 finish_reason 如实上报：harness 用它区分"真空白"与"被长度上限截断"，
-    // 并据此换重试话术（截断 → 要求压缩输出，而不是把同一份长要求再发一遍）
-    if (o.onMeta && finishReason) o.onMeta({ finishReason });
+    // 并据此换重试话术（截断 → 要求压缩输出，而不是把同一份长要求再发一遍）；
+    // 同时把**思考尾巴**交出去 —— 被截断时 harness 靠它做"落码抢救"（喂回去 + 关思考）
+    if (o.onMeta && finishReason) o.onMeta({ finishReason, reasoningTail: reasonTail });
     return text;
   } finally {
     clearTimeout(timer);

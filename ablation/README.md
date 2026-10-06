@@ -33,6 +33,9 @@ node ablation/run.js --level L0,L1 --problems all --limit 5 --out ablation/out/p
 
 # 3) L2 用 cf-coach 本体跑，然后把它的产物导进同一份记录
 node ablation/import-l2.js --conv <会话id> --out ablation/out/pilot
+#    或让消融自己跑 L2（推荐，记录更全）：
+node ablation/run.js --level L2 --problems all --limit 5 --rich --depth L3 --out ablation/out/pilot
+#    --depth L3 = 与产品默认一致（会多一次「讲解提纲」Agent）；--rich = 生成图文文档（判分不需要它）
 
 # 4) 统一判分（三档同一套判据）
 node ablation/judge.js --out ablation/out/pilot --iterations 200
@@ -306,6 +309,27 @@ oracle 只能来自：
 
 30 题 × 三档大致是**几十元到一两百元**的 token 开销（取决于模型与题面长度），
 机器时间几小时，**不需要人工逐题跑**；人工主要花在准备 oracle 与抽检上。
+
+### L2 的钱花在哪（实测，别按直觉猜）
+
+同一批题逐次调用记账（`<臂目录>/l2-data/<批次>/workspace/ab-<题号>/meta.json` 的 `trace[]`，
+汇总命令 `node .probe/analyze-l2-stages.js <臂目录>`）——
+
+| 角色 | 干什么 | 单题量级 | 备注 |
+| --- | --- | --- | --- |
+| 题解 / 修题解 | 写正解 | 3 万–7 万 | **最大的一项，且常常一问两轮**（首轮想不完 → 截断 → 落码抢救） |
+| 讲解 L3 | 写图文文档（交付物） | 1.2 万–9 万 | 带思考写文档，单次 3 万–6.5 万；**关思考只要 3.5–5K** |
+| 讲解提纲 | 先列提纲再写文档 | 1 万–3 万 | 机械活，被截断时用"落文抢救"接住 |
+| 暴力 / 生成器 | 对拍底座 | 1 万 | 稳定 |
+| 手算锚点 / 错因仲裁 | 弱样例体检、判冲突 | 数千–1 万 | 稳定 |
+
+两个开关（都是**显式**的，默认不动）：
+
+- `--rich`：是否产出图文文档。**关掉它省的是交付物，不是浪费**——判分不需要它，但人要看它。
+- `--doc-effort none`：**实验臂**，让讲解 Agent 也关思考写文档。实测单题成本再降约三成
+  （2 题样本 ¥1.03 → ¥0.73/题），代价是文档的结构校验更容易不过（2 题里有 1 题回落成 Markdown）。
+  默认关；要用它就该同时看"交付物完整度"，别只看钱。数据见
+  [`docs/cost-l2-salvage-2026-10.md`](../docs/cost-l2-salvage-2026-10.md)。
 
 ## 这版**没有**做（别误读结论）
 

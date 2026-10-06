@@ -741,6 +741,125 @@ const callAgent = async (opts) => {
   }
 
 
+  /* ---------------- 落码抢救：截断的根因是"想得停不下来"，把思考喂回去 + 关思考 ----------------
+   * 实测（.probe/probe-sol-unblock.js / probe-salvage-quality.js，2268C/2268D/2268F）：
+   * 推理模型在无上限的首轮会把 65,536 输出 token 全烧在思考上、正文 0 字符（182848 那批 7/9 = 78%）；
+   * 预填代码骨架、"先写一行注释"的提示词都拽不动它，唯一有效的是关思考（reasoning_effort='none'），
+   * 而"把上一轮思考的尾巴当输入喂回去 + 关思考"才能保住它已经想好的做法
+   * （2268D r2600：考 4096 + 落码 4528 → 真解，样例与差分双 AC，¥0.179/题）。 */
+  console.log('parallel: 题解被截断 → 落码抢救（喂回思考 + 关思考）');
+  {
+    const TAIL = 'THINKING-TAIL-42：用 Trie 维护前缀集合，离线反向建图求最长路';
+    const PROSE_TAIL = 'THINKING-TAIL-77：讲解要先做手算演示，再给算法与复杂度';
+    const salvageAsks = [];
+    const proseAsks = [];
+    const seenRoles = [];
+    // 机械类非代码角色（讲解提纲 / 手算锚点 / 错因仲裁）与"写交付物"的讲解 Agent 要分开看：
+    // 前者压预算，后者是产品本身，压了就毁交付物。**必须在跑完之后再算**（seenRoles 是逐次调用累积的）。
+    const mechRoles = () => seenRoles.filter((r) => r.role !== '讲解 Agent' && r.role.indexOf('题解') < 0
+      && r.role.indexOf('暴力') < 0 && r.role.indexOf('数据生成') < 0);
+    const callAgentSalvage = async (opts) => {
+      const sys = String(opts.system || '');
+      const m = sys.match(/【([^】]+)】/);
+      seenRoles.push({ role: m ? m[1] : 'unknown', maxTokens: opts.maxTokens || null, effort: opts.reasoningEffort || null });
+      if (sys.indexOf('【讲解 Agent】') >= 0) {
+        // 非代码角色同样会"想得停不下来"：第一次预算全花在思考上、正文 0 字符
+        proseAsks.push({ user: String(opts.user || ''), maxTokens: opts.maxTokens || null, effort: opts.reasoningEffort || null });
+        if (proseAsks.length === 1) {
+          if (opts.onMeta) opts.onMeta({ finishReason: 'length', reasoningTail: PROSE_TAIL });
+          return '';
+        }
+        return '## 题面拆解\n把材料写成文。\n## 验证\n官方样例通过。';
+      }
+      if (sys.indexOf('【题解 Agent】') >= 0) {
+        salvageAsks.push({ user: String(opts.user || ''), maxTokens: opts.maxTokens || null, effort: opts.reasoningEffort || null });
+        if (salvageAsks.length === 1) {
+          // 第一次：预算全花在思考上、正文为空，但**思考尾巴拿到了**（这就是抢救的输入）
+          if (opts.onMeta) opts.onMeta({ finishReason: 'length', reasoningTail: TAIL });
+          return '';
+        }
+        return '想好了，落成代码。\n\n```python\n' + SOL + '\n```';
+      }
+      return callAgent(opts);
+    };
+    const resSalv = await harness.runPipeline({
+      conv: { id: 'salvage', title: '落码抢救' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: 'salvage',
+      callAgent: callAgentSalvage, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+    ok('落码抢救：被截断的代码角色，第二次尝试把上一轮思考喂回去（提示词里带着思考尾巴）',
+      salvageAsks.length >= 2 && salvageAsks[1].user.indexOf(TAIL) >= 0,
+      salvageAsks.map((a) => ({ tail: a.user.indexOf(TAIL) >= 0, maxTokens: a.maxTokens, effort: a.effort })));
+    ok('落码抢救：第二次尝试关掉思考（reasoning_effort=none，实测唯一有效的手段；不传就只是换个问法）',
+      salvageAsks.length >= 2 && salvageAsks[1].effort === 'none' && !salvageAsks[0].effort,
+      salvageAsks.map((a) => a.effort));
+    ok('落码抢救：仍然叠加"【本次只要代码】"的极简问法（两层约束同时生效）',
+      salvageAsks.length >= 2 && /【本次只要代码】/.test(salvageAsks[1].user));
+    ok('成本：代码类角色首轮就带上限 8192（首轮给太大 = 想不完就被截断，尾巴是半截推导），抢救时才给到 65536',
+      salvageAsks.length >= 2 && salvageAsks[0].maxTokens === 8192 && salvageAsks[1].maxTokens === 65536,
+      salvageAsks.map((a) => a.maxTokens));
+    ok('成本：非代码角色有自己的预算（首轮 16384、抢救 32768），绝不会拿到代码角色的 8192/65536',
+      mechRoles().length >= 1 && mechRoles().every((r) => r.maxTokens === 16384 || r.maxTokens === 32768),
+      mechRoles());
+    ok('成本：写交付物的讲解 Agent 首轮拿到 131072 的天花板（服务商默认只给 65,536，实测给够上限后一次写完 92,007 token；'
+      + '不给够就会 65,536 截断 → 抢救 → 回落重写，实测烧到 178K 还把交付物退化成 Markdown）',
+      proseAsks.length >= 2 && proseAsks[0].maxTokens === 131072 && proseAsks[1].maxTokens === 32768,
+      proseAsks.map((a) => a.maxTokens));
+    ok('落文抢救：非代码角色被截断也走同一条路（喂回思考尾巴 + 关思考，否则 65,536 全是白烧）',
+      proseAsks.length >= 2 && proseAsks[1].user.indexOf(PROSE_TAIL) >= 0 && proseAsks[1].effort === 'none',
+      proseAsks.map((a) => ({ tail: a.user.indexOf(PROSE_TAIL) >= 0, effort: a.effort })));
+    // 讲解的**机械修复**（修讲解结构 / 修图文文档 / Markdown 回落）是"按校验错误把文档重写一遍"，
+    // 实测关思考 15-19 秒就写出 5.7K-11.8K 字符的合格文档，而带思考的同一角色单次要 30-65K 输出 token。
+    ok('成本：讲解的机械修复/回落重写用关思考 + 16384（不是再烧一次 30-65K 的思考）',
+      proseAsks.length >= 3 && proseAsks.slice(2).every((a) => a.maxTokens === 16384 && a.effort === 'none'),
+      proseAsks.map((a) => ({ maxTokens: a.maxTokens, effort: a.effort, len: a.user.length })));
+    ok('落码抢救：拿到代码 → 这一轮算成功，不再降级交付暴力解',
+      String(resSalv.solCode || '').trim() === SOL.trim()
+      && !(resSalv.verification && resSalv.verification.degraded === 'brute'),
+      { head: String(resSalv.solCode || '').slice(0, 40), status: resSalv.verification && resSalv.verification.status });
+    ok('落码抢救：轨迹写清楚"这一版是抢救回来的"（事后能看出钱花在哪）',
+      (resSalv.trace || []).some((t) => /落码抢救/.test(t.label))
+      && (resSalv.trace || []).some((t) => /落码抢救/.test(String(t.note || ''))),
+      (resSalv.trace || []).map((t) => t.label).join(' | '));
+    ok('落文抢救：非代码角色的抢救同样在轨迹里留痕（讲解这类角色的花销也要能事后对账）',
+      (resSalv.trace || []).some((t) => /落文抢救/.test(t.label))
+      && (resSalv.trace || []).some((t) => /落文抢救/.test(String(t.note || ''))),
+      (resSalv.trace || []).map((t) => t.label).join(' | '));
+  }
+
+  /* ---------------- 实验旋钮 docEffort：让写交付物的角色也关思考 ----------------
+   * 实测（.probe/probe-doc-cost.js）：关思考写一份合格图文文档只要 3.5-5K 输出 token、15-19 秒，
+   * 带思考的同一角色单次要 30-65K。代价是"想得少"，所以默认关，只有跑分的人显式
+   * `ablation/run.js --doc-effort none` 才打开 —— 这里锁住它真的生效（这类"旋钮写了但没接线"
+   * 的 bug 已经栽过一次：探针里把 reasoning_effort 写错键名，结果"关思考"那一路其实开着思考）。 */
+  console.log('parallel: 讲解关思考的实验旋钮（--doc-effort none）');
+  {
+    const docAsks = [];
+    const callAgentDocEffort = async (opts) => {
+      const sys = String(opts.system || '');
+      if (sys.indexOf('【讲解 Agent】') >= 0) {
+        docAsks.push({ maxTokens: opts.maxTokens || null, effort: opts.reasoningEffort || null });
+        return '## 题面拆解\n材料写成文。\n## 验证\n官方样例通过。';
+      }
+      return callAgent(opts);
+    };
+    await harness.runPipeline({
+      conv: { id: 'doceffort', title: '讲解关思考' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: 'doceffort', docEffort: 'none',
+      callAgent: callAgentDocEffort, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+    ok('实验旋钮：docEffort=none 时讲解 Agent 首轮就关思考并拿 16384（默认臂是带思考 + 131072；'
+      + '探针实测关思考文档 3.5-5K token，带思考 30-65K）',
+      docAsks.length >= 1 && docAsks[0].effort === 'none' && docAsks[0].maxTokens === 16384,
+      docAsks);
+  }
+
   /**
    * 多题并行 = 不同题号真的同时跑 + 同一道题绝不并发改同一批文件。
    * 这两条由两个底座保证：lib/serialqueue.js（串行队列）与 workspace.withKeyLock（按 key 分链）。
