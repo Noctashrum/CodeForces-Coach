@@ -177,7 +177,18 @@ function recOf(level, id) { return (S.records || []).find((r) => r.level === lev
 function verdictOf(level, id) { return (S.verdicts || []).find((v) => v.level === level && v.problem === id) || null; }
 function humanOf(id) { const h = (S.human || []).filter((x) => x.problem === id); return h.length ? h[h.length - 1] : null; }
 
-function verdictBadge(v) {
+/**
+ * 这条记录是"降级交付的暴力解"吗？（题解 Agent 交不出代码，链把同一轮的暴力解交了上来）
+ * 判据与 `ablation/lib/ladder.js` 的 `isDegradedRun`、`ablation/judge.js` 的 `deliveredBrute` 保持一致：
+ * 是 brute 降级 **且** 交付的不是模型自己的解。
+ */
+function isDegradedRec(r) {
+  if (!r) return false;
+  const d = (r.verification && r.verification.degraded) || (r.verificationStatus === 'degraded-brute' ? 'brute' : null);
+  return d === 'brute' && r.delivered !== 'model-first';
+}
+
+function verdictBadge(v, r) {
   if (!v) return '<span class="badge b-dim">未判分</span>';
   const map = {
     AC: ['b-ok', '差分 AC'], WA: ['b-bad', '差分 WA'], 'no-oracle': ['b-warn', '缺 oracle'],
@@ -187,7 +198,13 @@ function verdictBadge(v) {
     'run-error': ['b-warn', '运行错误'], 'no-code': ['b-dim', '没抽到代码'], unknown: ['b-dim', '未知'], skipped: ['b-dim', '未判分']
   };
   const m = map[v.diffVerdict] || ['b-dim', v.diffVerdict];
-  let s = '<span class="badge ' + m[0] + '">' + esc(m[1]) + '</span>';
+  // ★ 降级交付的暴力解必须盖在 AC 前头：那个"差分 AC"只证明**那份暴力解**是对的，
+  //   不证明这一档解出了这道题。原来这里只映射 diffVerdict，于是题卡上照样显示"差分 AC"，
+  //   和标题行、阶梯一起把 6/8 撑成了假的能力证据（实测踩过：2089E/2081E/2081G1）。
+  //   降级时原来的判词仍以暗色附在后面 —— 证据不能被藏。
+  let s = ((v.deliveredBrute || isDegradedRec(r)))
+    ? '<span class="badge b-warn">⚠ 交的是暴力解（不算 AC）</span> <span class="badge b-dim">' + esc(m[1]) + '：那份暴力解</span>'
+    : '<span class="badge ' + m[0] + '">' + esc(m[1]) + '</span>';
   if (v.sampleVerdict === 'WA') s += ' <span class="badge b-bad">样例 WA</span>';
   if (v.sampleVerdict === 'special-judge') s += ' <span class="badge b-warn">样例对不上（多解题，可能仍合法）</span>';
   if (v.falseConfidence) s += ' <span class="badge b-bad">假自信</span>';
@@ -239,7 +256,7 @@ function renderSummary() {
  */
 const KIND_CLS = {
   ac: 'b-ok', fail: 'b-bad', unfinished: 'b-warn', nocode: 'b-dim',
-  unreliable: 'b-warn', noruler: 'b-warn', ran: 'b-dim', none: 'b-dim'
+  degraded: 'b-warn', unreliable: 'b-warn', noruler: 'b-warn', ran: 'b-dim', none: 'b-dim'
 };
 
 function renderCeiling() {
@@ -262,6 +279,10 @@ function renderCeiling() {
       + '<span class="small dim">' + esc(g.verdict || '') + '（' + (st.n || 0) + ' 次）</span></div>';
   }
   html += '</div>';
+  if (t.degraded) {
+    html += '<div class="small" style="color:var(--warn);margin:6px 0">⚠️ 这批数据里有 <b>' + t.degraded + '</b> 次是**降级交付的暴力解**（题解 Agent 没交出自己的解，链把暴力解交了上来）：'
+      + '阶梯里它们单列成「⚠ 交的是暴力解」，<b>既不算 AC 也不算答错</b>，也不参与"会做 ≤ rX"的结论 —— 见下面标 ⚠ 的格子。</div>';
+  }
   html += '<div class="small dim" style="margin:6px 0">读法：' + esc(L.note || '') + '</div>';
   html += '<div class="small dim" style="margin:6px 0">稳健性：' + esc(L.evidence || '') + '</div>';
 
@@ -282,7 +303,8 @@ function renderCeiling() {
     html += '<td class="small">' + (s.n ? (s.n + ' 次 · 输出 ' + (s.out || 0).toLocaleString() + ' tok · ' + mins + ' 分钟'
       + (s.priced ? ' · ' + money(s.cost) + (s.priced < s.n ? '<span class="dim">（' + (s.n - s.priced) + ' 次未计费/中止）</span>' : '') : '')
       + (s.aborted ? ' · <span style="color:var(--warn)">中止 ' + s.aborted + '</span>' : '')
-      + (s.truncated ? ' · <span style="color:var(--warn)">撞顶 ' + s.truncated + '</span>' : '')) : '<span class="dim">—</span>') + '</td>';
+      + (s.truncated ? ' · <span style="color:var(--warn)">撞顶 ' + s.truncated + '</span>' : '')
+      + (s.degraded ? ' · <span style="color:var(--warn)">交暴力解 ' + s.degraded + '</span>' : '')) : '<span class="dim">—</span>') + '</td>';
     html += '</tr>';
   }
   html += '</tbody></table>';
@@ -322,10 +344,10 @@ function renderProblems() {
       + '<div class="small dim">' + (p.samples || []).length + ' 组样例 · ' + (p.hasOracle ? 'oracle ' + esc(p.oracleLang) : '<span style="color:var(--warn)">无 oracle</span>') + (p.hasGen ? ' · 有生成器' : ' · <span style="color:var(--warn)">无生成器</span>') + (p.note ? ' · ' + esc(p.note) : '') + '</div>'
       + (und ? '<div class="small" style="color:var(--warn)">判不了：' + esc(und) + '</div>' : '')
       + '<label class="small dim" title="标了跳过就不会进跑分队列（左上角勾「连判不了的题一起跑」可以临时收回）。判不了的题只烧钱不产数据：实测两道吃掉 91 分钟 / ¥10.6。"><input type="checkbox" data-skip="' + esc(p.id) + '"' + (p.skip ? ' checked' : '') + '> 跳过这题</label></td>'
-      + '<td>' + (r0 ? verdictBadge(v0) : '<span class="badge b-dim">未跑</span>')
-      + (r0c ? '<div class="small" style="margin-top:3px">L0C ' + verdictBadge(v0c) + '</div>' : '')
-      + (r1 ? '<div class="small" style="margin-top:3px">L1 ' + verdictBadge(verdictOf('L1', p.id)) + '</div>' : '') + '</td>'
-      + '<td>' + (r2 ? verdictBadge(v2) + (r2.assertedVerified ? '<div class="small"><span class="badge ' + (r2.verificationStatus === 'ok' && r2.scopeComplete ? 'b-ok' : 'b-warn') + '">' + esc(r2.verificationStatus || '') + (r2.scopeComplete ? '（完整）' : '（不完整）') + '</span></div>' : '') : '<span class="badge b-dim">未跑</span>') + '</td>'
+      + '<td>' + (r0 ? verdictBadge(v0, r0) : '<span class="badge b-dim">未跑</span>')
+      + (r0c ? '<div class="small" style="margin-top:3px">L0C ' + verdictBadge(v0c, r0c) + '</div>' : '')
+      + (r1 ? '<div class="small" style="margin-top:3px">L1 ' + verdictBadge(verdictOf('L1', p.id), r1) + '</div>' : '') + '</td>'
+      + '<td>' + (r2 ? verdictBadge(v2, r2) + (r2.assertedVerified ? '<div class="small"><span class="badge ' + (r2.verificationStatus === 'ok' && r2.scopeComplete ? 'b-ok' : 'b-warn') + '">' + esc(r2.verificationStatus || '') + (r2.scopeComplete ? '（完整）' : '（不完整）') + '</span></div>' : '') : '<span class="badge b-dim">未跑</span>') + '</td>'
       + '<td class="small">' + (choiceTxt ? esc(choiceTxt) : '<span class="dim">—</span>') + (h && h.note ? '<div class="dim">' + esc(h.note) + '</div>' : '') + '</td>'
       + '<td><button data-edit="' + esc(p.id) + '">编辑</button></td>'
       + '</tr>';
@@ -372,9 +394,9 @@ async function openDetail(id) {
     if (level === 'L0' && r.answerName) s += '<details><summary class="small dim">模型原文回答</summary><pre id="ans-' + level + '">加载中…</pre></details>';
     return s;
   };
-  const verdictLine = (v, level) => {
+  const verdictLine = (v, level, rec) => {
     if (!v) return '<span class="badge b-dim">' + level + ' 未判分</span>';
-    return '<span class="badge b-dim">' + level + '</span> ' + verdictBadge(v)
+    return '<span class="badge b-dim">' + level + '</span> ' + verdictBadge(v, rec)
       + (v.assertedVerified != null ? ' <span class="badge ' + (v.assertedVerified ? (v.falseConfidence ? 'b-bad' : 'b-ok') : 'b-dim') + '">' + (v.assertedVerified ? (v.falseConfidence ? '声称已验证但被 oracle 判错（假自信）' : '声称已验证且确实对') : '没有声称已验证') + '</span>' : '')
       + (v.detail ? '<div class="small dim">' + esc(v.detail) + '</div>' : '');
   };
@@ -383,7 +405,7 @@ async function openDetail(id) {
     + '<div class="card"><h2>L0 裸模型（一次调用，无工具）</h2>' + ansCell(r0, 'L0') + '</div>'
     + '<div class="card"><h2>L2 cf-coach（工具链 + 验证 + 图文）</h2>' + ansCell(r2, 'L2') + '</div>'
     + '</div>'
-    + '<div class="card"><h2>判分（外部 oracle 差分 = 硬指标）</h2>' + verdictLine(v0, 'L0') + '<div style="height:6px"></div>' + verdictLine(v2, 'L2') + '</div>'
+    + '<div class="card"><h2>判分（外部 oracle 差分 = 硬指标）</h2>' + verdictLine(v0, 'L0', recOf('L0', id)) + '<div style="height:6px"></div>' + verdictLine(v2, 'L2', recOf('L2', id)) + '</div>'
     + '<div class="card"><h2>人工判定（讲解质量 = 真正的轴）</h2>'
     + '<div class="row choice">' + choices.map(([v, t]) => '<button data-choice="' + v + '" class="' + (h && String(h.choice).toLowerCase() === v ? 'on' : '') + '">' + t + '</button>').join('') + '</div>'
     + '<div class="row"><input id="h_note" placeholder="为什么（哪个更容易学会？哪里卡住？）" style="flex:1" value="' + esc(h && h.note || '') + '">'

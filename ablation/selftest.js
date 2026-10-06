@@ -394,6 +394,20 @@ async function main() {
         cmpDeg.win === 0 && cmpDeg.loss === 1 && cmpDeg.tie === 0
         && cmpDeg.deliveredBrute.count === 1 && cmpDeg.deliveredBrute.problems[0] === '2268C',
         JSON.stringify([cmpDeg.win, cmpDeg.tie, cmpDeg.loss, cmpDeg.deliveredBrute]));
+      // 标题行必须同时给"差分通过"和"严格通过"：外机那批 L2 标题行写着 6/8(75%)，
+      // 而其中 3 格是降级交付的暴力解 —— 只报 75% 会被当成能力证据引用出去。
+      const sum = judge.summarizeByLevel([
+        { level: 'L2', problem: 'a', diffVerdict: 'AC', sampleVerdict: 'AC' },
+        { level: 'L2', problem: 'b', diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true },
+        { level: 'L2', problem: 'c', diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true },
+        { level: 'L2', problem: 'd', diffVerdict: 'WA', sampleVerdict: 'AC' }
+      ]).L2;
+      check('按档位汇总：差分通过数与严格通过数分开报（3 个 AC 里有 2 个是降级交付 → 严格 1）',
+        sum.diffAC === 3 && sum.diffACstrict === 1 && sum.deliveredBrute === 2 && sum.total === 4,
+        JSON.stringify([sum.diffAC, sum.diffACstrict, sum.deliveredBrute, sum.total]));
+      check('按档位汇总：没有降级交付时严格数=普通数（口径只剔降级，不误伤）',
+        (() => { const g = judge.summarizeByLevel([{ level: 'L0', problem: 'a', diffVerdict: 'AC', sampleVerdict: 'AC' }]).L0;
+          return g.diffAC === 1 && g.diffACstrict === 1 && g.deliveredBrute === 0; })());
     }
 
     // 去重口径：失败重跑不许把更早的**成功**记录顶掉（用户 pilot 里 2268A 就是这样"消失"的）
@@ -479,7 +493,7 @@ async function main() {
       const state = {
         levels: ['L0', 'L0C', 'L1', 'L2'],
         levelHint: { L0: '裸模型', L0C: '裸模型·只给代码块', L1: '裸 agent', L2: 'cf-coach' },
-        problems: [P('p800', 800), P('p1100', 1100), P('p2300', 2300), P('p2600', 2600), P('p2900', 2900)],
+        problems: [P('p800', 800), P('p1100', 1100), P('p2300', 2300), P('p2600', 2600), P('p2900', 2900), P('p3500', 3500)],
         records: [], verdicts: [], human: [], compare: null,
         defaults: { iterations: 60, lang: 'cpp', depth: 'L3', rich: false },
         root: 'smoke', targets: [{ providerId: 'mock', model: 'mock-gpt-4' }],
@@ -494,7 +508,15 @@ async function main() {
           Object.assign(rec('L0C', 'p800'), { usage: { completionTokens: 900 } }),
           Object.assign(rec('L0C', 'p1100'), { usage: { completionTokens: 1000 } }),
           Object.assign(rec('L0C', 'p2300'), { usage: { completionTokens: 1500 } }),
-          Object.assign(rec('L0C', 'p2600'), { usage: { completionTokens: 1800 } })
+          Object.assign(rec('L0C', 'p2600'), { usage: { completionTokens: 1800 } }),
+          // L2：r3500 这一格**题解 Agent 没交出自己的解**，链把同一轮的暴力解交了上来（降级交付）。
+          //     它既有代码、又拿了个"差分 AC" —— 正是最容易把阶梯撑成假"会做 ≤ r3500"的形状
+          //     （实测：外机那批唯一撑起 r3500 的 2089E 就是这么来的）。
+          Object.assign(rec('L2', 'p3500'), {
+            delivered: 'brute', verificationStatus: 'degraded-brute',
+            verification: { degraded: 'brute', status: 'degraded-brute' },
+            usage: { completionTokens: 0 }, cost: null
+          })
         ],
         verdicts: [
           { level: 'L0', problem: 'p800', diffVerdict: 'AC', sampleVerdict: 'AC' },
@@ -506,7 +528,9 @@ async function main() {
           { level: 'L0C', problem: 'p2300', diffVerdict: 'AC', sampleVerdict: 'AC' },
           { level: 'L0C', problem: 'p2600', diffVerdict: 'WA', sampleVerdict: 'AC' },
           // 判不了的一种：尺子自己就过不了官方样例（多解的另一种合法答案，或干脆贴错题）
-          { level: 'L0', problem: 'p2900', diffVerdict: 'WA', sampleVerdict: 'special-judge', specialJudge: true, oracleSampleMismatch: true }
+          { level: 'L0', problem: 'p2900', diffVerdict: 'WA', sampleVerdict: 'special-judge', specialJudge: true, oracleSampleMismatch: true },
+          // 降级交付的暴力解：判分给了差分 AC，但 AC 的是**那份暴力解**，不是这一档给出的解
+          { level: 'L2', problem: 'p3500', diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true }
         ]
       };
       state.records = state.runs.map((r) => Object.assign({}, r, { cost: { amount: 0.1 } }));
@@ -544,6 +568,45 @@ async function main() {
           runs: [{ level: 'L0', problem: 'y', ok: true, hasCode: true }],
           verdicts: [{ level: 'L0', problem: 'y', diffVerdict: 'no-gen' }], levels: ['L0']
         }).levels[0].cells[0].kind === 'noruler');
+      // ★ 降级交付的暴力解：题解 Agent 没交出自己的解，链把暴力解交了上来。
+      //   它常常正是"差分 AC" —— 若照 AC 读，r3500 那种"会做 ≤ rX"就会被一份暴力解撑起来（实测踩过）。
+      //   两路判据都必须守住：① 判分给的 deliveredBrute；② 判分是旧口径时靠记录兜底。
+      const degradedByVerdict = ladderLib.compute({
+        problems: [{ id: 'z', rating: 3500 }],
+        runs: [{ level: 'L2', problem: 'z', ok: true, hasCode: true, delivered: 'brute', verificationStatus: 'degraded-brute' }],
+        verdicts: [{ level: 'L2', problem: 'z', diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true }], levels: ['L2']
+      });
+      check('阶梯规则：降级交付的暴力解单列"⚠ 交的是暴力解"，不算 AC、也撑不起"会做 ≤ rX"',
+        degradedByVerdict.levels[0].cells[0].kind === 'degraded'
+        && degradedByVerdict.levels[0].acMax === null
+        && /降级交付的暴力解/.test(degradedByVerdict.levels[0].verdict)
+        && degradedByVerdict.totals.degraded === 1,
+        JSON.stringify([degradedByVerdict.levels[0].cells[0], degradedByVerdict.levels[0].verdict]));
+      const degradedByRuns = ladderLib.compute({
+        problems: [{ id: 'z2', rating: 3300 }],
+        runs: [{ level: 'L2', problem: 'z2', ok: true, hasCode: true, verification: { degraded: 'brute', status: 'degraded-brute' } }],
+        verdicts: [{ level: 'L2', problem: 'z2', diffVerdict: 'AC' }], levels: ['L2']
+      });
+      check('阶梯规则：判分是旧口径（没有 deliveredBrute 字段）时，靠"这一格有码的跑全是降级交付"兜底',
+        degradedByRuns.levels[0].cells[0].kind === 'degraded', degradedByRuns.levels[0].cells[0].kind);
+      const realSol = ladderLib.compute({
+        problems: [{ id: 'z3', rating: 3100 }],
+        runs: [{ level: 'L2', problem: 'z3', ok: true, hasCode: true, delivered: 'model-first' }],
+        verdicts: [{ level: 'L2', problem: 'z3', diffVerdict: 'AC' }], levels: ['L2']
+      });
+      check('阶梯规则：交了模型自己的解就是 AC（降级判据不能误伤真解）',
+        realSol.levels[0].cells[0].kind === 'ac' && !!realSol.levels[0].acMax && realSol.levels[0].acMax.rating === 3100,
+        JSON.stringify([realSol.levels[0].cells[0].kind, realSol.levels[0].acMax]));
+      const mixedCell = ladderLib.compute({
+        problems: [{ id: 'z4', rating: 3400 }],
+        runs: [
+          { level: 'L2', problem: 'z4', ok: true, hasCode: true, verification: { degraded: 'brute' } },
+          { level: 'L2', problem: 'z4', ok: true, hasCode: true, delivered: 'model-first' }
+        ],
+        verdicts: [{ level: 'L2', problem: 'z4', diffVerdict: 'AC' }], levels: ['L2']
+      });
+      check('阶梯规则：一格里有真解就不算降级交付（判据是"有码的跑**全部**降级"，不是"有一次降级"）',
+        mixedCell.levels[0].cells[0].kind === 'ac', mixedCell.levels[0].cells[0].kind);
       check('阶梯规则：规则只在这一处实现（界面里不许再抄一份 cellState/CELL_TXT）',
         !/function cellState|CELL_TXT/.test(fs.readFileSync(path.join(__dirname, 'ui', 'index.html'), 'utf8')));
 
@@ -582,6 +645,10 @@ async function main() {
         JSON.stringify([acMax, failMin]));
       check('工作台：未跑的题显示"未跑"，并提示中止/撞顶不是答错',
         ladder.indexOf('未跑') >= 0 && ladder.indexOf('它们不是答错') >= 0);
+      check('工作台：阶梯里降级交付的暴力解单独标出来，且警示"不算 AC / 不进会做 ≤ rX"',
+        ladder.indexOf('⚠ 交的是暴力解') >= 0 && ladder.indexOf('交暴力解 1') >= 0
+        && ladder.indexOf('既不算 AC 也不算答错') >= 0 && ladder.indexOf('还没有差分 AC') >= 0,
+        (ladder.match(/交暴力解 \d|还没有差分 AC|既不算 AC/g) || []).join('|'));
       check('工作台：花费按 cost.amount 累加（cost 是对象，直接相加会变成字符串拼接），中止那次标"未计费"',
         /¥0\.2/.test(ladder) && ladder.indexOf('未计费') >= 0, (ladder.match(/¥[\d.]+/g) || []).slice(0, 4).join(','));
       check('工作台：输出 token 读的是 usage.completionTokens（记录里是 camelCase，读 snake_case 会恒为 0）',
@@ -593,6 +660,13 @@ async function main() {
         && problemsHtml.indexOf('data-skip="p2900"') >= 0
         && problemsHtml.indexOf('data-skip="p800"') >= 0,
         'len=' + problemsHtml.length);
+      // 只切出 p3500 那一行：别行的真 AC 当然应该显示"差分 AC"，不能拿整表去断言。
+      const i3500 = problemsHtml.indexOf('p3500');
+      const row3500 = i3500 >= 0 ? problemsHtml.slice(i3500, problemsHtml.indexOf('</tr>', i3500)) : '';
+      check('工作台：题卡上降级交付的暴力解不能渲染成"差分 AC"（原来只映射 diffVerdict，题卡照样显示 AC）',
+        !!row3500 && row3500.indexOf('⚠ 交的是暴力解（不算 AC）') >= 0
+        && /差分 AC[^<]*/.test(row3500) && row3500.indexOf('<span class="badge b-ok">差分 AC</span>') < 0,
+        (row3500.match(/差分 AC[^<]*/g) || []).join('|') || '没找到 p3500 那一行');
     }
 
     // ⑫ 运行日志：测试在**别人机器**上跑，终端里滚过去的现场必须落盘，否则出问题时没有东西可发。

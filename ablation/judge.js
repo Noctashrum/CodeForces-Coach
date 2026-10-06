@@ -112,6 +112,35 @@ function deliveredBrute(rec) {
   return rec.delivered !== 'model-first';
 }
 
+/**
+ * 按档位汇总判分结果 —— 抽成函数是为了自测能直接喂数据。
+ *
+ * 命门是 `diffAC` 与 `diffACstrict` 必须同时给：标题行里那个"差分通过 6(75%)"**含了降级交付的暴力解**
+ * （题解 Agent 没交出代码、链把暴力解交上来，暴力解当然能过对拍），单看百分数会被读成能力。
+ * 严格数剔掉降级交付的格子，才是"这一档自己解出来的"。
+ */
+function summarizeByLevel(verdicts) {
+  const byLevel = {};
+  for (const v of verdicts) {
+    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, diffACstrict: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0, oracleSampleMismatch: 0, deliveredBrute: 0 };
+    g.total++;
+    if (v.sampleVerdict === 'AC') g.sampleAC++;
+    if (v.diffVerdict === 'AC') g.diffAC++;
+    if (v.diffVerdict === 'AC' && !v.deliveredBrute) g.diffACstrict++;
+    if (v.diffVerdict === 'AC' && (v.sampleVerdict === 'AC' || v.sampleVerdict === 'skipped')) g.both++;
+    if (v.sampleVerdict === 'no-code') g.noCode++;
+    if (v.diffVerdict === 'no-oracle') g.noOracle++;
+    if (v.diffVerdict === 'no-gen') g.noGen++;
+    if (v.oracleBroken) g.oracleBroken++;
+    if (v.specialJudge) g.specialJudge++;
+    if (v.oracleSampleMismatch) g.oracleSampleMismatch++;
+    if (v.assertedVerified === true) g.asserted++;
+    if (v.falseConfidence) g.falseConfidence++;
+    if (v.deliveredBrute) g.deliveredBrute++;
+  }
+  return byLevel;
+}
+
 async function judgeRecord(rec, problem, opts) {
   const o = opts || {};
   const out = { level: rec.level, problem: rec.problem, model: rec.model, codeSource: rec.codeSource || null,
@@ -284,28 +313,14 @@ async function judgeAll(opts, hooks) {
   const vfile = path.join(outDir, 'verdicts.jsonl');
   fs.writeFileSync(vfile, verdicts.map((v) => JSON.stringify(v)).join('\n') + (verdicts.length ? '\n' : ''), 'utf8');
 
-  const byLevel = {};
-  for (const v of verdicts) {
-    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0, oracleSampleMismatch: 0, deliveredBrute: 0 };
-    g.total++;
-    if (v.sampleVerdict === 'AC') g.sampleAC++;
-    if (v.diffVerdict === 'AC') g.diffAC++;
-    if (v.diffVerdict === 'AC' && (v.sampleVerdict === 'AC' || v.sampleVerdict === 'skipped')) g.both++;
-    if (v.sampleVerdict === 'no-code') g.noCode++;
-    if (v.diffVerdict === 'no-oracle') g.noOracle++;
-    if (v.diffVerdict === 'no-gen') g.noGen++;
-    if (v.oracleBroken) g.oracleBroken++;
-    if (v.specialJudge) g.specialJudge++;
-    if (v.oracleSampleMismatch) g.oracleSampleMismatch++;
-    if (v.assertedVerified === true) g.asserted++;
-    if (v.falseConfidence) g.falseConfidence++;
-    if (v.deliveredBrute) g.deliveredBrute++;
-  }
+  const byLevel = summarizeByLevel(verdicts);
   log('\n=== 结果（按档位）===');
   for (const [lv, g] of Object.entries(byLevel)) {
     const pct = (n) => g.total ? Math.round((n / g.total) * 100) + '%' : '—';
     log(lv.padEnd(3) + ' n=' + g.total + '  样例通过 ' + g.sampleAC + '(' + pct(g.sampleAC) + ')'
-      + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
+      + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')'
+      + (g.deliveredBrute ? '  严格 ' + g.diffACstrict + '(' + pct(g.diffACstrict) + ')（剔掉降级交付的暴力解）' : '')
+      + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
       + (g.deliveredBrute ? '  ⚠️降级交付暴力解 ' + g.deliveredBrute + '（**不算解出来了**，见下）' : '')
       + (g.oracleBroken ? '  ⛔尺子不可信 ' + g.oracleBroken : '') + (g.specialJudge ? '  多解题 ' + g.specialJudge : '')
       + (g.oracleSampleMismatch && !g.oracleBroken ? '  ⚠️尺子样例不符 ' + g.oracleSampleMismatch + '（多解的另一种合法答案、或贴错题 —— 请人工核对 oracle）' : '')
@@ -314,7 +329,9 @@ async function judgeAll(opts, hooks) {
   const anyDeliveredBrute = Object.values(byLevel).reduce((n, g) => n + g.deliveredBrute, 0);
   if (anyDeliveredBrute) {
     log('⚠️ 有 ' + anyDeliveredBrute + ' 格是**降级交付的暴力解**：题解 Agent 没交出代码，链把同一轮生成的暴力解交了上来。');
-    log('   它的样例/对拍结论只说明"这份暴力解是对的"，**不说明这一档解出了这道题** —— 配对比较里已按"未交付"处理（不计 AC）。');
+    log('   它的样例/对拍结论只说明"这份暴力解是对的"，**不说明这一档解出了这道题**。');
+    log('   这个口径落在三处：标题行的「严格」数、rating 阶梯（该格单列成「⚠ 交的是暴力解」、不进"会做 ≤ rX"）、');
+    log('   题卡徽章（`⚠ 交的是暴力解（不算 AC）`）；配对比较里也按"未交付"处理（不计 AC）。');
   }
 
   // ---- 配对比较：对标 L0（用户口径：合格线 = 不差于 L0）----
@@ -371,7 +388,7 @@ async function judgeAll(opts, hooks) {
   return { outDir, records, verdicts, byLevel, cmp, human, vfile, cfile, iterations };
 }
 
-module.exports = { judgeRecord, readRecords, judgeAll, oracleGate, deliveredBrute };
+module.exports = { judgeRecord, readRecords, judgeAll, oracleGate, deliveredBrute, summarizeByLevel };
 
 if (require.main === module) {
   main().catch((e) => { console.error('判分失败：' + ((e && e.stack) || e)); process.exit(1); });

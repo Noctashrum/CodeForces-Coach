@@ -22,6 +22,7 @@ const KIND_TEXT = {
   fail: '✗ 差分 WA',
   unfinished: '中止/撞顶',
   nocode: '没交出来',
+  degraded: '⚠ 交的是暴力解',
   unreliable: '不可判',
   noruler: '缺尺子',
   ran: '未判分',
@@ -38,6 +39,20 @@ const KIND_TEXT = {
 const ABORT_RE = /超时|abort|传输层|terminated|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|other side closed/i;
 
 function num(v) { return typeof v === 'number' && Number.isFinite(v) ? v : 0; }
+
+/**
+ * 这条跑是"降级交付的暴力解"吗？—— 题解 Agent 交不出代码，链把同一轮的暴力解交了上来。
+ *
+ * 它**既不是 AC 也不是答错**：那份暴力解能过样例/对拍只证明"暴力解是对的"，
+ * 完全不能证明这一档解出了这道题（判据见 `ablation/judge.js` 的 `deliveredBrute`）。
+ * 阶梯里必须单独成一格 —— 否则"会做 ≤ r3500"这种话会被一份暴力解撑起来（实测踩过）。
+ */
+function isDegradedRun(r) {
+  const v = (r && r.verification) || {};
+  const d = v.degraded ? String(v.degraded) : (r && r.verificationStatus === 'degraded-brute' ? 'brute' : null);
+  if (d !== 'brute') return false;
+  return !(r && r.delivered === 'model-first');   // 交了模型自己的解就不算降级
+}
 
 /** 一条 run 的用量：记录里是 camelCase（lib/llm.js 归一化），兼容 snake_case。 */
 function outTokens(u) {
@@ -58,13 +73,14 @@ function indexRuns(runs) {
     let s = map.get(key);
     if (!s) {
       s = {
-        level: r.level, id: r.problem, n: 0, withCode: 0,
+        level: r.level, id: r.problem, n: 0, withCode: 0, degraded: 0,
         aborted: 0, truncated: 0, ok: 0, priced: 0, cost: 0, out: 0, ms: 0, reps: []
       };
       map.set(key, s);
     }
     s.n++;
     if (r.hasCode) s.withCode++;
+    if (isDegradedRun(r)) s.degraded++;
     if (!r.ok && ABORT_RE.test(String(r.error || ''))) s.aborted++;
     if (r.truncated) s.truncated++;
     if (r.ok) s.ok++;
@@ -83,6 +99,11 @@ function trusted(s) { return s && s.n > 0 && (s.aborted + s.truncated) < s.n; }
 function classify(s, v) {
   if (!s || !s.n) return 'none';
   if (!v) return 'ran';
+  // 降级交付的暴力解：**既不算 AC 也不算答错**，必须放在 AC 之前判 —— 它常常正是"差分 AC"。
+  // 两路判据：判分结果里的 deliveredBrute（`14e0b80` 起有），或"这一格里所有有代码的跑都是降级交付"
+  // （判分还是旧口径时的兜底；只要有一条真解就不算）。
+  const byRuns = s.withCode > 0 && s.degraded === s.withCode;
+  if (v.deliveredBrute || byRuns) return 'degraded';
   if (v.diffVerdict === 'AC') return 'ac';
   if (v.diffUnreliable) return 'unreliable';
   const dv = v.diffVerdict;
@@ -111,35 +132,35 @@ function compute(o) {
     .sort((a, b) => (Number(a.rating) || 0) - (Number(b.rating) || 0) || String(a.id).localeCompare(String(b.id)))
     .map((p) => {
       const cells = {};
-      const stats = { n: 0, out: 0, ms: 0, aborted: 0, truncated: 0, priced: 0, cost: 0 };
+      const stats = { n: 0, out: 0, ms: 0, aborted: 0, truncated: 0, degraded: 0, priced: 0, cost: 0 };
       for (const lv of levels) {
         const s = rmap.get(lv + '\u0000' + p.id) || null;
         const v = vmap.get(lv + '\u0000' + p.id) || null;
         const kind = classify(s, v);
         cells[lv] = {
           kind, text: KIND_TEXT[kind] || kind,
-          n: s ? s.n : 0, withCode: s ? s.withCode : 0,
+          n: s ? s.n : 0, withCode: s ? s.withCode : 0, degraded: s ? s.degraded : 0,
           aborted: s ? s.aborted : 0, truncated: s ? s.truncated : 0,
           priced: s ? s.priced : 0, cost: s ? s.cost : 0, out: s ? s.out : 0, ms: s ? s.ms : 0,
           falseConfidence: !!(v && v.falseConfidence)
         };
         if (s) {
           stats.n += s.n; stats.out += s.out; stats.ms += s.ms; stats.aborted += s.aborted;
-          stats.truncated += s.truncated; stats.priced += s.priced; stats.cost += s.cost;
+          stats.truncated += s.truncated; stats.degraded += s.degraded; stats.priced += s.priced; stats.cost += s.cost;
         }
       }
       return { id: p.id, title: p.title || '', rating: Number(p.rating) || 0, cells, stats };
     });
 
-  const totals = { runs: 0, aborted: 0, truncated: 0, priced: 0, unpriced: 0, cost: 0, out: 0 };
+  const totals = { runs: 0, aborted: 0, truncated: 0, degraded: 0, priced: 0, unpriced: 0, cost: 0, out: 0 };
   const byLevel = levels.map((lv) => {
     const cells = rows.map((r) => Object.assign({ id: r.id, rating: r.rating }, r.cells[lv]));
-    const t = { level: lv, n: 0, withCode: 0, aborted: 0, truncated: 0, priced: 0, cost: 0, out: 0, ms: 0 };
+    const t = { level: lv, n: 0, withCode: 0, degraded: 0, aborted: 0, truncated: 0, priced: 0, cost: 0, out: 0, ms: 0 };
     for (const s of rmap.values()) {
       if (s.level !== lv) continue;
-      t.n += s.n; t.withCode += s.withCode; t.aborted += s.aborted; t.truncated += s.truncated;
+      t.n += s.n; t.withCode += s.withCode; t.degraded += s.degraded; t.aborted += s.aborted; t.truncated += s.truncated;
       t.priced += s.priced; t.cost += s.cost; t.out += s.out; t.ms += s.ms;
-      totals.runs += s.n; totals.aborted += s.aborted; totals.truncated += s.truncated;
+      totals.runs += s.n; totals.aborted += s.aborted; totals.truncated += s.truncated; totals.degraded += s.degraded;
       totals.priced += s.priced; totals.cost += s.cost; totals.out += s.out;
       totals.unpriced += Math.max(0, s.n - s.priced);
     }
@@ -151,23 +172,31 @@ function compute(o) {
     const failMin = fails.length ? fails[0] : null;
     const unfinished = cells.filter((c) => c.kind === 'unfinished');
     const undecidable = cells.filter((c) => c.kind === 'unreliable' || c.kind === 'noruler');
+    // 降级交付：题解 Agent 交不出代码，链把暴力解交了上来 —— 不能当 AC，也不能当"答错"（它不是能力证据）。
+    // 但必须在结论里点名：否则读者看到"会做 ≤ rX"会以为那些更高的 rating 只是还没跑到。
+    const degraded = cells.filter((c) => c.kind === 'degraded' && c.rating > 0);
     return {
       level: lv,
       hint: (o && o.levelHint && o.levelHint[lv]) || '',
       cells, stats: t, acMax, failMin,
+      degraded: degraded.map((c) => ({ id: c.id, rating: c.rating })),
       counts: {
         ac: cells.filter((c) => c.kind === 'ac').length,
         fail: fails.length,
         unfinished: unfinished.length,
         undecidable: undecidable.length,
+        degraded: cells.filter((c) => c.kind === 'degraded').length,
         nocode: cells.filter((c) => c.kind === 'nocode').length,
         none: cells.filter((c) => c.kind === 'none').length
       },
       // 一句话结论：给不出上限时要说清为什么（没跑 / 全是中止 / 没失败过）
       verdict: acMax
         ? ('会做 ≤ r' + acMax.rating + '（' + acMax.id + '）'
-          + (failMin ? '；在 r' + failMin.rating + '（' + failMin.id + '）上失效' : '；更高 rating 上还没拿到可信失败'))
+          + (failMin ? '；在 r' + failMin.rating + '（' + failMin.id + '）上失效' : '；更高 rating 上还没拿到可信失败')
+          + (degraded.length ? '；r' + degraded.map((c) => c.rating + '（' + c.id + '）').join('、r')
+            + ' 交的是**降级交付的暴力解**，不算会做也不算命里没有' : ''))
         : (t.n ? '还没有 AC（已跑 ' + t.n + ' 次）' : '还没跑')
+          + (degraded.length ? '；r' + degraded.map((c) => c.rating + '（' + c.id + '）').join('、r') + ' 只交了降级交付的暴力解' : '')
     };
   });
 
@@ -179,9 +208,11 @@ function compute(o) {
     kinds: KIND_TEXT,
     note: 'AC 只是下界；上限只能由可信失败（差分 WA / 样例 WA / 运行错）给出。'
       + '中止（单次调用超时）与撞长度上限是"没跑完"，不算答错 —— 混进去会把上限报低。'
+      + '**降级交付的暴力解**（题解 Agent 没交出自己的解，链把暴力解交了上来）既不算 AC 也不算答错：'
+      + '它的 AC 只证明"那份暴力解是对的"，撑不起"这一档会做"。'
       + '同一 rating 至少 3 道题才谈"断崖"。',
     evidence: '同一 (题×档) 只跑一遍不足为证（实测同一题同一档有 1/3 概率交不出代码）：拿 3–6 次重复的通过率说话。'
   };
 }
 
-module.exports = { compute, classify, indexRuns, trusted, KIND_TEXT, ABORT_RE, outTokens, costAmount };
+module.exports = { compute, classify, indexRuns, trusted, isDegradedRun, KIND_TEXT, ABORT_RE, outTokens, costAmount };
