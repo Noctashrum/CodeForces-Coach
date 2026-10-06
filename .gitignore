@@ -30,6 +30,9 @@ profile-log.jsonl
 # 稀释/输出预算 2×2 探针的产物（第一轮默认 12 分钟超时 / 第二轮 --call-timeout-min 32）
 .probe/dilution/
 .probe/dilution-t32/
+# 推理预算实验的产物（关思考 / 想完再转写两臂的每轮输出：思考正文、token、耗时）
+.probe/nothink/
+.probe/thinkwrite/
 # 提示词体量盘点的机器可读转储（.md 报告进仓库，.json 是原始数据，太大）
 .probe/prompt-inventory.json
 .probe/rendered.html

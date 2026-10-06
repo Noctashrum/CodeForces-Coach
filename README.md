@@ -300,7 +300,11 @@ provider's `usage`, or are estimated from characters (and marked as such) when a
 - Prices: your per-model override (`providerId::model`) wins, then the built-in reference table; if neither
   exists the app reports tokens only and says "unit price not configured" instead of inventing a number.
 - `max_tokens` is unset by default (provider default): reasoning models spend their budget on thinking first, so a
-  too-small cap yields an empty answer — the app retries once without any cap when a reply is cut off.
+  too-small cap yields an empty answer. When a reply is cut off by the cap, the app **changes the ask** — a
+  "give the result first" note in the coach loop, a code-only prompt in the verification pipeline — instead of
+  resending it, and specifically **never** resends it with the cap removed:
+  dropping the cap only raises the budget to the provider's 65,536 while the root cause is the ask itself, and
+  measured, one such resend burned ~65k extra output tokens and recovered almost no answer text.
 
 ---
 
@@ -505,7 +509,8 @@ vendored under `public/vendor/` — no CDN requests.
 - Interactive problems are not supported (they need live I/O).
 - C++ code cannot be sandboxed; generated code really runs on your machine.
 - Truncated model output remains a real failure mode for long reasoning models — the app retries with a
-  code-only prompt and a larger output cap, and degrades honestly if that fails too.
+  different ask (a code-only prompt) and, importantly, **never** by removing the output cap; it degrades
+  honestly if that fails too.
 
 ---
 

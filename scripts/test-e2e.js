@@ -1040,8 +1040,16 @@ async function main() {
       !trajSoft.some((t) => t.kind === 'richdoc-fallback'), trajSoft.map((t) => t.kind));
     await api('/api/conversations/' + convSoft.id, { method: 'DELETE' });
 
-    // ===== 单次输出上限：被"思考"吃光（finish_reason=length 且正文为空）→ 自动去掉上限重试 =====
+    // ===== 单次输出上限：被"思考"吃光（finish_reason=length 且正文为空）→ 换话术重试，**不抬高上限** =====
     // 实测 deepseek-flash 带 max_tokens=16384 时就是这个表现：思考 16384 token、正文 0 字。
+    // 老实现是"去掉 max_tokens 原样重发"：那等于把预算抬到服务商默认的 65,536，而病根（问法太长、
+    // 思考吃光预算）一个字没改 → 只是把同一笔钱再烧一遍（实测 13 次空转共 851,970 输出 token ≈¥6.9）。
+    // 现在的救法是"换问法、不抬上限"，两条链路都这么做：
+    //   · lib/agentloop.js（app 教练回路）：补一句【系统重试】要求"先给结果 / 给一份更短的完整文档"，只重试一次；
+    //   · lib/harness.js（对拍链路）：用【系统重试】/【本次只要代码】的极简问法重试。
+    // mock 认这两个问法标记（scripts/mock-llm.js 的 mock-cap-empty），所以"换话术救回来"在这里是被真实测到的
+    // —— 旧夹具只按"这次没带 max_tokens"计数，把**辅助的题目分类调用**（天生不带 max_tokens）误判成了一次
+    // "去掉上限重发"，于是这条用例一直在测一个假阳性。
     const cfgCap = (await api('/api/config')).json;
     await api('/api/config', { method: 'POST', body: JSON.stringify(Object.assign({}, cfgCap, { maxOutputTokens: 4096 })) });
     const statsBefore = await mockStats();
@@ -1053,8 +1061,12 @@ async function main() {
     check('输出上限：确实把上限发给了上游（设置真的生效）',
       !!(statsAfter && statsBefore && statsAfter.capEmptyServed > statsBefore.capEmptyServed),
       JSON.stringify({ before: statsBefore && statsBefore.capEmptyServed, after: statsAfter && statsAfter.capEmptyServed }));
+    check('输出上限：全程没有一次"去掉上限"的重发（那是白烧一倍预算）',
+      !!(statsAfter && statsBefore
+        && (statsAfter.capRetryUncapped || 0) === (statsBefore.capRetryUncapped || 0)),
+      JSON.stringify({ before: statsBefore && statsBefore.capRetryUncapped, after: statsAfter && statsAfter.capRetryUncapped }));
     // 注意：富讲解模式下消息正文本来就只是一句引子（文档在 richDoc 里），所以判据是"文档带图且状态正常"
-    check('输出上限：被截断且正文为空 → 自动去掉上限重试，仍然拿到完整讲解',
+    check('输出上限：被截断且正文为空 → 换问法（不抬上限）重试后仍然拿到完整讲解',
       !!(doneCap && doneCap.message && doneCap.message.status === 'done'
         && String(doneCap.message.richDoc || '').length > 2000
         && (String(doneCap.message.richDoc || '').match(/<svg/gi) || []).length >= 2),

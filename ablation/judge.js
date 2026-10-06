@@ -91,13 +91,36 @@ async function oracleGate(problem) {
   return out;
 }
 
+/**
+ * 这条记录交上来的，到底是不是"它自己为这道题给出的解"？
+ *
+ * 题解 Agent 交不出代码时，链会**降级交付自己的暴力解**（`verification.degraded === 'brute'` /
+ * `verificationStatus === 'degraded-brute'`）。那份代码是正确但很慢的暴力解：官方样例能过、
+ * 小数据对拍也能过 —— 判分器于是给它 AC，能力表上就成了"这一档做出来了"，而事实是
+ * "这一档一个字都没交出来，交的是它的暴力解"。
+ *
+ * 实测（2026-10-06）：`L2|2268C`、`L2|2268D` 两格都是这么被记成 AC 的，L2 的 AC 数因此虚高。
+ * 所以：样例/差分照旧判（那是"交付的代码对不对"的事实，有价值），但单独打标记，
+ * 由 `compare.acOf` 决定"这不算这档解出来了"。
+ */
+function deliveredBrute(rec) {
+  if (!rec) return false;
+  const v = rec.verification || {};
+  const degraded = v.degraded ? String(v.degraded) : (rec.verificationStatus === 'degraded-brute' ? 'brute' : null);
+  if (degraded !== 'brute') return false;
+  // 链自己声明交付的是"模型第一版"（delivered === 'model-first'）→ 是它自己的解，不算降级
+  return rec.delivered !== 'model-first';
+}
+
 async function judgeRecord(rec, problem, opts) {
   const o = opts || {};
   const out = { level: rec.level, problem: rec.problem, model: rec.model, codeSource: rec.codeSource || null,
     sampleVerdict: 'skipped', diffVerdict: 'skipped', detail: null,
     // 链自己有没有声称"已验证"（只有 L2 有这个概念）→ 用来算假自信率
     assertedVerified: rec.level === 'L2' ? rec.assertedVerified === true : null,
-    scopeComplete: rec.level === 'L2' ? rec.scopeComplete === true : null };
+    scopeComplete: rec.level === 'L2' ? rec.scopeComplete === true : null,
+    // 降级交付的暴力解（见 deliveredBrute 的注释）：代码能过样例/对拍，但**不是这一档给出的解**
+    deliveredBrute: deliveredBrute(rec) };
   if (!rec.code) { out.sampleVerdict = 'no-code'; out.diffVerdict = 'no-code'; out.detail = rec.error || '没有代码'; return out; }
   if (!problem) { out.detail = '题库里没有这道题的记录'; out.sampleVerdict = 'unknown'; out.diffVerdict = 'unknown'; return out; }
 
@@ -251,6 +274,7 @@ async function judgeAll(opts, hooks) {
     const v = await judgeRecord(rec, problem, { iterations, maxTotalMs, gate });
     verdicts.push(v);
     log([v.level, v.problem, (v.model || '')].join(' ') + ' → 样例 ' + v.sampleVerdict + '｜差分 ' + v.diffVerdict
+      + (v.deliveredBrute ? '｜⚠️降级交付的暴力解（不是这一档给出的解）' : '')
       + (v.oracleBroken ? '｜⛔尺子不可信' : '') + (v.specialJudge ? '｜多解题' : '')
       + (v.oracleSampleMismatch && !v.oracleBroken ? '｜⚠️尺子样例不符' : '')
       + (v.assertedVerified != null ? '｜链声称已验证 ' + (v.assertedVerified ? '是' : '否') : '')
@@ -262,7 +286,7 @@ async function judgeAll(opts, hooks) {
 
   const byLevel = {};
   for (const v of verdicts) {
-    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0, oracleSampleMismatch: 0 };
+    const g = byLevel[v.level] = byLevel[v.level] || { total: 0, sampleAC: 0, diffAC: 0, both: 0, noCode: 0, noOracle: 0, noGen: 0, asserted: 0, falseConfidence: 0, oracleBroken: 0, specialJudge: 0, oracleSampleMismatch: 0, deliveredBrute: 0 };
     g.total++;
     if (v.sampleVerdict === 'AC') g.sampleAC++;
     if (v.diffVerdict === 'AC') g.diffAC++;
@@ -275,15 +299,22 @@ async function judgeAll(opts, hooks) {
     if (v.oracleSampleMismatch) g.oracleSampleMismatch++;
     if (v.assertedVerified === true) g.asserted++;
     if (v.falseConfidence) g.falseConfidence++;
+    if (v.deliveredBrute) g.deliveredBrute++;
   }
   log('\n=== 结果（按档位）===');
   for (const [lv, g] of Object.entries(byLevel)) {
     const pct = (n) => g.total ? Math.round((n / g.total) * 100) + '%' : '—';
     log(lv.padEnd(3) + ' n=' + g.total + '  样例通过 ' + g.sampleAC + '(' + pct(g.sampleAC) + ')'
       + '  差分通过 ' + g.diffAC + '(' + pct(g.diffAC) + ')' + '  无代码 ' + g.noCode + '  无 oracle ' + g.noOracle + '  缺生成器 ' + g.noGen
+      + (g.deliveredBrute ? '  ⚠️降级交付暴力解 ' + g.deliveredBrute + '（**不算解出来了**，见下）' : '')
       + (g.oracleBroken ? '  ⛔尺子不可信 ' + g.oracleBroken : '') + (g.specialJudge ? '  多解题 ' + g.specialJudge : '')
       + (g.oracleSampleMismatch && !g.oracleBroken ? '  ⚠️尺子样例不符 ' + g.oracleSampleMismatch + '（多解的另一种合法答案、或贴错题 —— 请人工核对 oracle）' : '')
       + (g.asserted ? '  声称已验证 ' + g.asserted + '（其中假自信 ' + g.falseConfidence + '）' : ''));
+  }
+  const anyDeliveredBrute = Object.values(byLevel).reduce((n, g) => n + g.deliveredBrute, 0);
+  if (anyDeliveredBrute) {
+    log('⚠️ 有 ' + anyDeliveredBrute + ' 格是**降级交付的暴力解**：题解 Agent 没交出代码，链把同一轮生成的暴力解交了上来。');
+    log('   它的样例/对拍结论只说明"这份暴力解是对的"，**不说明这一档解出了这道题** —— 配对比较里已按"未交付"处理（不计 AC）。');
   }
 
   // ---- 配对比较：对标 L0（用户口径：合格线 = 不差于 L0）----
@@ -316,6 +347,10 @@ async function judgeAll(opts, hooks) {
       log('⚠️ 判不了 ' + cmp.undecidable.count + ' 题（没有算进胜平负）：'
         + cmp.undecidable.items.map((x) => x.problem + '（' + x.why + '）').join('、'));
     }
+    if (cmp.deliveredBrute && cmp.deliveredBrute.count) {
+      log('⚠️ ' + cand + ' 有 ' + cmp.deliveredBrute.count + ' 题交的是**降级交付的暴力解**（没交出自己的题解）→ 已按"未交付"记，不计 AC：'
+        + cmp.deliveredBrute.problems.join('、'));
+    }
     log('不一致格子：' + cand + ' 更好 ' + cmp.discordant.candBetter + ' / ' + base + ' 更好 ' + cmp.discordant.baseBetter
       + '  → McNemar 精确检验双侧 p = ' + cmp.p.toFixed(3)
       + (cmp.discordant.candBetter + cmp.discordant.baseBetter < 6 ? '（格子太少，p 没有判别力：这只是"没发现差异"，不是"证明相等"）' : ''));
@@ -336,7 +371,7 @@ async function judgeAll(opts, hooks) {
   return { outDir, records, verdicts, byLevel, cmp, human, vfile, cfile, iterations };
 }
 
-module.exports = { judgeRecord, readRecords, judgeAll, oracleGate };
+module.exports = { judgeRecord, readRecords, judgeAll, oracleGate, deliveredBrute };
 
 if (require.main === module) {
   main().catch((e) => { console.error('判分失败：' + ((e && e.stack) || e)); process.exit(1); });

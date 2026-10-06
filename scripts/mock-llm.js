@@ -54,16 +54,51 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 let chatRequests = 0;
 // "被输出上限截断且正文为空"的模拟次数（推理型模型把预算花在思考上的最坏情况）
 let capEmptyServed = 0;
+// 有多少次请求是**同一份问法、去掉 max_tokens** 又发了一遍（老实现"去掉上限重发"的标志）
+// 用途：e2e 断言服务端再也不这么干 —— 去掉上限等于把输出预算抬到服务商默认的 65,536，
+// 而病根是"思考吃光预算"，原样重发只是把同一笔钱再烧一遍（实测 13 次空转共 851,970 输出 token）。
+// 必须按"问法指纹"配对：辅助的题目分类调用天生不带 max_tokens、问法也不一样；早先只按
+// "这次没带 max_tokens" 计数，把那次分类调用误判成了"去掉上限重发"（e2e 里的假阳性）。
+let capRetryUncapped = 0;
+let lastCappedAsk = '';
+
+// 问法指纹（djb2）：只用来判断"这次是不是把上一次那份长要求原样重发了"
+function askFingerprint(s) {
+  let h = 5381;
+  const t = String(s || '');
+  for (let i = 0; i < t.length; i++) h = ((h * 33) ^ t.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
 
 async function openaiChat(req, res, body) {
   const model = (body && body.model) || 'mock-gpt-4';
   const userText = extractUserText(body);
   const stream = !body || body.stream !== false;
+  if (/mock-cap-empty/.test(model) && body) {
+    const fp = askFingerprint(userText);
+    if (body.max_tokens) lastCappedAsk = fp;                              // 记住这次"长要求"的指纹
+    else if (lastCappedAsk && fp === lastCappedAsk) capRetryUncapped++;   // 同一份要求去掉上限又发一遍 = 老 bug 真的回来了
+  }
+  if (process.env.MOCK_DEBUG) {
+    console.log('[mock] model=' + model + ' max_tokens=' + (body && body.max_tokens)
+      + ' ask=' + JSON.stringify(String(userText || '').replace(/\s+/g, ' ').slice(0, 90)));
+  }
 
-  // mock-cap-empty：只要请求里带了 max_tokens，就**装作"预算被思考吃光"**——
-  // finish_reason=length 且正文为空。用来验证服务端会自动"去掉上限重试一次"把正文救回来
-  //（实测 deepseek-flash 带 max_tokens=16384 时就是这个表现：26058 token 的思考 + 0 字正文）。
-  if (/mock-cap-empty/.test(model) && body && body.max_tokens) {
+  // mock-cap-empty：请求里带了 max_tokens、而且问法还是**原来那份长要求**时，装作"预算被思考吃光"——
+  // finish_reason=length 且正文为空（实测 deepseek-flash 带 max_tokens=16384 时就是这个表现：
+  // 26058 token 的思考 + 0 字正文）。真病根是问法太长、模型把预算全花在推理上，所以只要问法被压过
+  // （lib/harness.js / lib/agentloop.js 的重试会加【系统重试】/【本次只要代码】），mock 就照常给正文 ——
+  // 这样 e2e 验的是"换话术救回来"，而不是"把上限抬掉再烧一遍"。
+  //
+  // ⚠️ 只在**用户提问那一轮**烧预算：`extractUserText` 取的是最后一条消息，工具循环里它可能是
+  // `role:'tool'` 的结果（如"【工作区 …】文件：（空）"）。如果连工具结果那一轮也吐空正文，
+  // 工具循环就永远推不动（拿不到 cf_verify/cf_doc 的结果），"换问法救回来"根本无从验证 ——
+  // 那是夹具把人测死了，不是产品问题。
+  const lastMsg = (body && Array.isArray(body.messages) && body.messages.length)
+    ? body.messages[body.messages.length - 1] : null;
+  const lastIsUserAsk = !!(lastMsg && lastMsg.role === 'user');
+  if (/mock-cap-empty/.test(model) && body && body.max_tokens && lastIsUserAsk
+      && !/【系统重试】|【本次只要代码】/.test(userText)) {
     capEmptyServed++;
     if (!stream) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -947,7 +982,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/__stats') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ chatRequests, capEmptyServed }));
+      res.end(JSON.stringify({ chatRequests, capEmptyServed, capRetryUncapped }));
       return;
     }
     if (req.method === 'POST' && url.pathname.endsWith('/chat/completions')) {

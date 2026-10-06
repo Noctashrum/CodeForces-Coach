@@ -34,6 +34,7 @@ const judge = require('./judge');
 const diagbundle = require('../lib/diagbundle');
 const { startMockLlm } = require('./mockllm');
 const runner = require('../lib/runner');
+const llm = require('../lib/llm');
 
 let pass = 0;
 let fail = 0;
@@ -365,6 +366,36 @@ async function main() {
       && cmpHalf.notWorseRate === 1 && /2268A/.test(cmpHalf.note),
       JSON.stringify([cmpHalf.n, cmpHalf.decidable, cmpHalf.tie, cmpHalf.undecidable.count, cmpHalf.notWorseRate]));
 
+    // 降级交付的暴力解不许记成"这一档做出来了"。
+    // 实测 2026-10-06：L2|2268C、L2|2268D 交的是链自己的暴力解（正确但慢），样例/差分都是 AC
+    // → 能力表上 L2 白捡两格 AC，而事实是"这一档一个字都没交出来"。
+    {
+      const degRec = { level: 'L2', problem: '2268C', model: 'm', code: 'print(brute)', codeLang: 'python',
+        assertedVerified: false, delivered: null, verificationStatus: 'degraded-brute',
+        verification: { status: 'degraded-brute', degraded: 'brute', solSamplesPass: true } };
+      check('降级交付识别：题解没交出来、交的是暴力解 → deliveredBrute',
+        judge.deliveredBrute(degRec) === true);
+      check('降级交付识别：链声明交付的是模型第一版 → 不算降级',
+        judge.deliveredBrute(Object.assign({}, degRec, { delivered: 'model-first' })) === false
+        && judge.deliveredBrute({ level: 'L2', problem: 'x', code: 'y', delivered: 'model-first', verification: { status: 'ok' } }) === false);
+      const vDeg = await judge.judgeRecord(degRec, problem, { iterations: 5, maxTotalMs: 60000 });
+      check('判分：降级交付的记录打上标记（样例/差分照旧如实判，不篡改事实）',
+        vDeg.deliveredBrute === true && vDeg.sampleVerdict !== 'skipped', JSON.stringify([vDeg.deliveredBrute, vDeg.sampleVerdict, vDeg.diffVerdict]));
+      const acDeg = compareLib.acOf({ diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true });
+      check('配对比较：降级交付不算 AC，也不当"判不了"（这是一个确凿的"没交出来"）',
+        acDeg.ac === false && acDeg.strength === 'degraded-brute' && acDeg.notDelivered === true && acDeg.undecidable !== true,
+        JSON.stringify(acDeg));
+      const cmpDeg = compareLib.compare(
+        [{ level: 'L0', problem: '2268C', model: 'm', code: 'x' }, { level: 'L2', problem: '2268C', model: 'm', code: 'y' }],
+        [{ level: 'L0', problem: '2268C', model: 'm', diffVerdict: 'AC', sampleVerdict: 'AC' },
+          { level: 'L2', problem: '2268C', model: 'm', diffVerdict: 'AC', sampleVerdict: 'AC', deliveredBrute: true }],
+        { base: 'L0', cand: 'L2' });
+      check('配对比较：基准做出来了、候选交的是降级暴力解 → 记候选负，且单独列出来',
+        cmpDeg.win === 0 && cmpDeg.loss === 1 && cmpDeg.tie === 0
+        && cmpDeg.deliveredBrute.count === 1 && cmpDeg.deliveredBrute.problems[0] === '2268C',
+        JSON.stringify([cmpDeg.win, cmpDeg.tie, cmpDeg.loss, cmpDeg.deliveredBrute]));
+    }
+
     // 去重口径：失败重跑不许把更早的**成功**记录顶掉（用户 pilot 里 2268A 就是这样"消失"的）
     const dedupe = uistore.init(path.join(tmp, 'uistore-dedupe'));
     fs.writeFileSync(path.join(dedupe.dir, 'records.jsonl'), [
@@ -377,6 +408,31 @@ async function main() {
     check('去重：被跳过的记录留了账（latestAudit 能说清谁被顶掉了）',
       dedupe.latestAudit().length === 1 && dedupe.latestAudit()[0].dropped.length === 1
       && dedupe.latestAudit()[0].dropped[0].startedAt === 'T2', JSON.stringify(dedupe.latestAudit()));
+
+    // 去重口径之二：后来的**降级交付**（有代码，但是链自己的暴力解）不许顶掉更早的真解记录。
+    // 实测 2026-10-06：2268C 07:15 的真解记录、2268E 08:20 的真解记录，都被 18:28 的降级交付吃掉了。
+    {
+      const dedupe2 = uistore.init(path.join(tmp, 'uistore-dedupe-brute'));
+      fs.writeFileSync(path.join(dedupe2.dir, 'records.jsonl'), [
+        JSON.stringify({ level: 'L2', problem: '2268C', model: 'm', startedAt: 'T1', code: 'real solution', delivered: 'model-first' }),
+        JSON.stringify({ level: 'L2', problem: '2268C', model: 'm', startedAt: 'T2', code: 'brute force', delivered: null,
+          verificationStatus: 'degraded-brute', verification: { degraded: 'brute' } })
+      ].join('\n') + '\n', 'utf8');
+      const kept2 = dedupe2.latestRecords();
+      check('去重：后来的降级交付（暴力解）不吃掉更早的真解记录',
+        kept2.length === 1 && kept2[0].startedAt === 'T1' && kept2[0].code === 'real solution',
+        JSON.stringify(kept2.map((x) => [x.startedAt, x.code])));
+      check('去重：反倒是有真解的新记录能顶掉更早的降级交付',
+        (() => {
+          fs.writeFileSync(path.join(dedupe2.dir, 'records.jsonl'), [
+            JSON.stringify({ level: 'L2', problem: '2268D', model: 'm', startedAt: 'T1', code: 'brute force',
+              verificationStatus: 'degraded-brute', verification: { degraded: 'brute' } }),
+            JSON.stringify({ level: 'L2', problem: '2268D', model: 'm', startedAt: 'T2', code: 'real solution', delivered: 'model-first' })
+          ].join('\n') + '\n', 'utf8');
+          const k = uistore.init(dedupe2.dir).latestRecords();
+          return k.length === 1 && k[0].startedAt === 'T2' && k[0].code === 'real solution';
+        })());
+    }
 
     // ⑩ 新档位 L0C = 裸模型 + "只输出一个代码块"（成本 A/B 里唯一有效的干预：0/2 → 2/2）
     //     唯一变量必须是那段格式要求本身：system 一旦不一样，"不会做"和"没交出来"就混在一起了。
@@ -680,6 +736,35 @@ async function main() {
     }
 
     // ⑨ 记录与汇总
+    // 截断不许再"去掉上限重发"：那等于把预算从 max_tokens 抬到服务商默认的 65,536，
+    // 而病根是问法太长、思考吃光预算 —— 原样重发只是把同一笔钱再烧一遍（实测 13 次空转 851,970 输出 token）。
+    // 这里把上游换成"只出思考、finish_reason=length、正文为空"的假响应，数请求次数。
+    {
+      const realFetch = global.fetch;
+      let calls = 0;
+      global.fetch = async () => {
+        calls++;
+        const sse = [
+          'data: ' + JSON.stringify({ choices: [{ delta: { reasoning_content: '（思考把预算用光了）' } }] }),
+          'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 100, completion_tokens: 4096 } }),
+          'data: [DONE]', ''
+        ].join('\n\n') + '\n\n';
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      };
+      try {
+        const r = await llm.callModel({
+          provider: { id: 'selftest', type: 'openai', baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', models: ['m'] },
+          model: 'm', messages: [{ role: 'user', content: '写个题解' }], maxTokens: 4096
+        });
+        check('截断不许"去掉上限重发"：正文为空 + 撞上限时上游只被请求一次', calls === 1, 'calls=' + calls);
+        check('截断如实上报：finishReason 保留为 length，degraded 记 empty-truncated',
+          r.finishReason === 'length' && !String(r.content || '').trim() && (r.degraded || []).includes('empty-truncated'),
+          JSON.stringify({ finish: r.finishReason, degraded: r.degraded, out: String(r.content || '').length }));
+      } finally {
+        global.fetch = realFetch;
+      }
+    }
+
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
     check('records.jsonl 每条跑分一行（L0/L1/L1 兜底/L2/错解 L2/错解 L0 = 6 行）', lines.length === 6, 'lines=' + lines.length);

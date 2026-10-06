@@ -80,12 +80,32 @@ function init(rootDir) {
   if (!Array.isArray(problems)) problems = [];
 
   /**
+   * 一条记录"交付了什么" —— 排序用的级别（越高越是"这档自己给出的解"）：
+   *   3 = 有代码，且链声明交付的是模型第一版（`delivered === 'model-first'`）
+   *   2 = 有代码（没声明，或没这个概念 —— L0/L1 就是普通记录）
+   *   1 = 有代码，但是**降级交付的暴力解**（`verification.degraded === 'brute'`）
+   *   0 = 没代码
+   *
+   * 为什么降级交付要排在"有代码"之下：题解 Agent 一个字都没交出来时，链会把同一轮生成的
+   * 暴力解交上来 —— 它是**有代码的**（正确但很慢）。按旧的"有代码优先"规则，它会顶掉更早那条
+   * **真的解出来了**的记录：实测 2026-10-06，2268C 07:15 的 ok 记录、2268E 08:20 的 ok 记录
+   * 就是这么被 18:28 的降级交付吃掉的，判分表里 L2 白丢两格 AC。
+   */
+  function deliveredRank(r) {
+    if (!r || !r.code) return 0;
+    const v = r.verification || {};
+    const degraded = v.degraded ? String(v.degraded) : (r.verificationStatus === 'degraded-brute' ? 'brute' : null);
+    if (degraded === 'brute' && r.delivered !== 'model-first') return 1;
+    return r.delivered === 'model-first' ? 3 : 2;
+  }
+
+  /**
    * 每题每档挑一条给判分/汇总用。
    *
-   * 取法：优先"最新的、真的产出了代码的那条"；都没有代码时才取最新的一条。
-   * 为什么不是无条件取最新：重跑失败（模型这次没给出代码块）会把更早的**成功**记录顶掉，
-   * 配对表里就变成"这一档什么都没产出"。用户 m08171 的 pilot 里 2268A 的 L0/L2 两次成功记录
-   * （02:35 / 02:39）就是这么被 05:31 / 05:36 的失败重跑吃掉的，看起来像"两边都没交东西"。
+   * 取法：优先"交付得更像自己解的那条"（见 deliveredRank）；同级才取更新的。
+   * 为什么不是无条件取最新：重跑失败（模型这次没给出代码块、只降级交了个暴力解）会把更早那条
+   * **成功**记录顶掉，配对表里就变成"这一档什么都没产出"。用户 m08171 的 pilot 里 2268A 的
+   * L0/L2 两次成功记录（02:35 / 02:39）就是这么被 05:31 / 05:36 的失败重跑吃掉的。
    */
   function pickLatest() {
     const m = new Map();   // key → { rec, dropped: [] }
@@ -94,9 +114,10 @@ function init(rootDir) {
       const key = r.level + '|' + r.problem;
       const cur = m.get(key);
       if (!cur) { m.set(key, { rec: r, dropped: [] }); return; }
-      if (!!r.code && !cur.rec.code) { cur.dropped.push(cur.rec); cur.rec = r; return; }   // 新的有代码、旧的没有 → 换新的
-      if (!r.code && cur.rec.code) { cur.dropped.push(r); return; }                        // 新的没代码、旧的有 → 保留旧的
-      cur.dropped.push(cur.rec); cur.rec = r;                                             // 都有/都没有 → 取更新的
+      const nr = deliveredRank(r); const cr = deliveredRank(cur.rec);
+      if (nr > cr) { cur.dropped.push(cur.rec); cur.rec = r; return; }   // 新的交付得更像自己的解 → 换新的
+      if (nr < cr) { cur.dropped.push(r); return; }                      // 新的更差（比如降级交付）→ 保留旧的
+      cur.dropped.push(cur.rec); cur.rec = r;                            // 一样好/一样差 → 取更新的
     });
     return m;
   }

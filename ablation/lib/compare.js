@@ -36,6 +36,11 @@ function acOf(v) {
     || v.diffVerdict === 'run-error' || v.sampleVerdict === 'special-judge') && v.diffVerdict !== 'AC') {
     return { ac: false, strength: 'none', undecidable: true, why: 'special-judge（多解题且没有 checker）' };
   }
+  // 降级交付的暴力解：链没交出自己的题解，交的是它同一轮生成的暴力解（正确但慢）。
+  // 这份代码能过样例、也能过小数据对拍，判分器会给它 AC —— 但"暴力解能过"是**能力下限**，
+  // 不能记成"这一档解出了这道题"（2026-10-06 实测：L2|2268C、L2|2268D 就是这么被记成 AC 的）。
+  // 记成"未交付"而不是"判不了"：这不是尺子的问题，是一个确凿的事实。
+  if (v.deliveredBrute) return { ac: false, strength: 'degraded-brute', notDelivered: true, why: '降级交付暴力解（没交出自己的题解）' };
   if (v.diffVerdict === 'AC') return { ac: true, strength: 'diff' };
   // 差分跑不了（缺 oracle 或缺生成器）时只能看官方样例：单独标成 samples 级证据，绝不与差分 AC 混为一谈
   if ((v.diffVerdict === 'no-oracle' || v.diffVerdict === 'no-gen') && v.sampleVerdict === 'AC') {
@@ -97,6 +102,7 @@ function compare(records, verdicts, opts) {
       problem: (rb.problem || String(key).split('|')[0]), model: rb.model,
       baseAC: ab.ac, candAC: ac2.ac, baseStrength: ab.strength, candStrength: ac2.strength,
       baseUndecidable: ab.undecidable === true, candUndecidable: ac2.undecidable === true,
+      baseDeliveredBrute: ab.notDelivered === true, candDeliveredBrute: ac2.notDelivered === true,
       undecidableWhy: ab.why || ac2.why || null,
       baseMs: rb.ms || 0, candMs: rc.ms || 0,
       baseTokens: ((rb.usage && rb.usage.promptTokens) || 0) + ((rb.usage && rb.usage.completionTokens) || 0),
@@ -157,12 +163,16 @@ function compare(records, verdicts, opts) {
   }
 
   const n = pairs.length;
+  // 候选档里"降级交付暴力解"的格子（没交出自己的题解）：单独列出来，别让读者以为这些格子是"做出来了"
+  const deliveredBruteItems = pairs.filter((p) => p.candDeliveredBrute).map((p) => p.problem);
+  const baseDeliveredBruteItems = pairs.filter((p) => p.baseDeliveredBrute).map((p) => p.problem);
   return {
     base, cand, n,
     pairs,
     win, tie, loss,
     decidable,
     undecidable: { count: undecidableItems.length, items: undecidableItems },
+    deliveredBrute: { count: deliveredBruteItems.length, problems: deliveredBruteItems, side: cand, baseCount: baseDeliveredBruteItems.length },
     notWorse: win + tie,
     notWorseRate: decidable ? (win + tie) / decidable : null,
     winRate: decidable ? win / decidable : null,
