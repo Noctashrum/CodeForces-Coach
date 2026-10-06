@@ -1171,20 +1171,12 @@ async function callAgentLLM(o) {
     if (!res.ok) throw new Error(await upstreamErrorText(res));
     let text = await pumpOnce();
     // 上限把预算吃光（推理型模型常见：思考用满 → finish_reason=length 且正文为空）：
-    // 去掉 max_tokens 原样重试一次，把正文救回来；否则学员只会看到"图文文档没生成成功"。
+    // **不再**去掉 max_tokens 原样重试 —— 去掉上限等于把预算抬到服务商默认的 65,536，
+    // 而这一层看不到问法、换不了话，只是把同一笔钱再烧一遍（实测一次这类重发就多花 6.5 万输出 token）。
+    // 上限留在原地，把 finish_reason 如实上报，让 lib/harness.js 用"只要代码"的极简问法重试。
     if (!String(text || '').trim() && bodyObj.max_tokens && /length|max_tokens/i.test(finishReason)) {
-      console.log('[llm] 输出被 max_tokens 截断且正文为空（finish_reason=' + finishReason + '）→ 去掉上限重试一次');
-      const retryBody = Object.assign({}, bodyObj);
-      delete retryBody.max_tokens;
-      const retryRes = await fetch(cu.url, {
-        method: 'POST', headers: cu.headers, body: JSON.stringify(retryBody), signal: ctrl.signal
-      });
-      if (retryRes.ok) {
-        res = retryRes;
-        finishReason = '';
-        text = await pumpOnce();
-        if (o.onMeta) o.onMeta({ capRetry: true });
-      }
+      console.log('[llm] 输出被 max_tokens 截断且正文为空（finish_reason=' + finishReason + '）→ 不再去掉上限重发，交给 harness 换话术重试');
+      if (o.onMeta) o.onMeta({ capRetrySkipped: true });
     }
     // 无论哪种情况都把 finish_reason 如实上报：harness 用它区分"真空白"与"被长度上限截断"，
     // 并据此换重试话术（截断 → 要求压缩输出，而不是把同一份长要求再发一遍）
