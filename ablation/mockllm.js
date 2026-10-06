@@ -126,14 +126,19 @@ function l2ScriptFor(system, userText, opts) {
   const s = String(system || '');
   const wrong = /错解/.test(userText) || opts.wrong;
   const code = wrong ? WRONG : SOLUTION;
-  if (/【题解 Agent】/.test(s)) return { text: '算法：读入两个整数并输出它们的和。\n\n```python\n' + code + '\n```' };
-  if (/【暴力 Agent】/.test(s)) return { text: '按题意直译的暴力：全部读进来求和。\n\n```python\n' + BRUTE + '\n```' };
+  if (/【题解 Agent】/.test(s)) return { text: '```python\n' + code + '\n```' };
+  if (/【暴力 Agent】/.test(s)) return { text: '```python\n' + BRUTE + '\n```' };
   if (/【数据生成 Agent】/.test(s)) return { text: '随机生成两个整数。\n\n```python\n' + GEN + '\n```' };
   // 测试台自己的角色（ablation/lib/mkgen.js）：照题面 + oracle 写生成器 —— 与链里的数据生成 Agent 是同一件事
   if (/【数据生成器 Agent】/.test(s)) return { text: '随机生成两个整数。\n\n```python\n' + GEN + '\n```' };
   if (/【手算锚点 Agent】/.test(s)) return { text: JSON.stringify({ cases: [{ input: '2 3', output: '5' }] }) };
   if (/【讲解提纲 Agent】/.test(s)) {
-    return { text: JSON.stringify({ core: '读入两个整数，输出它们的和', why: '直接相加即可', steps: ['读入', '相加', '输出'], hand: '2 3 → 5', pitfalls: [] }) };
+    return { text: JSON.stringify({
+      core: '读入两个整数，输出它们的和',
+      algorithm: '读入两个整数，直接相加后输出 —— 没有多组询问、没有取模，加法即为题意。',
+      complexity: '时间 O(1)、空间 O(1)：只做一次加法，任何数据范围都够用。',
+      why: '直接相加即可', steps: ['读入', '相加', '输出'], hand: '2 3 → 5', pitfalls: []
+    }) };
   }
   if (/【错因仲裁 Agent】/.test(s)) return { text: JSON.stringify({ wrong: 'sol', reason: 'mock：题解与暴力解不一致，且暴力解已通过样例校准' }) };
   if (/【讲解 Agent】/.test(s)) {

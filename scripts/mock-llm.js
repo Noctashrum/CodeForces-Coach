@@ -656,6 +656,9 @@ function mockAgentOutput(role, body, sysText) {
   if (role === 'plan') {
     return JSON.stringify({
       core: '遇到 0 就取当前可选的最大正数牌',
+      algorithm: '维护一个大根堆存放当前还没被取走的正数牌：读到一个正数就入堆，读到一个 0 就弹出堆顶累加。'
+        + '因为每个 0 只能消耗一张牌、且消耗哪张完全自由，所以在每个 0 处取当前最大值即可覆盖所有情况。',
+      complexity: '时间 O(n log n)（每个元素最多入堆/出堆一次），空间 O(n)。n 只有 2·10^5，完全够用。',
       why: '交换论证：把某个 0 取的 x 换成当前最大值 M 不会更差，且留下的 x ≤ M 对后面更有利',
       wrongIntuition: '把 0 当成"总能取最大值"，忽略一张牌被取走后不能再被后面的 0 使用',
       hand: { input: 'n=5, a=[3,0,2,0,1]', steps: ['读到 3 入堆', '读到 0 弹出 3（累计 3）', '读到 2 入堆', '读到 0 弹出 2（累计 5）', '读到 1 入堆但后面没有 0'] },
@@ -674,13 +677,8 @@ function mockAgentOutput(role, body, sysText) {
     if (failMode) {
       return ['（模拟坏题解）直接输出 0。', '', '```python', 'import sys', 'def main():', '    sys.stdin.read()', '    print(0)', 'main()', '```'].join('\n');
     }
-    return [
-      '用大根堆维护当前可选的正数牌：遇到正数入堆，遇到 0 就弹出堆顶累加。复杂度 O(n log n)。',
-      '',
-      '```python',
-      MOCK_SOL_PY,
-      '```'
-    ].join('\n');
+    // 契约（见 solutionSystem）：只输出一个代码块，说明与复杂度由讲解提纲 Agent 负责。
+    return ['```python', MOCK_SOL_PY, '```'].join('\n');
   }
   if (role === 'brute') {
     if (cheatBruteMode) {
@@ -689,13 +687,8 @@ function mockAgentOutput(role, body, sysText) {
     if (noBruteMode) {
       return ['（模拟暴力解写不出）随便输出点东西。', '', '```python', 'print(0)', '```'].join('\n');
     }
-    return [
-      '暴力枚举每一步的选择（指数级），但 n ≤ 8 时完全跑得动。',
-      '',
-      '```python',
-      MOCK_BRUTE_PY,
-      '```'
-    ].join('\n');
+    // 同上：暴力 Agent 也只交代码（提示词里写着"不要写任何解释、思路或复杂度说明"）。
+    return ['```python', MOCK_BRUTE_PY, '```'].join('\n');
   }
   if (role === 'gen') {
     return ['```python', MOCK_GEN_PY, '```'].join('\n');
