@@ -81,6 +81,24 @@ async function main() {
     check('装载：内联题面也判得出多解题（判分器与产品共用一份判据）',
       mkgen.looksSpecialJudge(inlineLoaded.all[0].statement) === true
       && mkgen.looksSpecialJudge('Print the maximum possible score.') === false);
+    // P0 回归①b（2026-10-07 另一台机器的 ui.zip）：题库里 oracle/gen/题面存的是**别人机器上的绝对路径**
+    //   （C:\Users\MECHREVO\...），换机器解压后 211 条记录全部静默判成 no-oracle（"用时 0.0 分钟"、零报错）。
+    //   resolveFile 的"末两段兜底" + rejudge 的 resolveEntryAssets 必须把路径救回来，否则跨机跑分等于没跑。
+    const foreignBase = path.join(tmp, 'foreign-pool');
+    fs.mkdirSync(path.join(foreignBase, 'oracle'), { recursive: true });
+    fs.mkdirSync(path.join(foreignBase, 'gen'), { recursive: true });
+    fs.writeFileSync(path.join(foreignBase, 'oracle', '1978D.cpp'), 'int main(){return 0;}', 'utf8');
+    fs.writeFileSync(path.join(foreignBase, 'gen', '1978D.py'), 'print(1)', 'utf8');
+    const foreign = problemsLib.resolveEntryAssets(foreignBase, {
+      id: '1978D',
+      statementFile: 'C:\\Users\\MECHREVO\\Desktop\\CodeForces-Coach-main\\ablation\\out\\ui\\statements\\1978D.txt',
+      oracle: { lang: 'cpp', file: 'C:\\Users\\MECHREVO\\Desktop\\CodeForces-Coach-main\\ablation\\out\\ui\\oracle\\1978D.cpp' },
+      gen: { lang: 'python', file: 'C:\\Users\\MECHREVO\\Desktop\\CodeForces-Coach-main\\ablation\\out\\ui\\gen\\1978D.py' }
+    });
+    check('装载：别人机器上的绝对路径（oracle/gen）能按题库目录找回本机文件',
+      fs.existsSync(foreign.oracle.file) && fs.existsSync(foreign.gen.file)
+      && path.resolve(foreign.oracle.file) === path.resolve(path.join(foreignBase, 'oracle', '1978D.cpp')),
+      foreign.oracle.file + ' | ' + foreign.gen.file);
     // P0 回归②：工作区/文档按轮次隔离 —— 否则上一轮遗留的 sol.py 会被下一轮当成自己的产物读走
     //   （2268A 的失败轮就是这样被记成"有代码、验证通过"，交付的却是 4 小时前那一轮的文档与代码）
     check('轮次隔离：批次号形如 YYYYMMDD-HHMMSS', /^\d{8}-\d{6}$/.test(String(run.id)), String(run.id));

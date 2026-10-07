@@ -7,6 +7,10 @@
  *                           [--levels L0,L0C,L1,L2] [--latest] [--limit N]
  *                           [--tiers 30,200,2000] [--generous 20000] [--gen-dir <别的store>,...]
  *                           [--problems <problems.json>]   （跑分目录里没有 problems.json 时用）
+ *                           [--resume]                     （接着上次判，跳过已判完的记录；机器重启后必用）
+ *
+ * 跨机器注意：题库里 oracle/gen/题面写的是**别人机器上的绝对路径**时，这里会按"题库文件所在目录 +
+ * 末两段"重新解析（`lib/problems.js` 的 resolveEntryAssets）；否则整库静默判成 no-oracle。
  *
  * 为什么是**串行**的：这一关要拿"真实时限"判 TLE，并发跑会让被测程序抢 CPU，
  * 把"超时"和"被挤慢"混为一谈 —— 计时结论必须单线程跑出来。也别和别的重活同时跑。
@@ -24,6 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const ruler = require('./lib/ruler');
 const judge = require('./judge');
+const problemsLib = require('./lib/problems');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -43,6 +48,7 @@ function parseArgs(argv) {
     else if (k === '--oracle-tries') a.oracleTries = Number(argv[++i]) || 0;
     else if (k === '--gen-dir') a.genDirs = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
     else if (k === '--problems') a.problems = argv[++i];
+    else if (k === '--resume') a.resume = true;
     else if (k === '--store' === k) { /* noop */ }
   }
   if (!a.out) a.out = path.join(a.store, 'verdicts-cfac.jsonl');
@@ -65,8 +71,11 @@ async function main() {
   const problemsFile = args.problems ? path.resolve(ROOT, args.problems) : path.join(store, 'problems.json');
   const raw = JSON.parse(fs.readFileSync(problemsFile, 'utf8'));
   const all = raw.problems || raw.all || raw;
+  // 题库里的资产路径可能是**别人机器上的绝对路径**（2026-10-07 另一台机器的 ui.zip 就是这样），
+  // 这里统一按"题库文件所在目录"解析一遍，带"末两段兜底"，否则整份题库静默判成 no-oracle。
+  const problemsBaseDir = path.dirname(problemsFile);
   const byId = {};
-  for (const p of all) byId[p.id] = p;
+  for (const p of all) byId[p.id] = problemsLib.resolveEntryAssets(problemsBaseDir, p);
 
   const cacheDir = path.join(ROOT, 'data', 'cf-problems');
   const overrides = ruler.loadOverrides(store);
@@ -92,16 +101,34 @@ async function main() {
   console.log('对拍规模 : ' + (args.tiers || ruler.DIFF_TIERS).join('/') + '，最大规模关：题面最大档 + 真实时限');
   console.log('');
 
-  const out = fs.createWriteStream(args.out, { flags: 'w' });
+  const out = fs.createWriteStream(args.out, { flags: args.resume ? 'a' : 'w' });
   const results = [];
   const basisSeen = {};
   const t0 = Date.now();
   let n = 0;
+  // --resume：机器重启/进程被杀之后接着判，不重跑已经判完的格子。
+  // 血泪教训（2026-10-07）：另一台机器的那次重判跑到 127/211 被重启掐掉，默认 'w' 会把它整个抹掉，
+  // 于是每次重启都要从第 1 条重新等 25 分钟 —— 用户看到的"怎么又卡住了"有一半是这个。
+  // 键用 level|problem|startedAt（同格多次重跑是不同的记录，谁也顶不掉谁）。
+  const judgedKey = (r) => String(r.level) + '|' + r.problem + '|' + String(r.startedAt || '');
+  const priorDone = new Map();
+  if (args.resume) {
+    for (const r of readJsonl(path.resolve(ROOT, args.out))) {
+      if (r && r.level && r.problem) priorDone.set(judgedKey(r), r);
+    }
+    if (priorDone.size) console.log('--resume：已有 ' + priorDone.size + ' 条判分结果，跳过它们');
+  }
 
   for (const rec of records) {
     n++;
     const p = byId[rec.problem];
     const tag = '[' + String(n).padStart(3) + '/' + records.length + '] ' + rec.level + ' ' + rec.problem;
+    const done = priorDone.get(judgedKey(rec));
+    if (done) {
+      results.push(done);
+      console.log(tag + ' → 已完成（--resume 跳过）：' + (done.cfac ? '★CF-AC' : (done.verdict || '?')));
+      continue;
+    }
     if (!p) {
       console.log(tag + ' → 题库里没有这道题，跳过');
       const v = { level: rec.level, problem: rec.problem, startedAt: rec.startedAt, cfac: false, verdict: 'no-problem' };
