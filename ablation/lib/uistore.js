@@ -78,6 +78,12 @@ function init(rootDir) {
   const problemsFile = path.join(dir, 'problems.json');
   let problems = readJson(problemsFile, []);
   if (!Array.isArray(problems)) problems = [];
+  // 载入时把资产路径归一化一次：别人机器导出的题库（ui.zip）里 `statementFile` / `oracle.file` /
+  // `gen.file` 全是 `C:\Users\<对方>\...` 的绝对路径，直接把这种条目喂给 judge/runner 就是
+  // **整库静默判成 no-oracle**（2026-10-07 实测 211 条全废、零报错）。归一化后 prevCode/remove/runtime
+  // 三条读路径也都跟着修好。写盘仍写本机绝对路径（本地读写最省事），可搬性由"读时解析"保证。
+  const problemsLib = require('./problems');
+  problems = problems.map((p) => problemsLib.resolveEntryAssets(dir, p));
 
   /**
    * 一条记录"交付了什么" —— 排序用的级别（越高越是"这档自己给出的解"）：

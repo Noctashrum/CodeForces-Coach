@@ -22,7 +22,15 @@ const ABLATION_DIR = path.join(__dirname, '..');
 function resolveFile(baseDir, p) {
   if (!p) return null;
   const abs = path.isAbsolute(p) ? p : path.resolve(baseDir, p);
-  return fs.existsSync(abs) ? abs : null;
+  if (fs.existsSync(abs)) return abs;
+  // 血泪教训（2026-10-07，另一台机器的 ui.zip）：工作台写出的 problems.json 里
+  // `statementFile` / `oracle.file` / `gen.file` 存的是**绝对路径**，所以换一台机器解压之后
+  // 每个文件都"不存在"→ 整份题库被判成 no-oracle（166 条记录全废，却一句报错都没有）。
+  // 这里退一步：按路径末两段（`oracle/1978D.cpp`）在题库目录下再找一次；写侧也改成相对路径
+  // （ablation/lib/uistore.js），两边都修才能让导出的题库可搬。
+  const tail = path.join(path.basename(path.dirname(p)), path.basename(p));
+  const guess = path.resolve(baseDir, tail);
+  return fs.existsSync(guess) ? guess : null;
 }
 
 function loadProblems(args) {
@@ -83,4 +91,20 @@ function loadProblems(args) {
   return { file, baseDir, isExample, problems: selected, all: problems, skipped };
 }
 
-module.exports = { loadProblems, resolveFile, ABLATION_DIR };
+/**
+ * 把题库条目里的三处资产路径（题面 / oracle / 生成器）解析成"本机真实存在的绝对路径"。
+ * 为什么要这一步：`ablation/rejudge.js` 是**绕过 loadProblems 直接读题库文件**的（它要的只是 id→题
+ * 的映射），所以路径解析必须自己做一遍。血泪教训（2026-10-07 另一台机器的 ui.zip）：对方写出的
+ * `problems.json` 里全是 `C:\Users\<别人>\...` 的绝对路径，换机器解压后 211 条记录**全军覆没**成
+ * `no-oracle`，而且一句报错都没有（"用时 0.0 分钟"）。resolveFile 的"末两段兜底"能把它救回来。
+ */
+function resolveEntryAssets(baseDir, entry) {
+  if (!entry) return entry;
+  const e = Object.assign({}, entry);
+  if (e.statementFile) e.statementFile = resolveFile(baseDir, e.statementFile) || e.statementFile;
+  if (e.oracle && e.oracle.file) e.oracle = Object.assign({}, e.oracle, { file: resolveFile(baseDir, e.oracle.file) || e.oracle.file });
+  if (e.gen && e.gen.file) e.gen = Object.assign({}, e.gen, { file: resolveFile(baseDir, e.gen.file) || e.gen.file });
+  return e;
+}
+
+module.exports = { loadProblems, resolveFile, resolveEntryAssets, ABLATION_DIR };
