@@ -314,6 +314,10 @@ oracle 只能来自：
    > 没有可交付代码块就抢救一次：`SALVAGE_MAX_TOKENS = 65536` + `reasoning_effort:'none'` +
    > 回灌上一轮思考尾 3000 字符），记录里用 `calls / salvaged / firstFinishReason / request.budget` 自证。
    > 只切这一个变量的对照实验在 `.probe/why-truncated.js`（同一套 system/user，跑 A/B/C/D 四种预算配置）。
+   > ⚠️ **但"把抢救上限收小"这条优化不要照单次臂的账去改 L2**：单次臂 7 格上 8192 划算（2 AC/¥0.735 vs
+   > 65536 的 0 AC/¥1.754），换到 L2 本体上反过来 —— 8192 跑两轮 **0/3** pass@k 且交出 2-2.7 万字符的巨型代码，
+   > 65536 在同样 3 题上 **2/3**（2026-10-07，¥5.273；见 `docs/cf-ac-ruler-2026-10.md` §3.6 与 `§7-2`）。
+   > 开关（`CFCOACH_SALVAGE_MAX_TOKENS` / `CFCOACH_SALVAGE_NO_TAIL`）默认不动。
 3. **把 L1 的工具面写进文档**：L1 允许写文件/运行/对拍，不允许联网取题。
    工具面一变，L1 的含义就变了，结论也必须跟着重述。
 4. **成本一起报**："正确率 +30 个百分点"必须配"多花多少 token/多少钱"。
