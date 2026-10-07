@@ -132,6 +132,34 @@ async function main() {
     const CPP_SOL = `#include <bits/stdc++.h>\nusing namespace std;\nint main(){ long long n, s = 0; while (cin >> n) { vector<int> a(n); for (auto &x : a) { cin >> x; s += x; } cout << s << "\\n"; s = 0; } return 0; }`;
     const r6 = await runner.runSamples({ lang: 'cpp', code: CPP_SOL, samples: [{ input: '2\n1 2\n', output: '3\n' }] });
     check('C++ 样例 AC', r6.ok && r6.allPass, r6);
+
+    // ---- 深递归被本地小栈误杀（真实事故的回归） ----
+    // 2268C 的官方题解（也就是我们的 oracle）是 Cartesian 树分治，在有序/等值数据上递归深度 O(n)；
+    // CF 给 C++ 的栈是 256MB，而 MinGW 默认只有 1–2MB → 一个在 CF 上 AC 的解在本地以
+    // 0xC00000FD（STATUS_STACK_OVERFLOW，Node 里报 exitCode 3221225725 / -1073741571）崩掉，
+    // 于是被误判成 RE / "oracle 坏"。修法是编译时加 -Wl,--stack,268435456（见 lib/runner.js 的 CPP_STACK_FLAGS）。
+    // 下面这个函数故意用 volatile 大数组撑大栈帧（约 200 字节/层），并且**不是尾调用**
+    // （递归返回后还要做加法，-O2 不会把它变成循环），深度 150000 在 2MB/8MB 栈上必崩、在 256MB 上没事。
+    const CPP_DEEP = `#include <bits/stdc++.h>
+using namespace std;
+long long probe(int n) {
+  volatile char pad[192];
+  pad[n % 192] = (char)(n & 0x7f);
+  if (n <= 0) return pad[0];
+  long long r = probe(n - 1);
+  return r + pad[n % 192] + 1;
+}
+int main() { int n; if (!(cin >> n)) return 1; cout << (probe(n) > 0 ? "OK" : "BAD") << "\\n"; return 0; }`;
+    const rDeep = await runner.runSamples({
+      lang: 'cpp', code: CPP_DEEP,
+      samples: [{ input: '150000\n', output: 'OK\n' }]
+    });
+    if (process.platform === 'win32') {
+      check('深递归解不再被本地小栈误杀（0xC00000FD 回归）', rDeep.ok && rDeep.allPass, rDeep.results && rDeep.results[0]);
+    } else {
+      // 非 Windows 的栈由 ulimit 决定（通常 8MB），本地没有 -Wl,--stack 这回事，不断言、只提示
+      console.log('  · 深递归栈回归：非 Windows 平台跳过断言（本机 ulimit 栈大小决定结果）');
+    }
   }
 
   console.log('\n========================================');

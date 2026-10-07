@@ -331,6 +331,28 @@ oracle 只能来自：
   默认关；要用它就该同时看"交付物完整度"，别只看钱。数据见
   [`docs/cost-l2-salvage-2026-10.md`](../docs/cost-l2-salvage-2026-10.md)。
 
+## 判分尺子：CF-AC（2026-10 修好 —— 在此之前所有"通过率"都要重看）
+
+- 旧判分（`ablation/judge.js`）只有两关：官方样例 + 与外部 AC 提交在"生成器默认规模"上随机对拍。
+  而 store 里的生成器**没有一个读 argv**（`runner.stressTest` 调生成器时不传参数），时限固定 5000ms ——
+  于是**我们自己的降级暴力解也能被判 AC**（2268C 的 python 暴力解：样例过、对拍全一致，真实时限 2000ms 下跑不完）。
+- 新尺子 `ablation/lib/ruler.js`，三条**同时**成立才算 CF-AC：
+  ① 官方样例；② 与 oracle 在 `[30, 200, 2000]` 组随机数据上对拍；③ **题面最大规模 + 题目真实时限**
+  （超时先用 20 秒宽松上限复跑，区分"刚超一点"与"差数量级"）。规模与时限来自题面解析
+  （没有 `n` 只有测试组数 `t` 时用 t 的上界），可由 `<store>/limits.json` 覆盖；
+  每个数字都带 `source`（override/cache/parsed/default），所以"这次判分是什么规模、什么时限"可以事后复核。
+- **多解题判"不可判"**（`lib/statement.js` 的启发式 + `limits.json` 覆盖）：没有 checker 就没有资格说候选错。
+- 重判工具：`node ablation/rejudge.js --store <目录>`（**串行**跑；别与压测/编译并发，否则 TLE 计时会被污染），
+  配对表：`node .probe/cfac-pairs.js <store> L0,L0C,L1,L2 --agg best`（一格多条记录时必须显式选口径）。
+- 重判结果（67 条记录 + cost-sample 六臂）：**L2 在 AC 轴上没有赢过 L0**
+  （17 题配对：双 AC 11 / 只有 L0 1 / 只有 L2 1 / 双失败 4，McNemar 完全对称），
+  成本 ¥1.81/AC vs L0 ¥0.37/AC（≈4.9×）；**六个降成本臂合计 0 AC**。
+- 尺子自身修了 5 处：值域 off-by-one（`<=` 被当成严格小于）、多解题被当错解、只有 t 的题规模取错、
+  单次抽样太弱（改成最多重抽 4 次）、**本机栈 1–2MB vs CF 256MB** 让深递归正常解被误判 RE
+  （`lib/runner.js` 加 `-Wl,--stack,268435456`，回归测试见 `scripts/test-runner.js`）。
+- **已知局限**：最大规模只抽一份随机数据 → 失败标签会翻（AC/非 AC 这一列稳定）；下一步要抽 K 份、要求 all-pass。
+- 全部数据与论证：[`docs/cf-ac-ruler-2026-10.md`](../docs/cf-ac-ruler-2026-10.md)。
+
 ## 这版**没有**做（别误读结论）
 
 - **L1b（提示升级档）**：同样"被要求对拍"，但强调必须自己写暴力解与生成器并跑通 ——
@@ -346,7 +368,7 @@ oracle 只能来自：
 ## 报告结论的最小模板
 
 ```
-模型：<provider::model>   题集：<n> 题（难度分层 <…>）   判据：样例 + <k> 组差分（oracle 来自 <来源>）
+模型：<provider::model>   题集：<n> 题（难度分层 <…>）   判据：CF-AC（样例 + <k> 组差分 + 最大规模/真实时限）
 L0：对 a/n    平均 <p>k tokens   平均 <t>s
 L1：对 b/n    平均 <p>k tokens   平均 <t>s
 L2：对 c/n    平均 <p>k tokens   平均 <t>s

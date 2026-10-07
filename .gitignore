@@ -33,6 +33,8 @@ profile-log.jsonl
 # 推理预算实验的产物（关思考 / 想完再转写两臂的每轮输出：思考正文、token、耗时）
 .probe/nothink/
 .probe/thinkwrite/
+# 判分尺子的中间产物：oracle-at-max.js 落盘的大规模随机用例（每份几百 KB，纯调试用）
+.probe/tmp/
 # 提示词体量盘点的机器可读转储（.md 报告进仓库，.json 是原始数据，太大）
 .probe/prompt-inventory.json
 .probe/rendered.html
