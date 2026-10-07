@@ -500,13 +500,17 @@ differently than it first did:
   **142,708-character code block** (sample WA) in another — same problem, model, prompt and budget.
 - Cost per representative cell: L0 ¥0.21/AC, L0C ¥0.26, L0+ ¥0.52, L1 ¥0.97, **L2 ¥1.80/AC**.
 
-The salvage cap has now been measured: **keep 65536**. On the one-call arms 8192 beats 65536 (2 AC for ¥0.735 vs
-0 AC for ¥1.754), but moving that same variable onto the **L2 arm itself** inverts it — 8192 scored 0/3 pass@k in two
-independent runs and handed back 20k–27k-character monsters, while 65536 scored 2/3 on the same three problems. Both
-switches (`CFCOACH_SALVAGE_MAX_TOKENS` / `CFCOACH_SALVAGE_NO_TAIL`) stay, **defaults unchanged**; revisiting this needs
-≥10 L2 cells at reps ≥2. A bigger bill worth fixing: **75%** of L2's total spend (¥26.10 of ¥34.76) went into the 14
-records that hit truncation/salvage and bought just 2 ACs — that is what the next step, a **stop-loss budget**, is for.
-Method, numbers and limits: [docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md) §3.6 / §7.
+The salvage cap: **defaults stay at 65536, but that L2 comparison was confounded and the isolating run is in flight.**
+The "65536 = 2/3" baseline records ran the *old* discipline (first solve attempt with no `max_tokens` → the provider's
+65536, thinking and answer sharing it; the second call was an ordinary retry that still thought), while both 8192 runs
+used the new discipline (8192 first attempt + thinking-off salvage). On the one-call arms 8192 does win (2 AC for ¥0.735
+vs 0 AC for ¥1.754). Both switches (`CFCOACH_SALVAGE_MAX_TOKENS` / `CFCOACH_SALVAGE_NO_TAIL`) stay, **defaults
+unchanged**; revisiting this needs ≥10 L2 cells at reps ≥2. A bigger bill worth fixing
+(`.probe/l2-cost-attribution.js`): **45.5% of L2's spend (¥13.71 across 26 calls) went into calls that hit the length
+cap and returned nothing at all** — 21 of those 26 are the solve agent's first answer and its immediate retry; the
+teaching line is 24.6% (that one *is* the deliverable). That is what the next step, a **stop-loss budget** that stops on
+"no new information" rather than on a time cap, is for. Method, numbers and limits:
+[docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md) §3.6 / §7.
 
 `npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
 samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
