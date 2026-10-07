@@ -501,6 +501,75 @@ async function main() {
         !!recL0P.code && recL0P.codeSource === l0Ref.codeSource && recL0P.ms >= 0,
         JSON.stringify([!!recL0P.code, recL0P.codeSource, l0Ref.codeSource]));
     }
+
+    // ⑩c 输出预算纪律：三档原来"不传 max_tokens"，lib/llm.js:159 于是根本不带这个字段，
+    //     服务商默认上限（65,536）接管 → 思考把预算吃光、正文 0 字符。
+    //     2026-10-07 的五个白卷格（L0+ 2268A/2267F2/2268F/2268C/2268D：answers/*.md 0 字节、
+    //     completionTokens=65536、finish_reason=length、request.maxTokens=null）就是这么来的 ——
+    //     那量的是预算管理，不是提示词。现在首轮上限与 L2 首轮相同（8192），
+    //     没交出代码块时按 L2 同款抢救一次（喂回思考尾巴 + 关思考 + 65536）。
+    //     这一段把"请求体里到底有没有 max_tokens"和"抢救了几次"钉死，防止再退回去。
+    {
+      const budgetRun = record.openRun(path.join(tmp, 'budget'));
+      const mkRes = (chunks) => new Response(chunks.join('\n\n') + '\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      const sseCode = [
+        'data: ' + JSON.stringify({ choices: [{ delta: { content: '```cpp\nint main(){return 0;}\n```' } }] }),
+        'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 50, completion_tokens: 40 } }),
+        'data: [DONE]', ''
+      ];
+      const sseThinkingOnly = [
+        'data: ' + JSON.stringify({ choices: [{ delta: { reasoning_content: '（思考把预算用光了）' } }] }),
+        'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }], usage: { prompt_tokens: 100, completion_tokens: 65536 } }),
+        'data: [DONE]', ''
+      ];
+      const realFetch = global.fetch;
+      const budgetCtx = (name) => ({
+        problem, statement: problem.statement, target, params, run: budgetRun, name,
+        maxSteps: 4, iterations: 4, lang: 'cpp'
+      });
+      // ① 首轮就交出代码：只许一次请求，且请求体里必须带 max_tokens=8192
+      {
+        const bodies = [];
+        global.fetch = async (url, init) => { bodies.push(JSON.parse(init.body)); return mkRes(sseCode); };
+        try {
+          const rec = await levels.runL0Plus(budgetCtx('budget-first-ok'));
+          check('输出预算：首轮请求体里**必须**带 max_tokens（"不传上限"就是白卷的根因）',
+            bodies.length === 1 && bodies[0].max_tokens === 8192,
+            JSON.stringify([bodies.length, bodies[0] && bodies[0].max_tokens]));
+          check('输出预算：首轮就交出代码时不抢救（calls=1、salvaged 不置位）',
+            rec.calls === 1 && !rec.salvaged && !!rec.code,
+            JSON.stringify([rec.calls, !!rec.salvaged, !!rec.code]));
+          check('输出预算：预算口径进记录（审计时要能看出这一格是按什么上限跑的）',
+            rec.request.budget && rec.request.budget.attemptMaxTokens === 8192
+            && rec.request.budget.salvageMaxTokens === 65536,
+            JSON.stringify(rec.request.budget));
+        } finally { global.fetch = realFetch; }
+      }
+      // ② 首轮撞顶（只见思考、正文空）：必须抢救一次 —— 关思考 + 抬上限 + 把思考尾巴喂回去
+      {
+        const bodies = [];
+        let n = 0;
+        global.fetch = async (url, init) => {
+          bodies.push(JSON.parse(init.body)); n++;
+          return mkRes(n === 1 ? sseThinkingOnly : sseCode);
+        };
+        try {
+          const rec = await levels.runL0Plus(budgetCtx('budget-salvage'));
+          const salvageUser = String(((bodies[1].messages || []).find((m) => m.role === 'user') || {}).content || '');
+          check('输出预算：撞顶空正文时按 L2 同款抢救一次（喂回思考尾巴 + 关思考 + 65536）',
+            bodies.length === 2 && bodies[0].max_tokens === 8192 && bodies[1].max_tokens === 65536
+            && bodies[1].reasoning_effort === 'none'
+            && /你上一步的思考/.test(salvageUser),
+            JSON.stringify([bodies.length, bodies.map((b) => b.max_tokens),
+              bodies[1] && bodies[1].reasoning_effort, /你上一步的思考/.test(salvageUser)]));
+          check('输出预算：抢救后记账如实（拿到代码、salvaged/calls 置位、usage 是两次之和）',
+            !!rec.code && rec.salvaged === true && rec.calls === 2
+            && rec.usage.promptTokens === 150 && rec.usage.completionTokens === 65576,
+            JSON.stringify([!!rec.code, rec.salvaged, rec.calls, rec.usage]));
+        } finally { global.fetch = realFetch; }
+      }
+    }
     // ⑪ 工作台界面：rating 阶梯。index.html 里的 JS 以前没有任何测试覆盖，而"裸模 rating 上限"全靠它读。
     //     用假 DOM 把 <script> 真跑一遍，喂一份构造好的 state，断言阶梯把
     //     "答错" / "没跑完（中止、撞顶）" / "不可判（多解题、尺子坏了）" 分开 —— 这是读数的命门：

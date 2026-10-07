@@ -450,13 +450,34 @@ exact McNemar p-value, per-arm token cost (and ¥ per AC), and the **false-confi
 **What the ruler found (October 2026)** — five defects were letting non-solutions look like AC: `<=` bounds parsed as
 `<`, multi-answer problems compared literally, statements with `t` but no `n`, single-draw random generators, and an
 oracle that overflowed the stack at maximum size (MinGW gives C++ 1–2 MB where Codeforces gives 256 MB). After fixing
-all five and re-judging every record, the AC-axis comparison came out blunt: L0 and L2 are
-**statistically indistinguishable** (17 paired problems — 11 both AC, 1 only L0, 1 only L2, 4 both failed) with L2
-spending **4.9× more per AC**, and every "cheaper" arm scored **zero** AC. Adding the **L0+** arm split that gap
-honestly: L0+ (L2's exact prompts, one call, no tools) scored **10 AC to L0's 12** — the prompting itself is a
-*negative* — while **L2 vs L0+ is 3 wins / 1 loss / +2 AC (p≈0.63, not significant)**, and all three wins are cells
-where L0+ delivered nothing at all. The honest reading is that the harness currently buys *"survives a failed first
-attempt"* plus *verification and teaching*, not *solving*. Method, numbers and limits:
+all five and re-judging every record, every "cheaper" arm still scored **zero** AC.
+
+The first pass then compared arms whose **per-call output budget was not the same**: the one-call arms passed no
+`max_tokens` at all (provider default 65536, **shared by the thinking tokens and the answer**), while L2's solution
+agent uses an 8192 first attempt plus a truncation salvage. A probe that varies only that budget
+(`.probe/why-truncated.js`) shows why it matters: on one 1200-rated problem the same prompt with no cap burns
+**149,004 thinking characters** for a 642-character code block, with an 8192 cap it returns **nothing at all**
+(`finish_reason=length`), and with the cap plus thinking disabled it returns the code in **1.5s for ¥0.0034 — 117×
+cheaper**. Five of L0+'s fifteen cells were white pages caused by that, not by its prompt.
+
+After giving every one-call arm the *same* budget rules as the product (`ablation/lib/levels.js`
+`callWithBudget()`: 8192 attempt → salvage at 65536 with `reasoning_effort:'none'` + the previous thinking tail)
+and re-running all 68 leaf-arm records (**68/68 produced code, zero white pages, ¥15.07**), the AC axis reads
+differently than it first did:
+
+- **L0+ vs L2 = 5 both AC / 0 only L0+ / 7 only L2 / 5 both failed → net +7 AC, exact McNemar p = 0.016.**
+  With prompts *and* per-call budget held identical, the harness (tools, loop, verification, feedback-driven
+  retries) does buy solving power — the earlier "+2, not significant" was an artifact of the mismatched budget.
+- **Prompt discipline alone still buys nothing**: L0C and L0+ each score 5 of 17 against the bare model's 7.
+- **Part of the gain is just "having a loop and tools"**: L1 (generic tools, no harness) scores 10; L1 vs L2 is
+  +2 (p = 0.625).
+- **Variance is large**: L0+ on one problem produced a 1,756-character accepted solution in one run and a
+  **142,708-character code block** (sample WA) in another — same problem, model, prompt and budget.
+- Cost per representative cell: L0 ¥0.21/AC, L0C ¥0.26, L0+ ¥0.52, L1 ¥0.97, **L2 ¥1.80/AC**.
+
+Still open (and a real product bug): the salvage path caps at 65536 with thinking disabled, so the model sometimes
+rambles for tens of thousands of characters instead of writing code — the probe's 8192-with-thinking-off
+configuration is both faster and cheaper. Method, numbers and limits:
 [docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md).
 
 `npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
