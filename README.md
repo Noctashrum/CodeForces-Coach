@@ -452,8 +452,11 @@ exact McNemar p-value, per-arm token cost (and ¥ per AC), and the **false-confi
 oracle that overflowed the stack at maximum size (MinGW gives C++ 1–2 MB where Codeforces gives 256 MB). After fixing
 all five and re-judging every record, the AC-axis comparison came out blunt: L0 and L2 are
 **statistically indistinguishable** (17 paired problems — 11 both AC, 1 only L0, 1 only L2, 4 both failed) with L2
-spending **4.9× more per AC**, and every "cheaper" arm scored **zero** AC. The honest reading is that the harness
-currently buys *verification and teaching*, not *solving*. Method, numbers and limits:
+spending **4.9× more per AC**, and every "cheaper" arm scored **zero** AC. Adding the **L0+** arm split that gap
+honestly: L0+ (L2's exact prompts, one call, no tools) scored **10 AC to L0's 12** — the prompting itself is a
+*negative* — while **L2 vs L0+ is 3 wins / 1 loss / +2 AC (p≈0.63, not significant)**, and all three wins are cells
+where L0+ delivered nothing at all. The honest reading is that the harness currently buys *"survives a failed first
+attempt"* plus *verification and teaching*, not *solving*. Method, numbers and limits:
 [docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md).
 
 `npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
