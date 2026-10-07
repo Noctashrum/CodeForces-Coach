@@ -442,10 +442,35 @@ actually accepts: the official samples, differential testing against an **extern
 **maximum input size at the real time limit**. Protocol, judging discipline (the oracle must never come from
 cf-coach's own output), cost estimates and a results template: see [ablation/README.md](ablation/README.md).
 
-The bar is **AC**, not "not worse", so `L2 > L0+` is the number that matters: `L2 − L0+` is what the harness adds
-beyond prompt discipline, and `L0+ − L0` isolates the prompting itself. Also reported: paired win/tie/loss with an
-exact McNemar p-value, per-arm token cost (and ¥ per AC), and the **false-confidence rate** (the chain claimed
-"verified" while an external oracle says WA).
+The bar is read on **two lines — preserving solvability and teaching** — not as one-sentence "`L2 > L0+`":
+
+- **Preserving solvability**: if the bare model cannot solve a problem, us failing it too is normal and is not a loss.
+  What actually matters is that **we lose none of the problems L0 (or L0C) does get accepted**; extra money should be
+  spent on cells where "the model could solve it but our interface, budget or protocol dropped it".
+- **Teaching**: verification, minimum counterexamples, review and walkthroughs are a separate line — not priced in AC,
+  but with their own bar (claims reproducible against the official samples and differential testing, scope stated
+  honestly, and no fake "verified").
+- **No over-claiming**: beating the model's ceiling with orchestration is a fantasy. When the chain judges a problem
+  unsolvable it must **degrade honestly** (state the scope, deliver the first correct version) and book the saved cost,
+  instead of re-running forever.
+- Still reported: paired win/tie/loss with an exact McNemar p-value, per-arm tokens and cost (and ¥ per AC), and the
+  **false-confidence rate** (the chain claimed "verified" while an external oracle says WA). `L2 > L0+` is one of the
+  numbers (the harness's net gain with prompts and budget held identical), but **it is not the bar by itself** — part of
+  that gain comes from problems L0 could not solve, and by the rule above that only counts as a bonus.
+
+The books on the **8 problems that L0 or L0C ever got accepted** (the "preserving solvability" reading):
+
+| Arm | Those 8 | Spend | ¥/AC |
+| --- | --- | --- | --- |
+| L0 | 7/8 | ¥0.585 | **¥0.084** |
+| L0C | 5/8 | ¥0.471 | ¥0.094 |
+| L0+ | 4/8 | ¥0.504 | ¥0.126 |
+| L1 | **8/8** | ¥3.599 | ¥0.450 |
+| L2 | 7/8 | ¥8.251 | ¥1.179 |
+
+The one miss (2267B) is a "cannot judge" on the ruler itself, which the judging side should carry. L1 spends ¥3.60 for
+8/8 while L2 spends ¥8.25 for 7/8: **the extra ¥4.65 bought no AC at all on the solving axis** — the teaching line has
+to earn it back, or it is just cost.
 
 **What the ruler found (October 2026)** — five defects were letting non-solutions look like AC: `<=` bounds parsed as
 `<`, multi-answer problems compared literally, statements with `t` but no `n`, single-draw random generators, and an
@@ -475,10 +500,13 @@ differently than it first did:
   **142,708-character code block** (sample WA) in another — same problem, model, prompt and budget.
 - Cost per representative cell: L0 ¥0.21/AC, L0C ¥0.26, L0+ ¥0.52, L1 ¥0.97, **L2 ¥1.80/AC**.
 
-Still open (and a real product bug): the salvage path caps at 65536 with thinking disabled, so the model sometimes
-rambles for tens of thousands of characters instead of writing code — the probe's 8192-with-thinking-off
-configuration is both faster and cheaper. Method, numbers and limits:
-[docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md).
+The salvage cap has now been measured: **keep 65536**. On the one-call arms 8192 beats 65536 (2 AC for ¥0.735 vs
+0 AC for ¥1.754), but moving that same variable onto the **L2 arm itself** inverts it — 8192 scored 0/3 pass@k in two
+independent runs and handed back 20k–27k-character monsters, while 65536 scored 2/3 on the same three problems. Both
+switches (`CFCOACH_SALVAGE_MAX_TOKENS` / `CFCOACH_SALVAGE_NO_TAIL`) stay, **defaults unchanged**; revisiting this needs
+≥10 L2 cells at reps ≥2. A bigger bill worth fixing: **75%** of L2's total spend (¥26.10 of ¥34.76) went into the 14
+records that hit truncation/salvage and bought just 2 ACs — that is what the next step, a **stop-loss budget**, is for.
+Method, numbers and limits: [docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md) §3.6 / §7.
 
 `npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
 samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
