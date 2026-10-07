@@ -26,14 +26,15 @@ const problemsLib = require('./lib/problems');
 const agentloop = require('../lib/agentloop');
 const llm = require('../lib/llm');
 
-const LEVELS = ['L0', 'L0C', 'L1', 'L2'];
+const LEVELS = ['L0', 'L0C', 'L0+', 'L1', 'L2'];
 
 function usage() {
   console.log([
     '消融实验跑分：node ablation/run.js [选项]',
     '',
-    '  --level L0,L0C,L1,L2 跑哪些档（默认 L0,L1；L2 = cf-coach 本体无头跑；',
-    '                       L0C = 与 L0 同一份题面，只多一句「这一轮只输出一个代码块」）',
+    '  --level L0,L0C,L0+,L1,L2 跑哪些档（默认 L0,L1；L2 = cf-coach 本体无头跑；',
+    '                       L0C = 与 L0 同一份题面，只多一句「这一轮只输出一个代码块」；',
+    '                       L0+ = 与 L2 题解 Agent 逐字相同的 system 与输入，但单次调用、无工具）',
     '  --problems all|1800C,1800D   跑哪些题（默认 all）',
     '  --problems-file PATH 题库清单（默认 ablation/problems.json，缺则用 example）',
     '  --limit N            只跑前 N 题（先做 pilot 用）',
@@ -137,7 +138,9 @@ async function main() {
     const t0 = Date.now();
     const rec = (j.level === 'L0' || j.level === 'L0C')
       ? await levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }))
-      : (j.level === 'L1' ? await levels.runL1(ctx) : await l2.runL2(Object.assign({}, ctx, l2opts)));
+      : (j.level === 'L0+'
+        ? await levels.runL0Plus(Object.assign({}, ctx, { lang: l2opts.lang }))
+        : (j.level === 'L1' ? await levels.runL1(ctx) : await l2.runL2(Object.assign({}, ctx, l2opts))));
     const cost = record.costOf(cfg, j.target.providerId, j.target.model, rec.usage);
     rec.cost = cost;
     rec.statementSha = j.problem.statementSha;

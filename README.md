@@ -408,8 +408,8 @@ electron/            desktop shell: window, tray, menu, smoke self-test, CF fetc
 ## Development and tests
 
 ```bash
-npm test                  # end-to-end: boots mock services with an isolated data dir, 258 checks
-npm run test:units        # 11 unit suites (anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation)
+npm test                  # end-to-end: boots mock services with an isolated data dir, 259 checks
+npm run test:units        # 12 unit suites (anticheat / explaindoc / statement / loopguard / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation)
 npm run test:harness      # orchestrator unit tests (contract slicing, sample isolation, workspace, rich docs)
 npm run test:runner       # runner unit tests (compile / compare / timeout / C++23); also test:parallel | test:agentruns
 node scripts/run-smoke.js # desktop smoke test (hidden window; prints SMOKE_OVERALL PASS)
@@ -417,15 +417,15 @@ node scripts/run-smoke.js --packaged   # same, driving the packaged app's real U
 npm run mock              # mock LLM endpoint on :3999
 npm run mock-cf           # mock Codeforces on :3998
 npm run pack              # build the portable folder dist/CFCoach-win32-x64 (keeps data/ next to the exe)
-npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (35 files)
-npm run test:skills       # 79 skill checks (skill system + tool layer, no network)
+npm run check:pack        # pre/post-pack self-check: packaged output matches the sources file by file (36 files)
+npm run test:skills       # 82 skill checks (skill system + tool layer, no network)
 npm run test:diagbundle   # diagnostics-bundle tests (nothing sensitive survives, sections, truncation, CLI)
 npm run diag              # write a diagnostics bundle: node scripts/diag.js --out diag.txt
-npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0/L1/L2/judging/paired compare)
+npm run test:ablation     # ablation self-test (local fake model, zero tokens: L0 / L0C / L0+ / L1 / L2, judging, paired compare)
 npm run probe:ablation    # ablation probes: run / judge / import-l2 / selftest, all zero-token
 npm run probe:ui          # end-to-end probe of the manual ablation workbench (zero tokens)
 npm run probe:cf          # live: fetch one real problem through the app's own CF fetch channel
-npm run ablation:serve    # manual workbench UI on http://127.0.0.1:4311 (fetch from CF → paste only your oracle → auto-write the generator → run L0 vs L2)
+npm run ablation:serve    # manual workbench UI on http://127.0.0.1:4311 (fetch from CF → paste only your oracle → auto-write the generator → run L0/L0+/L2)
 node scripts/probe-review-session.js <handle> <contestId>   # live: assemble review material (editorials + sources)
 node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle that goes into the composer
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
@@ -434,19 +434,32 @@ node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: sub
 Pushing and releasing (three commands, a pre-push checklist, common errors): see [docs/PUSHING.md](docs/PUSHING.md).
 Debugging a machine you cannot reach (how to package the whole crime scene into one masked text file): see [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
 
-**Ablation study (how we show it beats a bare model)**: `ablation/` ships runners for L0 (bare model, no tools) and
-L1 (bare agent + generic tools + an explicit "stress-test it yourself" prompt); L2 is cf-coach itself. Judging uses the
-official samples plus differential testing against an **external accepted submission**. Protocol, judging discipline
-(the oracle must never come from cf-coach's own output), cost estimates and a results template:
-see [ablation/README.md](ablation/README.md).
+**Ablation study (AC or nothing)**: `ablation/` runs the same problems through five arms — L0 (bare model, one call,
+no tools), L0C (L0 plus "output one code block and nothing else"), L0+ (L0 **plus the exact prompt discipline and
+inputs the L2 solution agent gets** — the mechanically extracted I/O contract and the official samples, still one
+call, no tools), L1 (bare agent loop + generic tools) and L2 (cf-coach itself). Judging reproduces what Codeforces
+actually accepts: the official samples, differential testing against an **external accepted submission**, and the
+**maximum input size at the real time limit**. Protocol, judging discipline (the oracle must never come from
+cf-coach's own output), cost estimates and a results template: see [ablation/README.md](ablation/README.md).
 
-The acceptance bar for this round is deliberately conservative — **"not worse than L0"** (`notWorseRate`), plus a
-paired win/tie/loss count with an exact McNemar p-value, the per-level token cost, and a **false-confidence rate**
-(the chain claimed "verified" while an external oracle says WA). `npm run ablation:serve` opens a one-page workbench
-for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
+The bar is **AC**, not "not worse", so `L2 > L0+` is the number that matters: `L2 − L0+` is what the harness adds
+beyond prompt discipline, and `L0+ − L0` isolates the prompting itself. Also reported: paired win/tie/loss with an
+exact McNemar p-value, per-arm token cost (and ¥ per AC), and the **false-confidence rate** (the chain claimed
+"verified" while an external oracle says WA).
+
+**What the ruler found (October 2026)** — five defects were letting non-solutions look like AC: `<=` bounds parsed as
+`<`, multi-answer problems compared literally, statements with `t` but no `n`, single-draw random generators, and an
+oracle that overflowed the stack at maximum size (MinGW gives C++ 1–2 MB where Codeforces gives 256 MB). After fixing
+all five and re-judging every record, the AC-axis comparison came out blunt: L0 and L2 are
+**statistically indistinguishable** (17 paired problems — 11 both AC, 1 only L0, 1 only L2, 4 both failed) with L2
+spending **4.9× more per AC**, and every "cheaper" arm scored **zero** AC. The honest reading is that the harness
+currently buys *verification and teaching*, not *solving*. Method, numbers and limits:
+[docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md).
+
+`npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
 samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
 "auto-write generator" has the model write the random generator and mechanically checks it right away; run
-L0/L2 side by side, read the L2 rich document next to the raw L0 answer, and record a human verdict per problem.
+L0/L0+/L2 side by side, read the L2 rich document next to the raw L0 answer, and record a human verdict per problem.
 Live fetching is occasionally blocked by CF's anti-bot challenge (it is probabilistic): click again, it usually goes
 through. If it keeps failing, hit "**import app cache**" — that reads the statement the app itself already fetched and
 cached under `data/cf-problems/`, purely from local disk (no network, no challenge).

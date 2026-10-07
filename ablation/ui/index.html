@@ -61,6 +61,7 @@
       <span class="dim small">档位</span>
       <label title="L0 裸模型：一次调用、没有工具、没有循环、没有验证。厂商宣称的 rating 上限就是这一档。"><input id="lvL0" type="checkbox" checked> L0 裸模</label>
       <label title="L0C：与 L0 逐字相同的题面与 system，只多一句「这一轮只输出一个代码块」。用来把「不懂」和「没交出来」分开 —— 实测同一份提示词加这一句，r2300/r2600 从 0/2 AC 变 2/2 AC。"><input id="lvL0C" type="checkbox"> L0 只给代码块</label>
+      <label title="L0+：system 与 user 就是 L2 题解 Agent 逐字相同的那一套（harness.solutionSystem + 机械抽取的 I/O 契约 + 官方样例），但仍是一次调用、没有工具、没有暴力解/对拍/重写。判据 L2 > L0+ 的对照组：L2 减 L0+ 才是 cf-coach harness 的净贡献。"><input id="lvL0P" type="checkbox"> L0+ 同提示词</label>
       <label title="L1 裸 agent：同一个工具循环 + 通用工具面（写文件/读文件/运行/对拍）。"><input id="lvL1" type="checkbox"> L1 agent</label>
       <label title="L2 cf-coach 本体：工具链 + 三件套 + 判据 + 证据门 + 图文文档。"><input id="lvL2" type="checkbox" checked> L2 cf-coach</label>
     </span>
@@ -332,6 +333,7 @@ function renderProblems() {
   }
   const rows = (S.problems || []).map((p) => {
     const r0 = recOf('L0', p.id); const r2 = recOf('L2', p.id); const r1 = recOf('L1', p.id); const r0c = recOf('L0C', p.id);
+    const r0p = recOf('L0+', p.id);
     const v0 = verdictOf('L0', p.id); const v2 = verdictOf('L2', p.id); const v0c = verdictOf('L0C', p.id);
     const h = humanOf(p.id);
     const und = undecidableOf(p.id);
@@ -346,6 +348,7 @@ function renderProblems() {
       + '<label class="small dim" title="标了跳过就不会进跑分队列（左上角勾「连判不了的题一起跑」可以临时收回）。判不了的题只烧钱不产数据：实测两道吃掉 91 分钟 / ¥10.6。"><input type="checkbox" data-skip="' + esc(p.id) + '"' + (p.skip ? ' checked' : '') + '> 跳过这题</label></td>'
       + '<td>' + (r0 ? verdictBadge(v0, r0) : '<span class="badge b-dim">未跑</span>')
       + (r0c ? '<div class="small" style="margin-top:3px">L0C ' + verdictBadge(v0c, r0c) + '</div>' : '')
+      + (r0p ? '<div class="small" style="margin-top:3px">L0+ ' + verdictBadge(verdictOf('L0+', p.id), r0p) + '</div>' : '')
       + (r1 ? '<div class="small" style="margin-top:3px">L1 ' + verdictBadge(verdictOf('L1', p.id), r1) + '</div>' : '') + '</td>'
       + '<td>' + (r2 ? verdictBadge(v2, r2) + (r2.assertedVerified ? '<div class="small"><span class="badge ' + (r2.verificationStatus === 'ok' && r2.scopeComplete ? 'b-ok' : 'b-warn') + '">' + esc(r2.verificationStatus || '') + (r2.scopeComplete ? '（完整）' : '（不完整）') + '</span></div>' : '') : '<span class="badge b-dim">未跑</span>') + '</td>'
       + '<td class="small">' + (choiceTxt ? esc(choiceTxt) : '<span class="dim">—</span>') + (h && h.note ? '<div class="dim">' + esc(h.note) + '</div>' : '') + '</td>'
@@ -622,7 +625,7 @@ $('btnDiag').addEventListener('click', async () => {
 
 async function startRun(ids, all) {
   if (!ids.length) return logLine('先勾选要跑的题（或点「跑全部」）');
-  const pick = [['lvL0', 'L0'], ['lvL0C', 'L0C'], ['lvL1', 'L1'], ['lvL2', 'L2']];
+  const pick = [['lvL0', 'L0'], ['lvL0C', 'L0C'], ['lvL0P', 'L0+'], ['lvL1', 'L1'], ['lvL2', 'L2']];
   const levels = pick.filter(([id]) => $(id) && $(id).checked).map(([, lv]) => lv);
   if (!levels.length) return logLine('先勾一个档位（L0 裸模 / L0 只给代码块 / L1 agent / L2 cf-coach）');
   const reps = Number($('reps').value) || 1;

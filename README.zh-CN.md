@@ -375,8 +375,8 @@ scripts/             mock 服务、单元与端到端测试、探针、打包、
 ## 开发与测试
 
 ```bash
-npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，258 项检查
-npm run test:units        # 单元测试全家桶（11 套）：anticheat / explaindoc / statement / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation
+npm test                  # 端到端：自动拉起 mock 服务 + 隔离数据目录，259 项检查
+npm run test:units        # 单元测试全家桶（12 套）：anticheat / explaindoc / statement / loopguard / pricing / parallel / agentruns / skills / diagbundle / harness / runner / ablation
 npm run test:harness      # 编排器单测（契约切片、样例隔离、工作区、证据门、富文档）
 npm run test:runner       # 运行器单测（编译 / 输出归一化比对 / 超时 / C++23）
 npm run test:parallel     # 并发生成、停止退栈、预算护栏、生成器数据不变量、标尺降档、串行队列/工作区锁
@@ -385,15 +385,15 @@ node scripts/run-smoke.js --packaged   # 桌面冒烟自检（打包版的真实
 npm run mock              # 单独启动模拟 LLM（:3999）
 npm run mock-cf           # 单独启动模拟 Codeforces（:3998）
 npm run pack              # 打包便携目录版 dist/CFCoach-win32-x64（保留 exe 旁 data/）
-npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（35 个文件）
-npm run test:skills       # 技能系统与工具层单测（不联网，79 条）
+npm run check:pack        # 打包前后自检：探针字面量可求值 + 包内容 + 源码/包逐文件一致（36 个文件）
+npm run test:skills       # 技能系统与工具层单测（不联网，82 条）
 npm run test:diagbundle   # 诊断包单测（脱敏一个不漏、段落齐全、截断、CLI 三种用法）
 npm run diag              # 生成诊断包：node scripts/diag.js --out 诊断包.txt
-npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0/L1/L2/判分/配对比较全链路）
+npm run test:ablation     # 消融实验自测（本地假模型，零 token：L0 / L0C / L0+ / L1 / L2、判分、配对比较全链路）
 npm run probe:ablation    # 消融实验四个入口的真跑探针（零 token：run/judge/import-l2/selftest）
 npm run probe:ui          # 人工测试台端到端探针（零 token：加题→跑分→判分→人工判定→导出）
 npm run probe:cf          # 真机取题探针：借应用内嵌浏览器扒一道真题（复用应用的 CF 取题通道）
-npm run ablation:serve    # 人工测试台（http://127.0.0.1:4311）：从 CF 取题 → 只贴 oracle → 自动写生成器 → 跑 L0/L2 → 左右对比 → 打分
+npm run ablation:serve    # 人工测试台（http://127.0.0.1:4311）：从 CF 取题 → 只贴 oracle → 自动写生成器 → 跑 L0/L0+/L2 → 左右对比 → 打分
 node scripts/probe-review-session.js <handle> <比赛号>   # 真机验证：装复盘材料（题解 + 多份源码）
 node scripts/probe-review-bundle.js  <handle> <比赛号>   # 真机验证：打包给对话框的那份材料
 node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证：抓提交源码
@@ -402,12 +402,22 @@ node scripts/probe-source-live.js    <比赛号> <提交id…>  # 真机验证�
 推送与发布（三条命令、push 前自检、常见报错对照）：见 [docs/PUSHING.md](docs/PUSHING.md)。
 远程排障（怎么把别人机器上的现场打包成一份可直接发出来的脱敏文本）：见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)。
 
-**消融实验（怎么证明比裸模型强）**：`ablation/` 下有 L0（裸模型，无工具）、L1（裸 agent + 通用工具 + 明确要求对拍）
-两个档位的跑分脚本，L2 就是 cf-coach 本体；判分用官方样例 + **外部 AC 提交**做差分对拍。
+**消融实验（判据是 AC，不是"不差"）**：`ablation/` 让同一批题跑过五个档位 —— L0（裸模型，一次调用，无工具）、
+L0C（L0 外加"只输出一个代码块，别的一个字都不要写"）、L0+（L0 **外加 L2 题解 Agent 逐字相同的那套提示词纪律与输入**：
+机械抽取的 I/O 契约 + 官方样例，仍然是一次调用、无工具）、L1（裸 agent 循环 + 通用工具）、L2（cf-coach 本体）。
+判分复现 Codeforces 真正接受的判定：官方样例 + 拿**外部 AC 提交**做差分对拍 + **题面最大规模配真实时限**。
 协议、判分纪律（oracle 绝不能用 cf-coach 自己的产出）、成本估算与结论模板见 [ablation/README.md](ablation/README.md)。
 
-这一轮的验收线刻意保守：**"不差于 L0"的比例**（`notWorseRate`）+ 配对胜平负与 McNemar 精确 p +
-每档 tokens/花费 + **假自信率**（链自己声称"已验证"、却被外部 oracle 判 WA）。
+验收线是 **AC**，不是"不差于 L0"，所以真正要看的是 `L2 > L0+`：`L2 − L0+` 是 harness 的净贡献，
+`L0+ − L0` 隔离出提示词本身的作用。同时报告配对胜平负与 McNemar 精确 p、每档 tokens 与花费（以及每个 AC 的 ¥）、
+**假自信率**（链自己声称"已验证"、却被外部 oracle 判 WA）。
+
+**尺子发现了什么（2026 年 10 月）** —— 有五处缺陷让"不是解的东西"看起来像 AC：`<=` 上界被当成 `<`、
+多解题按字面比输出、题面只有 `t` 没有 `n`、随机生成器只抽一次、oracle 在最大规模上栈溢出（MinGW 给 C++
+1–2 MB 栈，Codeforces 给 256 MB）。五处修完、把每条记录重判之后，AC 轴上的对比结果很直接：
+L0 与 L2 **统计上分不出来**（17 对配对题 —— 11 对双方 AC、1 对只 L0、1 对只 L2、4 对双方失败），
+而 L2 每个 AC 的花费是 **4.9 倍**；所有"更省钱"的臂都拿到 **0 个 AC**。诚实的读法是：harness 目前买到的是
+**验证与教学**，不是**解题**。方法、数字与局限见 [docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md)。
 `npm run ablation:serve` 打开一页人工测试台：填题号点「从 CF 取题」把题面/样例/标题/难度自动带出
 （复用应用自己的取题通道），**你只需要贴一份自己的 AC 题解当 oracle**，生成器点「自动写生成器」让模型写完当场体检；
 然后左右对比 L0 原文与 L2 的图文文档、逐题记人工判定。

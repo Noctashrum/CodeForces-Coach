@@ -51,6 +51,13 @@ smoke.png
 # Inputs (problem list, prompts, harness code) are tracked; results are not.
 ablation/out/
 
+# Diagnostics handed over for review. A bundle tells one machine's story and its
+# file name carries that machine's hostname (by design — see lib/diagbundle.js);
+# a report about it does too. These are "the scene of the accident" artefacts,
+# not sources: keep them out of the repo even if someone drops them at the root.
+cfcoach-diag-*.md
+cfcoach-diag-*.txt
+
 # Ablation experiment INPUTS that are other people's content or machine-specific:
 #   · statements/*.txt  — Codeforces problem texts (CF's copyright, not ours)
 #   · oracle/           — accepted submissions used as the judging standard

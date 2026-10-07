@@ -34,6 +34,7 @@ const judge = require('./judge');
 const diagbundle = require('../lib/diagbundle');
 const { startMockLlm } = require('./mockllm');
 const runner = require('../lib/runner');
+const harness = require('../lib/harness');
 const llm = require('../lib/llm');
 
 let pass = 0;
@@ -450,6 +451,7 @@ async function main() {
 
     // ⑩ 新档位 L0C = 裸模型 + "只输出一个代码块"（成本 A/B 里唯一有效的干预：0/2 → 2/2）
     //     唯一变量必须是那段格式要求本身：system 一旦不一样，"不会做"和"没交出来"就混在一起了。
+    const l0Ref = {};
     {
       const runC = record.openRun(path.join(tmp, 'l0c'));
       const base = { problem, statement: problem.statement, target, params, run: runC, maxSteps: 4, iterations: 4 };
@@ -466,8 +468,39 @@ async function main() {
       check('档位 L0C：记录里带 finishReason/truncated（撞长度上限要能与"答错"分开）',
         'finishReason' in recL0C && recL0C.truncated === false,
         JSON.stringify([recL0C.finishReason, recL0C.truncated]));
+      // 给下面的 L0+ 块留一份 L0 的对照组事实（块作用域，出不去）
+      Object.assign(l0Ref, { system: recL0.system, codeSource: recL0.codeSource, code: recL0.code });
     }
 
+    // ⑩b 档位 L0+ = 裸模型 + **L2 题解 Agent 逐字相同的提示词纪律与输入**（一次调用、无工具）。
+    //     没有这一档，`L2 − L0` 就把"harness"和"提示词纪律"两件事混成一个变量了：
+    //     实测 2267F2 是 L0 拿 AC 而 L2 连代码都没交出来 —— 光看 L2 vs L0 说不清是哪一边赢的。
+    //     判据从"L2 > L0"改成"L2 > L0+"之后，这一档的 system/user 必须与 L2 同源，否则等于没加。
+    {
+      const runP = record.openRun(path.join(tmp, 'l0plus'));
+      const baseP = { problem, statement: problem.statement, target, params, run: runP, maxSteps: 4, iterations: 4, lang: 'cpp' };
+      const recL0P = await levels.runL0Plus(Object.assign({}, baseP, { name: 'l0plus-cpp' }));
+      const recL0Py = await levels.runL0Plus(Object.assign({}, baseP, { name: 'l0plus-py', lang: 'python' }));
+      check('档位 L0+：system 就是 L2 题解 Agent 那一套（同一个函数、同一段文本），且与 L0 的 system 不同',
+        recL0P.level === 'L0+' && recL0P.system === harness.solutionSystem('cpp') && recL0P.system !== l0Ref.system,
+        JSON.stringify([recL0P.level, recL0P.system === harness.solutionSystem('cpp'), recL0P.system === l0Ref.system]));
+      check('档位 L0+：输入来源记的是 L2 的拼装函数与样例条数（题面 + 契约 + 官方样例一起投喂）',
+        recL0P.request.systemFrom === 'harness.solutionSystem'
+        && recL0P.request.userFrom === 'harness.buildSolutionUser'
+        && recL0P.request.samples === problem.samples.length
+        && recL0P.request.discipline === 'code-only' && recL0P.request.hasTools === false,
+        JSON.stringify(recL0P.request));
+      check('档位 L0+：一次调用、没有工具、没有循环（否则它就不是对照组而是第二个 L2）',
+        recL0P.calls === 1 && recL0P.steps === 1 && recL0P.toolsUsed.length === 0 && recL0P.tools.length === 0,
+        JSON.stringify([recL0P.calls, recL0P.steps, recL0P.toolsUsed.length]));
+      check('档位 L0+：语言跟着 L2 走（lang=python 时换的是题解 Agent 的 python 纪律）',
+        recL0Py.lang === 'python' && recL0Py.system === harness.solutionSystem('python')
+        && recL0Py.system !== recL0P.system,
+        JSON.stringify([recL0Py.lang, recL0Py.system === harness.solutionSystem('python')]));
+      check('档位 L0+：假模型下抽得到代码，且取码口径与 L0 完全一致（同一个收尾函数）',
+        !!recL0P.code && recL0P.codeSource === l0Ref.codeSource && recL0P.ms >= 0,
+        JSON.stringify([!!recL0P.code, recL0P.codeSource, l0Ref.codeSource]));
+    }
     // ⑪ 工作台界面：rating 阶梯。index.html 里的 JS 以前没有任何测试覆盖，而"裸模 rating 上限"全靠它读。
     //     用假 DOM 把 <script> 真跑一遍，喂一份构造好的 state，断言阶梯把
     //     "答错" / "没跑完（中止、撞顶）" / "不可判（多解题、尺子坏了）" 分开 —— 这是读数的命门：
@@ -478,9 +511,12 @@ async function main() {
       let syntaxOk = false;
       try { new vm.Script(code); syntaxOk = true; } catch (e) { /* 下面报 */ }
       check('工作台：index.html 里的脚本能取到且语法通过', !!code && syntaxOk);
-      check('工作台：四个档位勾选框 + 重复次数 + 单次超时控件都在，旧的 withL1 已清干净',
-        ['lvL0', 'lvL0C', 'lvL1', 'lvL2', 'reps', 'timeout'].every((id) => html.indexOf('id="' + id + '"') >= 0)
+      check('工作台：五个档位勾选框（含 L0+）+ 重复次数 + 单次超时控件都在，旧的 withL1 已清干净',
+        ['lvL0', 'lvL0C', 'lvL0P', 'lvL1', 'lvL2', 'reps', 'timeout'].every((id) => html.indexOf('id="' + id + '"') >= 0)
         && html.indexOf('withL1') < 0);
+      check('工作台：L0+ 勾选框会被当成档位「L0+」提交，且题表里能看到 L0+ 那一格',
+        /\[.lvL0P.,\s*.L0\+.\]/.test(html) && html.indexOf("recOf('L0+', p.id)") >= 0,
+        JSON.stringify([/\[.lvL0P.,\s*.L0\+.\]/.test(html), html.indexOf("recOf('L0+', p.id)") >= 0]));
       check('工作台：并发 / 重复方案 / 连判不了的一起跑 三个控件都在（跑不完的解法在调度上）',
         ['conc', 'plan', 'includeSkipped'].every((id) => html.indexOf('id="' + id + '"') >= 0)
         && /<select id="plan">[\s\S]*?value="fill"[\s\S]*?value="sweep"[\s\S]*?value="ladder"/.test(html));
@@ -739,17 +775,17 @@ async function main() {
           oracleCode: oracleSrc, oracleLang: 'python'
         });
         check('工作台端到端：能往题库塞一道题（界面上的"加题"走的就是这条路）', pr.ok);
-        await post('/api/run', { levels: ['L0', 'L0C'], reps: 2, callTimeoutMin: 1, iterations: 1, lang: 'python', conc: 2 });
+        await post('/api/run', { levels: ['L0', 'L0C', 'L0+'], reps: 2, callTimeoutMin: 1, iterations: 1, lang: 'python', conc: 2 });
         let done = null;
         for (let i = 0; i < 200 && !done; i++) {
           await new Promise((r) => setTimeout(r, 100));
           const st = await (await fetch(base + '/api/state')).json();
-          if (st.runs && st.runs.length >= 4) done = st;
+          if (st.runs && st.runs.length >= 6) done = st;
         }
         const runs = (done || {}).runs || [];
         const reps = runs.map((r) => r.rep).sort().join(',');
-        check('工作台端到端：L0 + L0C × 重复 2 次 = 4 条记录，rep 落进记录（同题多跑才看得到抖动）',
-          runs.length === 4 && reps === '1,1,2,2' && runs.some((r) => r.level === 'L0C'),
+        check('工作台端到端：L0 + L0C + L0+ × 重复 2 次 = 6 条记录，rep 落进记录（同题多跑才看得到抖动）',
+          runs.length === 6 && reps === '1,1,1,2,2,2' && runs.some((r) => r.level === 'L0C') && runs.some((r) => r.level === 'L0+'),
           runs.length + ' 条 rep=' + reps);
         check('工作台端到端：阶梯随记录更新（跑过的题不再是"未跑"，裸模上限靠它读）',
           !!done && done.ladder.rows.length >= 1 && done.ladder.rows[0].cells.L0.kind !== 'none',
@@ -765,13 +801,13 @@ async function main() {
         for (let i = 0; i < 200 && !swept; i++) {
           await new Promise((r) => setTimeout(r, 100));
           const st = await (await fetch(base + '/api/state')).json();
-          if (st.runs && st.runs.length >= 5 && (!st.job || !st.job.running)) swept = st;
+          if (st.runs && st.runs.length >= 7 && (!st.job || !st.job.running)) swept = st;
         }
         const after = (swept || {}).runs || [];
         const l0Before = runs.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length;
         const l0After = after.filter((r) => r.problem === 'e2e800' && r.level === 'L0').length;
         check('工作台端到端：标了跳过的题默认不进队列（判不了的题只烧钱不产数据）',
-          after.length === 5 && !after.some((r) => r.problem === 'e2e1300'),
+          after.length === 7 && !after.some((r) => r.problem === 'e2e1300'),
           after.length + ' 条，含 1300：' + after.some((r) => r.problem === 'e2e1300'));
         check('工作台端到端：重复方案 sweep = 全池先各跑 1 遍（不再受"重复次数 3"影响）',
           l0After === l0Before + 1, 'e2e800/L0 ' + l0Before + ' → ' + l0After);

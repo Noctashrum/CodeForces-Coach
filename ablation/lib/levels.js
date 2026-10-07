@@ -19,6 +19,7 @@ const env = require('./env');
 const record = require('./record');
 const { createL1Tools, runtimeHint } = require('./tools');
 const runner = require('../../lib/runner');
+const harness = require('../../lib/harness');
 
 /** 三个档位共用的题面投喂格式（同一份文本、同一个问法） */
 function userPrompt(problem, statement) {
@@ -106,33 +107,106 @@ async function runL0(ctx) {
       maxTokens: params.maxTokens || undefined,
       stream: true
     });
-    const text = String(res.content || '');
-    rec.ok = !!text.trim();
-    rec.error = rec.ok ? null : '模型没有返回正文' + (res.finishReason ? '（finish_reason=' + res.finishReason + '）' : '');
-    rec.usage = res.usage || null;
-    rec.steps = 1;
-    rec.calls = 1;
-    rec.toolsUsed = [];
-    // 长度上限是"没跑完"，不是"答错"：记下来，判分/统计时不能把它算成能力证据
-    rec.finishReason = res.finishReason || null;
-    rec.truncated = /length|max_tokens/i.test(String(res.finishReason || ''));
-    if (agentloop.hasLeakMarkup(text)) rec.leakMarkup = true;
-    const clean = agentloop.stripLeakMarkup(text);
-    const code = record.extractFinalCode(clean);
-    rec.code = code ? code.code : null;
-    rec.codeLang = code ? code.lang : null;
-    rec.codeSource = code ? (code.blockIndex >= 0 ? 'answer-block#' + code.blockIndex : 'answer-inline') : null;
-    if (!code) {
-      rec.ok = false;
-      rec.codeMissing = true;
-      rec.error = rec.truncated
-        ? '回答里没有可用的代码块（输出撞到长度上限 finish_reason=length，正文被截断 —— 这不是答错）'
-        : '回答里没有可用的代码块';
-    }
-    rec.answerFile = run.saveAnswer(name, clean);
-    rec.transcriptFile = null;
+    return finishSingleAnswer(rec, res, run, name, t0);
+  } catch (e) {
+    rec.ok = false;
+    rec.error = (e && e.message) || String(e);
     rec.ms = Date.now() - t0;
     return run.add(rec);
+  }
+}
+
+/**
+ * 单次调用型档位（L0 / L0C / L0+）共用的记录收尾。
+ *
+ * 抽出来只有一个目的：**让 L0+ 与 L0 在记账上不可能漂移**。三个档位的差别必须只体现在
+ * system / user 上，任何"取码口径、截断口径、成本口径"的差别都会污染对照实验。
+ */
+function finishSingleAnswer(rec, res, run, name, t0) {
+  const text = String((res && res.content) || '');
+  rec.ok = !!text.trim();
+  rec.error = rec.ok ? null : '模型没有返回正文' + (res && res.finishReason ? '（finish_reason=' + res.finishReason + '）' : '');
+  rec.usage = (res && res.usage) || null;
+  rec.steps = 1;
+  rec.calls = 1;
+  rec.toolsUsed = [];
+  // 长度上限是"没跑完"，不是"答错"：记下来，判分/统计时不能把它算成能力证据
+  rec.finishReason = (res && res.finishReason) || null;
+  rec.truncated = /length|max_tokens/i.test(String(rec.finishReason || ''));
+  if (agentloop.hasLeakMarkup(text)) rec.leakMarkup = true;
+  const clean = agentloop.stripLeakMarkup(text);
+  const code = record.extractFinalCode(clean);
+  rec.code = code ? code.code : null;
+  rec.codeLang = code ? code.lang : null;
+  rec.codeSource = code ? (code.blockIndex >= 0 ? 'answer-block#' + code.blockIndex : 'answer-inline') : null;
+  if (!code) {
+    rec.ok = false;
+    rec.codeMissing = true;
+    rec.error = rec.truncated
+      ? '回答里没有可用的代码块（输出撞到长度上限 finish_reason=length，正文被截断 —— 这不是答错）'
+      : '回答里没有可用的代码块';
+  }
+  rec.answerFile = run.saveAnswer(name, clean);
+  rec.transcriptFile = null;
+  rec.ms = Date.now() - t0;
+  return run.add(rec);
+}
+
+/**
+ * L0+：「与 L2 题解 Agent **逐字相同**的提示词纪律与输入，但只有一次调用、没有工具」。
+ *
+ * ## 为什么必须有这一档（否则整个消融实验的判据是错的）
+ *
+ * `L2 − L0` 把两件完全不同的事混成了一个变量：
+ *   ① cf-coach 的 **harness**：暴力解 + 生成器 + 对拍 + 错因仲裁 + 重写回路 + 讲解；
+ *   ② **提示词纪律**：L2 的题解 Agent 是"只输出一个代码块、不准写思路"（`solutionSystem`），
+ *      并且拿到机械抽取的 I/O 契约与官方样例 —— 而 L0 拿到的是"先讲思路再给代码"的裸问法。
+ * 实测 2267F2 就是被①还是②决定的，光看 L2 vs L0 说不清。
+ *
+ * L0+ 用 `harness.solutionSystem(lang)`（与 L2 同一个函数、同一段文本）与
+ * `harness.buildSolutionUser(...)`（题面 + `extractContract` 抽出的 I/O 契约 + 官方样例，
+ * 与 L2 题解 Agent 同一段拼装），单次调用、无工具、无重写、无讲解。于是：
+ *   · `L0+ − L0`  = 提示词纪律 + 契约/样例投喂的净贡献
+ *   · `L2  − L0+` = harness 的净贡献 ← 这才是消融实验要回答的问题
+ *
+ * 与 L0C 的区别：L0C 只多一句"只输出代码块"（同一个裸 system），
+ * L0+ 换的是**整套题解 Agent 纪律与输入**。两者不是替代关系，L0C 是拆"没交出来 vs 不懂"的探针。
+ *
+ * @param {{problem:object, statement:string, target:object, params:object, run:object, name:string, lang?:string}} ctx
+ */
+async function runL0Plus(ctx) {
+  const { problem, statement, target, params, run, name } = ctx;
+  const LEVEL = 'L0+';
+  const lang = ctx.lang === 'python' ? 'python' : 'cpp';
+  const t0 = Date.now();
+  const system = harness.solutionSystem(lang);
+  const title = [problem.contestId && problem.index ? problem.contestId + problem.index : problem.id,
+    problem.name || problem.title || ''].join(' ').trim();
+  const user = harness.buildSolutionUser({
+    statement,
+    samples: problem.samples || [],
+    conv: { title }
+  }, harness.extractContract(statement));
+  const rec = {
+    level: LEVEL, problem: problem.id, model: target.model, providerId: target.providerId,
+    startedAt: new Date(t0).toISOString(), system, tools: [], lang,
+    statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
+    request: {
+      stream: true, maxTokens: params.maxTokens || null, hasTools: false,
+      systemFrom: 'harness.solutionSystem', userFrom: 'harness.buildSolutionUser',
+      discipline: 'code-only', samples: (problem.samples || []).length
+    }
+  };
+  try {
+    const res = await llm.callModel({
+      provider: target.provider,
+      model: target.model,
+      system,
+      messages: [{ role: 'user', content: user }],
+      maxTokens: params.maxTokens || undefined,
+      stream: true
+    });
+    return finishSingleAnswer(rec, res, run, name, t0);
   } catch (e) {
     rec.ok = false;
     rec.error = (e && e.message) || String(e);
@@ -281,4 +355,4 @@ function clipArgs(args) {
   return t.length > 500 ? t.slice(0, 500) + '…' : t;
 }
 
-module.exports = { SYSTEM_L0, CODE_ONLY, systemL1, userPrompt, runL0, runL1, readSolutionFile };
+module.exports = { SYSTEM_L0, CODE_ONLY, systemL1, userPrompt, runL0, runL0Plus, runL1, readSolutionFile };

@@ -102,11 +102,13 @@ const DEFAULTS = {
  * 可跑的档位：
  *  L0  裸模型（一次调用，无工具）           —— "厂商宣称的 rating 上限"就是这一档
  *  L0C 裸模型 + 只输出一个代码块            —— 唯一差别是那段格式要求，用来分开"不懂"和"没交出来"
+ *  L0+ 裸模型 + L2 题解 Agent 的完整提示词纪律与输入（契约 + 官方样例），仍是一次调用、无工具
+ *                                          —— 判据 `L2 > L0+` 的对照组：L2 − L0+ 才是 harness 的净贡献
  *  L1  裸 agent（工具循环 + 通用工具面）
  *  L2  cf-coach 本体
  */
-const LEVELS = ['L0', 'L0C', 'L1', 'L2'];
-const LEVEL_HINT = { L0: '裸模型', L0C: '裸模型·只给代码块', L1: '裸 agent', L2: 'cf-coach' };
+const LEVELS = ['L0', 'L0C', 'L0+', 'L1', 'L2'];
+const LEVEL_HINT = { L0: '裸模型', L0C: '裸模型·只给代码块', 'L0+': '裸模型·L2 提示词与输入', L1: '裸 agent', L2: 'cf-coach' };
 
 /* ---------------- 运行日志落盘 ----------------
  * 测试是在**别人的机器**上跑的：屏幕上滚过去的东西必须留一份在数据目录里，
@@ -316,6 +318,8 @@ async function startRun(o) {
   async function runJobOnce(j) {
     const ctx = { problem: j.problem, statement: j.problem.statement, target, params, run, name: j.name, maxSteps: opts.maxSteps, iterations: opts.iterations };
     if (j.level === 'L0' || j.level === 'L0C') return levels.runL0(Object.assign({}, ctx, { codeOnly: j.level === 'L0C' }));
+    // L0+ 与 L2 用**同一种语言**，否则"提示词纪律"这个变量里会混进"语言不同"
+    if (j.level === 'L0+') return levels.runL0Plus(Object.assign({}, ctx, { lang: opts.lang }));
     if (j.level === 'L1') return levels.runL1(ctx);
     // 每次都要干净的工作区：否则链会走"上次已对拍通过"的快通道 —— 测出来的就不是模型，而是缓存
     try { workspace.removeWorkspace(workspace.keyFor(l2.convFor(j.problem))); } catch { /* 没有就算了 */ }

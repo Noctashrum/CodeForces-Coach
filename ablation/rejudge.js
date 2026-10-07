@@ -149,7 +149,7 @@ async function main() {
 
   console.log('');
   console.log('================ 新口径（CF-AC） ================');
-  const levelOrder = ['L0', 'L0C', 'L1', 'L2'].filter((l) => summary[l]);
+  const levelOrder = ['L0', 'L0C', 'L0+', 'L1', 'L2'].filter((l) => summary[l]);
   for (const lv of Object.keys(summary)) {
     const g = summary[lv];
     console.log(lv.padEnd(4) + ' n=' + String(g.total).padStart(3)
