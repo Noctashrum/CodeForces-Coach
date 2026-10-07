@@ -97,8 +97,17 @@ function readSolutionFile(dir, preferLang) {
 //
 // 于是这三个常量抄的是 L2 的数值：
 const ATTEMPT_MAX_TOKENS = 8192;       // = lib/harness.js:980 CODE_ATTEMPT_MAX_TOKENS
-const SALVAGE_MAX_TOKENS = 65536;      // = lib/harness.js:997 TRUNCATED_RETRY_MAX_TOKENS
 const SALVAGE_TAIL_CHARS = 3000;       // = lib/harness.js:998 SALVAGE_TAIL_CHARS
+// 抢救上限默认与 `lib/harness.js:997 TRUNCATED_RETRY_MAX_TOKENS = 65536` 一致。
+// 允许用环境变量做 A/B（实测这一档会"漫游"：关思考 + 65536 时模型会写成几万字符的散文，
+// 见 `docs/cf-ac-ruler-2026-10.md` §3.6）——**默认值不许悄悄改**，改产品要另开一次带对照的实验。
+const SALVAGE_MAX_TOKENS = Number(process.env.CFCOACH_SALVAGE_MAX_TOKENS) > 0
+  ? Math.floor(Number(process.env.CFCOACH_SALVAGE_MAX_TOKENS))
+  : 65536;                             // = lib/harness.js:997 TRUNCATED_RETRY_MAX_TOKENS
+// 抢救时要不要把上一轮的**思考尾巴**喂回去。喂回去等于邀请模型"接着想"，而不是"直接写代码"：
+// L2 在 2268A 上的两条老记录是首轮 8192 撞顶 → 回灌尾巴 + 关思考 + 抬到 65536 → **又撞顶**（290s/409s），
+// 而 L0+ 侧（同样关思考、上限干脆更小）60s 就交出了 AC 的代码。这个开关只改这一个变量。
+const FEED_TAIL = !(Number(process.env.CFCOACH_SALVAGE_NO_TAIL) > 0);
 const AGENT_STEP_MAX_TOKENS = 16384;   // = lib/harness.js:987 PROSE_ATTEMPT_MAX_TOKENS（L1 的通用角色）
 
 /**
@@ -131,7 +140,10 @@ async function callWithBudget(o) {
     return { res: first, usage: addUsage(first.usage, null), calls: 1, salvaged: false, firstFinishReason };
   }
   const tail = String((first && (first.reasoningTail || first.reasoning)) || '');
-  const retryUser = (tail
+  // 回灌思考尾巴这件事本身也可能是坑（见 FEED_TAIL 处的说明）：
+  // `CFCOACH_SALVAGE_NO_TAIL=1` 时**不回灌**尾巴，只留"不要再推理，直接给代码"那一段。
+  const feedTail = FEED_TAIL;
+  const retryUser = (tail && feedTail
     ? '【你上一步的思考（这一轮的输出被长度上限截断了，正文一个字都没写出来）】\n'
       + tail.slice(-SALVAGE_TAIL_CHARS) + '\n\n'
     : '')
@@ -162,7 +174,7 @@ async function runL0(ctx) {
     codeOnly,
     statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
     request: { stream: true, maxTokens: params.maxTokens || null, hasTools: false, codeOnly,
-      budget: { attemptMaxTokens: ATTEMPT_MAX_TOKENS, salvageMaxTokens: SALVAGE_MAX_TOKENS } }
+      budget: { attemptMaxTokens: ATTEMPT_MAX_TOKENS, salvageMaxTokens: SALVAGE_MAX_TOKENS, feedTail: FEED_TAIL } }
   };
   try {
     const out = await callWithBudget({
@@ -268,7 +280,7 @@ async function runL0Plus(ctx) {
       stream: true, maxTokens: params.maxTokens || null, hasTools: false,
       systemFrom: 'harness.solutionSystem', userFrom: 'harness.buildSolutionUser',
       discipline: 'code-only', samples: (problem.samples || []).length,
-      budget: { attemptMaxTokens: ATTEMPT_MAX_TOKENS, salvageMaxTokens: SALVAGE_MAX_TOKENS }
+      budget: { attemptMaxTokens: ATTEMPT_MAX_TOKENS, salvageMaxTokens: SALVAGE_MAX_TOKENS, feedTail: FEED_TAIL }
     }
   };
   try {
@@ -299,7 +311,7 @@ async function runL1(ctx) {
     statementSha: env.sha256(statement), statementFile: problem.statementFile || null,
     request: { stream: true, maxTokens: params.maxTokens || null, hasTools: true, maxSteps: maxSteps || 20,
       budget: { stepMaxTokens: params.maxTokens || AGENT_STEP_MAX_TOKENS, finalizeAttemptMaxTokens: ATTEMPT_MAX_TOKENS,
-        finalizeSalvageMaxTokens: SALVAGE_MAX_TOKENS } }
+        finalizeSalvageMaxTokens: SALVAGE_MAX_TOKENS, feedTail: FEED_TAIL } }
   };
   const usage = { promptTokens: 0, completionTokens: 0, calls: 0 };
   try {
