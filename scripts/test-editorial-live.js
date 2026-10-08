@@ -47,7 +47,7 @@ async function findPort(proc, timeoutMs) {
   const netstat = () => new Promise((resolve) => {
     const c = spawn('powershell', ['-NoProfile', '-Command',
       `(Get-NetTCPConnection -OwningProcess ${proc.pid} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort`],
-      { stdio: ['ignore', 'pipe', 'ignore'] });
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
     c.stdout.on('data', (d) => { out += d; });
     c.on('close', () => resolve(parseInt(String(out).trim(), 10) || 0));
@@ -66,7 +66,7 @@ async function findPort(proc, timeoutMs) {
   if (!noDebug) { try { fs.rmSync(DIAG, { force: true }); } catch (e) { /* ignore */ } }
 
   console.log('启动 ' + path.basename(EXE) + (noDebug ? '' : '（诊断日志：' + DIAG + '）'));
-  const proc = spawn(EXE, [], {
+  const proc = spawn(EXE, [], { windowsHide: true,
     cwd: path.dirname(EXE),
     env: Object.assign({}, process.env, noDebug ? {} : { CFCOACH_DEBUG_EDITORIAL: '1' }),
     detached: false, stdio: 'ignore'

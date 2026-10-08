@@ -93,7 +93,7 @@ app.whenReady().then(async () => {
 });
 `;
 
-const child = spawn(process.execPath, ['-e', SCRIPT], {
+const child = spawn(process.execPath, ['-e', SCRIPT], { windowsHide: true,
   cwd: ROOT,
   env: Object.assign({}, process.env, { CFCOACH_CF_PROFILE: profile, ELECTRON_RUN_AS_NODE: '' }),
   stdio: 'inherit'

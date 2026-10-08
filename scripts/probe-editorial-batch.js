@@ -48,7 +48,7 @@ function getJson(url, timeoutMs) {
 }
 
 (async () => {
-  const proc = spawn(EXE, [], { cwd: path.dirname(EXE), env: Object.assign({}, process.env), stdio: 'ignore' });
+  const proc = spawn(EXE, [], { windowsHide: true, cwd: path.dirname(EXE), env: Object.assign({}, process.env), stdio: 'ignore' });
   let port = 0;
   for (let i = 0; i < 40 && !port; i++) {
     await new Promise((r) => setTimeout(r, 1500));

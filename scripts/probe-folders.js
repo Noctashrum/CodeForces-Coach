@@ -39,12 +39,12 @@ function req(port, method, p, body) {
 (async () => {
   fs.rmSync(DATA, { recursive: true, force: true });
   fs.mkdirSync(DATA, { recursive: true });
-  const proc = spawn(EXE, [], { cwd: path.dirname(EXE), stdio: 'ignore', env: Object.assign({}, process.env, { CHATBOX_DATA_DIR: DATA }) });
+  const proc = spawn(EXE, [], { windowsHide: true, cwd: path.dirname(EXE), stdio: 'ignore', env: Object.assign({}, process.env, { CHATBOX_DATA_DIR: DATA }) });
   let port = 0;
   for (let i = 0; i < 40 && !port; i++) {
     await new Promise((r) => setTimeout(r, 1500));
     try {
-      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { encoding: 'utf8' });
+      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { windowsHide: true, encoding: 'utf8' });
       port = parseInt(String(out).trim(), 10) || 0;
     } catch (e) { /* 等 */ }
   }

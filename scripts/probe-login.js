@@ -41,7 +41,7 @@ async function findPort(proc) {
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 1500));
     try {
-      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { encoding: 'utf8' });
+      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { windowsHide: true, encoding: 'utf8' });
       const p = parseInt(String(out).trim(), 10) || 0;
       if (p) return p;
     } catch (e) { /* 等 */ }
@@ -50,7 +50,7 @@ async function findPort(proc) {
 }
 
 (async () => {
-  const proc = spawn(EXE, [], { cwd: path.dirname(EXE), stdio: 'ignore' });
+  const proc = spawn(EXE, [], { windowsHide: true, cwd: path.dirname(EXE), stdio: 'ignore' });
   const port = await findPort(proc);
   if (!port) { console.error('拿不到端口'); proc.kill(); process.exit(2); }
   console.log('端口 ' + port);
