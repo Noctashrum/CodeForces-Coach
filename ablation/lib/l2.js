@@ -181,10 +181,14 @@ async function runL2(ctx) {
 
     const v = res.verification || null;
     // 交付物 = 工作区里那份题解（可能被 P0 回退过）；没有才回落到链内存里的代码，最后才是讲解正文
-    const fromWs = workspace.readFile(key, workspace.solName(lang));
+    // 批次③：交付前语言闸可能把题解换成了另一种语言 → 以 pipeline 返回的 solLang 为准去找文件，
+    // 否则会在"换成 C++"的格子上读到空（或把 C++ 代码按 Python 记进记录里）。
+    const finalLang = res.solLang || lang;
+    const fromWs = workspace.readSolFile ? workspace.readSolFile(key, finalLang) : null;
     let code = null;
-    if (fromWs && fromWs.trim()) code = { code: fromWs, lang, source: 'workspace:' + workspace.solName(lang) };
-    else if (res.solCode && res.solCode.trim()) code = { code: res.solCode, lang, source: 'pipeline:solCode' };
+    if (fromWs && fromWs.code && fromWs.code.trim()) {
+      code = { code: fromWs.code, lang: fromWs.lang || finalLang, source: 'workspace:' + (fromWs.name || workspace.solName(finalLang)) };
+    } else if (res.solCode && res.solCode.trim()) code = { code: res.solCode, lang: finalLang, source: 'pipeline:solCode' };
     else {
       const c = record.extractFinalCode(String(res.explainerText || ''));
       if (c) code = { code: c.code, lang: c.lang, source: 'explainer' };

@@ -1067,5 +1067,132 @@ const callAgent = async (opts) => {
     delete process.env.CFCOACH_SAMPLE_FIX_MAX;
   }
 
+  /* ========== 语言闸（批次③）：算法对、语言慢 → 只换语言、不改算法 ========== */
+  {
+    console.log('parallel: 语言闸 —— Python 在最大规模档太慢 → 换成 C++（只换语言）');
+    const envSaved = {
+      gate: process.env.CFCOACH_PERF_GATE,
+      factor: process.env.CFCOACH_PERF_GATE_FACTOR,
+      maxn: process.env.CFCOACH_PERF_GATE_MAXN,
+      sw: process.env.CFCOACH_LANG_SWITCH
+    };
+    process.env.CFCOACH_PERF_GATE = '1';
+    process.env.CFCOACH_PERF_GATE_FACTOR = '1';
+    process.env.CFCOACH_PERF_GATE_MAXN = '6';
+    delete process.env.CFCOACH_LANG_SWITCH;
+
+    // 生成器：永远出 n=m 的数据（这样"最大规模档"一定落在 n=6 上，慢不慢可复现）
+    const GEN_FULL = [
+      'import random, sys',
+      'm = int(sys.argv[1]) if len(sys.argv) > 1 else 6',
+      'print(1)',
+      'print(m)',
+      'print(*[random.randint(0, 6) for _ in range(m)])'
+    ].join('\n');
+    // 正确但**故意慢**的 Python 版：n>=6 时先睡 0.8s（模拟"算法对、语言慢"）
+    const SOL_SLOW = SOL.replace('d = sys.stdin.read().split()',
+      'import time\nd = sys.stdin.read().split()\nif int(d[1]) >= 6: time.sleep(0.8)');
+    const SOL_CPP = [
+      '#include <bits/stdc++.h>',
+      'using namespace std;',
+      'int main() {',
+      '  int t; if (!(cin >> t)) return 0;',
+      '  while (t--) {',
+      '    int n; cin >> n;',
+      '    priority_queue<int> pq; long long s = 0;',
+      '    for (int i = 0; i < n; i++) { int x; cin >> x; if (x > 0) pq.push(x); else if (!pq.empty()) { s += pq.top(); pq.pop(); } }',
+      '    cout << s << "\\n";',
+      '  }',
+      '  return 0;',
+      '}'
+    ].join('\n');
+    // 换语言后**没过官方样例**的 C++ 版（用来验证"不成立就回退"）
+    const SOL_CPP_BAD = [
+      '#include <bits/stdc++.h>',
+      'int main() { printf("0\\n"); return 0; }'
+    ].join('\n');
+    const EXPLAINER_ANY = '## 题面拆解\nx\n## 关键观察\nx\n## 为什么\nx\n## 手算演示\n拿 n=2 举例\n'
+      + '<viz-steps title="t"><viz-step title="第 1 步">a</viz-step></viz-steps>\n'
+      + '## 算法\nx\n## 复杂度分析\n$O(n\\log n)$\n'
+      + '<viz-formula title="复杂度" fx="$T(n)=O(n\\log n)$" legend="n" why="堆"/>\n'
+      + '## 代码\n```cpp\n' + SOL_CPP + '\n```\n## 讲解\nx\n## 易错点\nx\n'
+      + '<viz-callout type="danger" title="易错">x</viz-callout>\n## 验证\n官方样例通过。';
+    // 换语言那一步的 system 提示里语言是 C++23，用它把"再解一次"与"只换语言"区分开
+    const mkLangAgent = (cppCode) => async (opts) => {
+      const sys = String(opts.system || '');
+      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+      if (sys.indexOf('【讲解 Agent】') >= 0) { await delay(10); return EXPLAINER_ANY; }
+      if (sys.indexOf('【题解 Agent】') >= 0) {
+        await delay(10);
+        if (sys.indexOf('C++23') >= 0) return '```cpp\n' + cppCode + '\n```';
+        return '```python\n' + SOL_SLOW + '\n```';
+      }
+      if (sys.indexOf('【暴力 Agent】') >= 0) { await delay(10); return '```python\n' + BRUTE + '\n```'; }
+      if (sys.indexOf('【数据生成 Agent】') >= 0) { await delay(10); return '```python\n' + GEN_FULL + '\n```'; }
+      return '{}';
+    };
+    const runLang = (agent, key) => harness.runPipeline({
+      conv: { id: key, title: '语言闸测试' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: key, timeLimitMs: 200,
+      callAgent: agent, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+
+    const rSw = await runLang(mkLangAgent(SOL_CPP), 'lang-switch-ok');
+    const kSw = (rSw.trajectory || []).map((t) => t.kind);
+    ok('语言闸：Python 版被判太慢（真有 perf-gate-slow 的前一步：lang-switch-ok + perf-gate-pass）',
+      kSw.indexOf('lang-switch-ok') >= 0 && kSw.indexOf('perf-gate-pass') >= 0 && kSw.indexOf('perf-gate-slow') < 0,
+      (rSw.trajectory || []).slice(-8));
+    ok('语言闸：交付的是换语言后的 C++（solLang=cpp，代码里含 #include）',
+      rSw.solLang === 'cpp' && /#include/.test(String(rSw.solCode || '')),
+      { solLang: rSw.solLang, head: String(rSw.solCode || '').slice(0, 40) });
+    ok('语言闸：换语言后重新对拍通过 → 仍然算"完整验证"（claimVerified=true，不是降级交付）',
+      !!(rSw.verification && rSw.verification.status === 'ok' && rSw.verification.claimVerified === true),
+      rSw.verification && { status: rSw.verification.status, claim: rSw.verification.claimVerified, scope: rSw.verification.scopeNote });
+    ok('语言闸：性能闸记下了"换过语言"（perfGate.lang=cpp + switchedFrom.lang=python）',
+      !!(rSw.verification && rSw.verification.perfGate && rSw.verification.perfGate.ok === true
+        && rSw.verification.perfGate.lang === 'cpp'
+        && rSw.verification.perfGate.switchedFrom && rSw.verification.perfGate.switchedFrom.lang === 'python'),
+      rSw.verification && rSw.verification.perfGate);
+    ok('语言闸：工作区里只剩 sol.cpp（过期的 sol.py 必须删掉，否则上层按语言读会读到旧版）',
+      !!workspace.readFile('lang-switch-ok', 'sol.cpp')
+      && workspace.readFile('lang-switch-ok', 'sol.py') == null
+      && workspace.readSolFile('lang-switch-ok', 'python').lang === 'cpp',
+      { cpp: !!workspace.readFile('lang-switch-ok', 'sol.cpp'), py: !!workspace.readFile('lang-switch-ok', 'sol.py') });
+
+    console.log('parallel: 语言闸 —— 换语言后没过官方样例 → 原样回退，照样不声称已验证');
+    const rBad = await runLang(mkLangAgent(SOL_CPP_BAD), 'lang-switch-bad');
+    const kBad = (rBad.trajectory || []).map((t) => t.kind);
+    ok('语言闸回退：记了 lang-switch-reject + perf-gate-slow，没有 lang-switch-ok',
+      kBad.indexOf('lang-switch-reject') >= 0 && kBad.indexOf('perf-gate-slow') >= 0 && kBad.indexOf('lang-switch-ok') < 0,
+      kBad.filter((k) => /lang-switch|perf-gate/.test(k)));
+    ok('语言闸回退：交付的还是原来的 Python 版（solLang=python，代码没变）',
+      rBad.solLang === 'python' && /heapq/.test(String(rBad.solCode || '')),
+      { solLang: rBad.solLang, head: String(rBad.solCode || '').slice(0, 40) });
+    ok('语言闸回退：结论仍是"不许声称已验证"（claimVerified=false + 性能闸 ok=false）',
+      !!(rBad.verification && rBad.verification.claimVerified === false
+        && rBad.verification.perfGate && rBad.verification.perfGate.ok === false),
+      rBad.verification && { claim: rBad.verification.claimVerified, gate: rBad.verification.perfGate });
+    ok('语言闸回退：工作区里只有 sol.py（被拒的 C++ 版不许留在工作区）',
+      !!workspace.readFile('lang-switch-bad', 'sol.py') && workspace.readFile('lang-switch-bad', 'sol.cpp') == null,
+      { py: !!workspace.readFile('lang-switch-bad', 'sol.py'), cpp: !!workspace.readFile('lang-switch-bad', 'sol.cpp') });
+
+    console.log('parallel: 语言闸 —— 关掉开关时一个字都不换');
+    process.env.CFCOACH_LANG_SWITCH = '0';
+    const rOff = await runLang(mkLangAgent(SOL_CPP), 'lang-switch-off');
+    const kOff = (rOff.trajectory || []).map((t) => t.kind);
+    ok('语言闸开关：CFCOACH_LANG_SWITCH=0 → 完全不换语言（没有 lang-switch-* 轨迹）',
+      kOff.filter((k) => /lang-switch/.test(k)).length === 0 && rOff.solLang === 'python'
+      && kOff.indexOf('perf-gate-slow') >= 0,
+      kOff.filter((k) => /lang-switch|perf-gate/.test(k)));
+
+    if (envSaved.gate === undefined) delete process.env.CFCOACH_PERF_GATE; else process.env.CFCOACH_PERF_GATE = envSaved.gate;
+    if (envSaved.factor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR; else process.env.CFCOACH_PERF_GATE_FACTOR = envSaved.factor;
+    if (envSaved.maxn === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = envSaved.maxn;
+    if (envSaved.sw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = envSaved.sw;
+  }
+
   console.log('\nparallel: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));
 })().catch((e) => { console.error('并行测试异常: ' + (e && e.stack || e)); process.exit(1); });
