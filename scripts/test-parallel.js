@@ -980,5 +980,92 @@ const callAgent = async (opts) => {
   }
 
 
+  /* ---------- 官方样例定向修复（2026-10-09 批次①） ----------
+   * 取证：本机库 14/52 格题解没过官方样例，其中 9 格是"修一次、重写版仍不过样例 → 拒绝并停止"
+   * （终局原因原文"题解的一次重写没有通过官方样例（WA）→ 已拒绝这次重写并停止"），而这些格子
+   * 只花了 10–12 次调用（预算档允许 50–130 次）。官方样例是唯一带官方背书的反例。
+   * 这里用"第一版算错、第二次才对"的假模型验证两件事：
+   *  · 样例失败 → 带着这组官方反例定向修一次 → 通过 → 链条继续跑完并给出"已验证"；
+   *  · 修不动时次数被**整轮上限**卡住（不会无上限烧调用），且验证口径如实降级。 */
+  {
+    // 错法：把"遇到 0 取走最大正数牌"做成了"把所有正数加起来"（依赖输入，不是硬编码常量）
+    const SOL_WRONG = [
+      'import sys',
+      'd = sys.stdin.read().split()',
+      'p = 0; t = int(d[p]); p += 1; out = []',
+      'for _ in range(t):',
+      '    n = int(d[p]); p += 1',
+      '    s = 0',
+      '    for _ in range(n):',
+      '        x = int(d[p]); p += 1',
+      '        if x > 0: s += x',
+      '    out.append(str(s))',
+      'print("\\n".join(out))'
+    ].join('\n');
+    const EXPLAINER = '## 题面拆解\nx\n## 关键观察\nx\n## 为什么\nx\n## 手算演示\n拿 n=2 举例\n'
+      + '<viz-steps title="t"><viz-step title="第 1 步">a</viz-step></viz-steps>\n'
+      + '## 算法\nx\n## 复杂度分析\n$O(n\\log n)$\n'
+      + '<viz-formula title="复杂度" fx="$T(n)=O(n\\log n)$" legend="n" why="堆"/>\n'
+      + '## 代码\n```python\n' + SOL + '\n```\n## 讲解\nx\n## 易错点\nx\n'
+      + '<viz-callout type="danger" title="易错">x</viz-callout>\n## 验证\n官方样例通过。';
+    const mkAgent = (solFor) => {
+      let n = 0;
+      const f = async (opts) => {
+        const sys = String(opts.system || '');
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        if (sys.indexOf('【题解 Agent】') >= 0) { n++; await delay(20); return '```python\n' + solFor(n) + '\n```'; }
+        if (sys.indexOf('【暴力 Agent】') >= 0) { await delay(20); return '```python\n' + BRUTE + '\n```'; }
+        if (sys.indexOf('【数据生成 Agent】') >= 0) { await delay(10); return '```python\n' + GEN + '\n```'; }
+        if (sys.indexOf('【讲解 Agent】') >= 0) { await delay(10); return EXPLAINER; }
+        return '{}';
+      };
+      f.solCalls = () => n;
+      return f;
+    };
+    const runFix = async (agent, key) => harness.runPipeline({
+      conv: { id: key, title: '样例修复测试' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: key,
+      callAgent: agent, tiers: [4, 6], perTier: 3, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+
+    console.log('parallel: 官方样例失败 → 带着官方反例定向修题解');
+    delete process.env.CFCOACH_SAMPLE_FIX;
+    delete process.env.CFCOACH_SAMPLE_FIX_MAX;
+    const aFix = mkAgent((n) => (n === 1 ? SOL_WRONG : SOL));
+    const rFix = await runFix(aFix, 'sample-fix-ok');
+    const kFix = (rFix.trajectory || []).map((t) => t.kind);
+    ok('样例修复：第一版真的没通过官方样例（记了 sol-samples-fail）',
+      kFix.indexOf('sol-samples-fail') >= 0, kFix);
+    ok('样例修复：定向修一次后通过（sol-sample-fix-ok）',
+      kFix.indexOf('sol-sample-fix-ok') >= 0
+      && /修复 1 次后通过/.test(String(((rFix.trajectory || []).find((t) => t.kind === 'sol-sample-fix-ok') || {}).note || '')),
+      (rFix.trajectory || []).filter((t) => /sol-sample-fix/.test(t.kind)));
+    ok('样例修复：这次修复真的花了一次题解调用（可审计）',
+      aFix.solCalls() === 2
+      && (rFix.trace || []).filter((t) => t.role === 'solution' && /官方样例/.test(String(t.label || ''))).length === 1,
+      { solCalls: aFix.solCalls(), labels: (rFix.trace || []).filter((t) => t.role === 'solution').map((t) => t.label) });
+    ok('样例修复：修好之后链条继续跑完，验证结论是"已验证"（没有被样例失败掐断）',
+      !!rFix.verification && rFix.verification.status === 'ok'
+      && rFix.verification.solSamplesPass === true && rFix.verification.claimVerified === true,
+      rFix.verification);
+
+    console.log('parallel: 修不动时次数被整轮上限卡住');
+    process.env.CFCOACH_SAMPLE_FIX_MAX = '2';
+    const aCap = mkAgent(() => SOL_WRONG);
+    const rCap = await runFix(aCap, 'sample-fix-cap');
+    const kCap = (rCap.trajectory || []).map((t) => t.kind);
+    const fails = kCap.filter((k) => k === 'sol-sample-fix-fail').length;
+    ok('样例修复上限：修不动的次数刚好是上限 2 次（不是无上限重试）', fails === 2,
+      { fails, kinds: kCap.filter((k) => /sol-sample-fix/.test(k)) });
+    ok('样例修复上限：额度用尽时明确记一条"不再重试"，并如实降级（不声称已验证）',
+      (kCap.indexOf('sol-sample-fix-exhausted') >= 0 || kCap.indexOf('sol-sample-fix-cap') >= 0)
+      && (!rCap.verification || rCap.verification.status !== 'ok'),
+      { kinds: kCap.filter((k) => /sol-sample-fix/.test(k)), v: rCap.verification && rCap.verification.status });
+    delete process.env.CFCOACH_SAMPLE_FIX_MAX;
+  }
+
   console.log('\nparallel: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));
 })().catch((e) => { console.error('并行测试异常: ' + (e && e.stack || e)); process.exit(1); });
