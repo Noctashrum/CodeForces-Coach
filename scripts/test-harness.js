@@ -673,6 +673,35 @@ async function main() {
     check('生成器去退化：random.seed() 与变量/表达式种子都不动（只治写死的常量）',
       d3.changed === false && d3.code === bare, d3.code);
 
+    /* 3.5) 按官方样例定向修复的开关与上限（2026-10-09 批次①）。
+     * 取证：本机库 14/52 格题解没过官方样例，其中 9 格是"修一次、重写版仍不过样例 → 拒绝并停止"，
+     * 而这些格子只花了 10–12 次调用（预算档允许 50–130）。官方样例是唯一带官方背书的反例，
+     * 所以"一次就放弃"要改成"带着这组权威反例修到通过或撞上限（整轮共享、默认 3 次）"。 */
+    const oldSf = process.env.CFCOACH_SAMPLE_FIX;
+    const oldSfMax = process.env.CFCOACH_SAMPLE_FIX_MAX;
+    delete process.env.CFCOACH_SAMPLE_FIX;
+    delete process.env.CFCOACH_SAMPLE_FIX_MAX;
+    const sfDefault = harness.sampleFixConfig();
+    check('官方样例定向修复：默认开启、整轮上限 3 次',
+      sfDefault.on === true && sfDefault.max === 3, sfDefault);
+    process.env.CFCOACH_SAMPLE_FIX = '0';
+    check('官方样例定向修复：CFCOACH_SAMPLE_FIX=0 可关掉', harness.sampleFixConfig().on === false);
+    process.env.CFCOACH_SAMPLE_FIX = '1';
+    process.env.CFCOACH_SAMPLE_FIX_MAX = '5';
+    const sfEnv = harness.sampleFixConfig();
+    check('官方样例定向修复：env 可覆盖上限（集成测试靠它把次数缩小）',
+      sfEnv.on === true && sfEnv.max === 5, sfEnv);
+    if (oldSf === undefined) delete process.env.CFCOACH_SAMPLE_FIX; else process.env.CFCOACH_SAMPLE_FIX = oldSf;
+    if (oldSfMax === undefined) delete process.env.CFCOACH_SAMPLE_FIX_MAX; else process.env.CFCOACH_SAMPLE_FIX_MAX = oldSfMax;
+
+    // 3.6) 官方样例反例段确实进了"修题解"的提示词（含期望答案 + 实际输出 + 禁止硬编码）
+    const suSample = harness.buildSolutionUser(
+      { statement: '题面', samples: [] }, { inputSpec: 'n', outputSpec: 'ans' },
+      { retry: true, prevCode: 'print(0)', sampleFailing: [{ index: 1, verdict: 'WA', input: '1\n2', expected: '3', actual: '0' }] });
+    check('官方样例反例段：写清样例序号/输入/官方答案/实际输出，并禁止硬编码',
+      /官方样例未通过/.test(suSample) && suSample.indexOf('3') >= 0 && suSample.indexOf('样例 1：WA') >= 0
+      && /严禁/.test(suSample), suSample.slice(-400));
+
     // 4) 讲解 Agent 的"部分验证"口径：status=ok 但 claimVerified=false 时绝不能说"已经通过验证"
     const vPartial = {
       status: 'ok', claimVerified: false, scopeComplete: false,
