@@ -2471,10 +2471,17 @@ async function handleChat(req, res) {
             iterations: result.verification.iterations || 0,
             tiers: result.verification.tiers || [],
             bruteFrozen: !!result.verification.bruteFrozen,
-            agentCalls: result.verification.agentCalls || 0
+            agentCalls: result.verification.agentCalls || 0,
+            // P0-⑤：把"能对外声称已验证吗"与覆盖范围一起挂到消息上（工作台徽章读它）
+            claimVerified: result.verification.claimVerified !== false,
+            scopeComplete: result.verification.scopeComplete !== false,
+            perfGate: result.verification.perfGate || null,
+            scopeNote: result.verification.scopeNote || ''
           };
           if (result.verification.status !== 'ok') {
             send('notice', { level: 'warn', message: '本轮验证未通过（' + result.verification.status + '）：讲解已按"诚实降级"输出，请注意代码未经验证。' });
+          } else if (result.verification.claimVerified === false) {
+            send('notice', { level: 'warn', message: '本轮只做到**部分验证**（' + String(result.verification.scopeNote || '').slice(0, 160) + '）：讲解会标明验证范围。' });
           }
         }
         if (result && result.notes && result.notes.length) console.log('[harness] ' + result.notes.join('；'));

@@ -504,20 +504,53 @@ async function runRuler(opts) {
         actual: c.same ? null : c.b.output
       });
       if (!c.same) {
+        // 先把"不是候选的错"分出去，别一律记成 WA（2026-10-09）：
+        //   · 候选在**这一档**超时      → TLE（候选太慢，不是答案错）
+        //   · 候选在这一档跑挂（RE/编译失败）→ RE
+        //   · 标尺（外部 AC 提交）自己跑挂  → oracle-run-error（不可判，不能算候选头上）
+        // 老判分把这三类统统落到 `diff-WA`：2247F 就是这么被记错的 —— 交付码与 oracle 逐 token 相同，
+        // 只是最大规模档 12.1s 撞上 3s 时限，判分却写 `diff-WA`，让人以为"答案是错的"。
+        if (c.a && !c.a.ok) {
+          diffVerdict = 'oracle-run-error';
+          diffs[diffs.length - 1].status = 'oracle-error';
+          diffs[diffs.length - 1].detail = String(c.a.err || '').slice(0, 200);
+          break;
+        }
+        if (c.b && c.b.timedOut) {
+          diffVerdict = 'TLE';
+          diffs[diffs.length - 1].status = 'timeout';
+          diffs[diffs.length - 1].solMs = c.b.timeMs;
+          break;
+        }
+        if (c.b && !c.b.ok) {
+          diffVerdict = 'RE';
+          diffs[diffs.length - 1].status = 'run-error';
+          diffs[diffs.length - 1].detail = String(c.b.err || '').slice(0, 200);
+          break;
+        }
         // 多解题 + 没有 checker：两边都可能是对的 → 这一格不可判，别冒充候选错（与老判分同一立场）
         diffVerdict = special ? 'special-judge' : 'WA';
         break;
       }
     }
     if (diffVerdict !== 'AC') {
+      const named = diffVerdict === 'special-judge' || diffVerdict === 'TLE' || diffVerdict === 'RE'
+        || diffVerdict === 'oracle-run-error';
       const out = {
         cfac: false,
-        verdict: diffVerdict === 'special-judge' ? 'special-judge' : 'diff-' + diffVerdict,
+        verdict: named ? diffVerdict : 'diff-' + diffVerdict,
         samples, diffs
       };
       if (diffVerdict === 'special-judge') {
         out.diffUnreliable = true;
         out.detail = '对拍不一致，但这题是多解题且没有 checker：两边都可能是对的 → 这一格不可判';
+      } else if (diffVerdict === 'TLE') {
+        out.detail = '候选代码在这一档超出时限（' + limits.timeLimitMs + 'ms）→ TLE，不是答案错';
+      } else if (diffVerdict === 'RE') {
+        out.detail = '候选代码在这一档运行失败（RE）→ 不是答案错';
+      } else if (diffVerdict === 'oracle-run-error') {
+        out.diffUnreliable = true;
+        out.detail = '标尺（外部 AC 提交）在这一档自己跑挂了 → 这一格不可判，不算候选的错';
       }
       return Object.assign(base, out);
     }

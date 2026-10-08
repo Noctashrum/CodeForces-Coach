@@ -624,6 +624,73 @@ async function main() {
     check('正文防漏：引子限长（不会把整篇讲解塞进消息）', lead5.length <= 320, lead5.length);
   }
 
+  /* ---------- 性能闸 / 生成器去退化 / "部分验证"口径（2026-10 止血三件套） ----------
+   * 背景（两机消融 + 14 题与参考解对照）：我们丢的一整类原因是"算法对、最大规模超时"
+   * （2247D2 实测 7.33× 于 oracle；2250C 交付的代码连样例都超时；2247F 的 TLE 被尺子记成
+   * diff-WA），另一整类是假自信（5 格 assert=true 而 scope=false）。三件套就是治这两类。 */
+  {
+    // 1) 题面时限解析：只认官方口径，拿不到就返回 null（宁可不做，也不拿自己编的时限当判据）
+    check('性能闸：解析 "time limit per test: 2 seconds"',
+      harness.parseTimeLimitMs('time limit per test: 2 seconds') === 2000);
+    check('性能闸：解析 "Time limit per test 1.5 seconds"',
+      harness.parseTimeLimitMs('Time limit per test 1.5 seconds') === 1500);
+    check('性能闸：毫秒写法 "time limit per test: 1500 milliseconds"',
+      harness.parseTimeLimitMs('time limit per test: 1500 milliseconds') === 1500);
+    check('性能闸：题面没有时限 → null（宁可不做，也不拿编的时限判失败）',
+      harness.parseTimeLimitMs('输入一行 n，输出答案。') === null
+      && harness.parseTimeLimitMs('') === null && harness.parseTimeLimitMs(undefined) === null);
+
+    // 2) 开关与阈值：默认开、factor=2、maxN=200000；env 可覆盖（集成测试靠 maxN 把规模缩小）
+    const oldGate = process.env.CFCOACH_PERF_GATE;
+    const oldFactor = process.env.CFCOACH_PERF_GATE_FACTOR;
+    const oldMaxN = process.env.CFCOACH_PERF_GATE_MAXN;
+    delete process.env.CFCOACH_PERF_GATE;
+    delete process.env.CFCOACH_PERF_GATE_FACTOR;
+    delete process.env.CFCOACH_PERF_GATE_MAXN;
+    const pgDefault = harness.perfGateConfig();
+    check('性能闸：默认开启，factor 2、maxN 200000、墙钟 60s',
+      pgDefault.on === true && pgDefault.factor === 2 && pgDefault.maxN === 200000 && pgDefault.wallMs === 60000, pgDefault);
+    process.env.CFCOACH_PERF_GATE = '0';
+    check('性能闸：CFCOACH_PERF_GATE=0 可关掉', harness.perfGateConfig().on === false);
+    process.env.CFCOACH_PERF_GATE = '1';
+    process.env.CFCOACH_PERF_GATE_FACTOR = '3';
+    process.env.CFCOACH_PERF_GATE_MAXN = '500';
+    const pgEnv = harness.perfGateConfig();
+    check('性能闸：env 可覆盖倍数与规模档',
+      pgEnv.on === true && pgEnv.factor === 3 && pgEnv.maxN === 500, pgEnv);
+    if (oldGate === undefined) delete process.env.CFCOACH_PERF_GATE; else process.env.CFCOACH_PERF_GATE = oldGate;
+    if (oldFactor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR; else process.env.CFCOACH_PERF_GATE_FACTOR = oldFactor;
+    if (oldMaxN === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = oldMaxN;
+
+    // 3) 生成器去退化：写死的随机种子让"对拍 N 组"变成同一组用例跑 N 遍
+    const d1 = harness.dedupeGenSeed('import random\nrandom.seed(123456789)\nprint(random.randint(0, 9))');
+    check('生成器去退化：random.seed(数字) → random.seed()',
+      d1.changed === true && d1.code.indexOf('random.seed()') >= 0 && !/seed\(\s*\d/.test(d1.code), d1.code);
+    const d2 = harness.dedupeGenSeed('random . seed( 7 )');
+    check('生成器去退化：容忍空格写法', d2.changed === true && !/seed\(\s*\d/.test(d2.code), d2.code);
+    const bare = 'random.seed()  # 时间种子\nrandom.seed(seed_var)\nrandom.seed(n % 10)';
+    const d3 = harness.dedupeGenSeed(bare);
+    check('生成器去退化：random.seed() 与变量/表达式种子都不动（只治写死的常量）',
+      d3.changed === false && d3.code === bare, d3.code);
+
+    // 4) 讲解 Agent 的"部分验证"口径：status=ok 但 claimVerified=false 时绝不能说"已经通过验证"
+    const vPartial = {
+      status: 'ok', claimVerified: false, scopeComplete: false,
+      scopeNote: '⚠️ 交付前最大规模计时没过：题解在最大规模档（n≈200000）耗时 7000ms，超过题面时限 2000ms 的 2 倍'
+    };
+    const sysPartial = harness.explainerSystem('full', 'cpp', false, 'L3', vPartial);
+    check('部分验证：讲解系统提示词禁止说"已经在本机通过验证"',
+      sysPartial.indexOf('已经在本机通过验证') < 0 && /部分验证/.test(sysPartial)
+      && /最大规模用例上会超时/.test(sysPartial), sysPartial.slice(0, 160));
+    const vFull = { status: 'ok', claimVerified: true, scopeComplete: true, scopeNote: '官方样例通过；随机对拍 60 组一致；已按题面上限计时' };
+    const sysFull = harness.explainerSystem('full', 'cpp', false, 'L3', vFull);
+    check('完整验证：仍然照旧（可以说"已经在本机通过验证"）',
+      sysFull.indexOf('已经在本机通过验证') >= 0 && !/部分验证/.test(sysFull));
+    const sysOld = harness.explainerSystem('full', 'cpp', false, 'L3', { status: 'ok' });
+    check('老记录（没有 claimVerified 字段）不被误判成"部分验证"',
+      sysOld.indexOf('已经在本机通过验证') >= 0 && !/部分验证/.test(sysOld));
+  }
+
   console.log('\n========================================');
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
   if (fails.length) {
