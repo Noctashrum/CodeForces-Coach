@@ -1065,6 +1065,51 @@ const callAgent = async (opts) => {
       && (!rCap.verification || rCap.verification.status !== 'ok'),
       { kinds: kCap.filter((k) => /sol-sample-fix/.test(k)), v: rCap.verification && rCap.verification.status });
     delete process.env.CFCOACH_SAMPLE_FIX_MAX;
+
+    /* 2026-10-10：同一句"拒绝这一版，但**不要停手**"也要管住**题解在对拍里运行失败**那个站点
+       （`lib/harness.js` 的"修题解（题解运行失败）"）。取证：10-07 那批 12–13 格终局原因
+       "题解的一次重写没有通过官方样例（WA）→ 已拒绝这次重写并停止"里，属于这个站点的格子
+       只花了 1–2 次调用就停（预算档允许 50–130 次）。
+
+       夹具设计（要确定性，不能是概率性 flaky）：
+         · 第一版题解**过官方样例**（样例是 t=2 组），但在随机数据上**必崩** —— 生成器固定只
+           产出 t=1 组，于是"崩"是确定的；
+         · 第二次重写（=被样例闸拦下的那一版）故意写成错解 → 必须被拒绝（纪律：不许拿没过
+           官方样例的题解继续跑）；
+         · 第三次才对。
+       期望：终局原因不再是"已拒绝这次重写并停止"，链条继续修完并给出"已验证"；题解调用数
+       从旧行为的 2 变成 3（可审计地证明"多给了一次机会"）。 */
+    console.log('parallel: 题解在对拍里运行失败 → 重写被样例拒绝后仍然继续修（不停手）');
+    {
+      const SOL_CRASH = [
+        'import sys, heapq',
+        'd = sys.stdin.read().split()',
+        'p = 0; t = int(d[p]); p += 1; out = []',
+        'if t == 1:',
+        '    raise SystemExit(3)',      // 生成器固定 t=1 → 对拍必崩；官方样例 t=2 → 样例必过
+        'for _ in range(t):',
+        '    n = int(d[p]); p += 1',
+        '    h = []; s = 0',
+        '    for _ in range(n):',
+        '        x = int(d[p]); p += 1',
+        '        if x > 0: heapq.heappush(h, -x)',
+        '        elif h: s += -heapq.heappop(h)',
+        '    out.append(str(s))',
+        'print("\\n".join(out))'
+      ].join('\n');
+      const aRun = mkAgent((n) => (n === 1 ? SOL_CRASH : (n === 2 ? SOL_WRONG : SOL)));
+      const rRun = await runFix(aRun, 'sol-runerror-sample-reject');
+      const kRun = (rRun.trajectory || []).map((t) => t.kind);
+      const vRun = rRun.verification || {};
+      ok('运行失败站点：重写版没过官方样例 → 照样拒绝这一版（纪律不变，记住 sol-rewrite-sample-fail）',
+        kRun.indexOf('sol-rewrite-sample-fail') >= 0, { kinds: kRun.filter((k) => /rewrite|sample/.test(k)) });
+      ok('运行失败站点：拒绝之后**没有停手**（终局原因里不再有"已拒绝这次重写并停止"）',
+        !/已拒绝这次重写并停止/.test(String(vRun.reason || '')),
+        { reason: String(vRun.reason || '').slice(0, 200), kinds: kRun.filter((k) => /rewrite|sample/.test(k)) });
+      ok('运行失败站点：真的多修了一轮（题解调用 2 → 3）并最终给出"已验证"',
+        aRun.solCalls() === 3 && vRun.status === 'ok' && vRun.claimVerified === true,
+        { solCalls: aRun.solCalls(), status: vRun.status, claim: vRun.claimVerified, reason: String(vRun.reason || '').slice(0, 160) });
+    }
   }
 
   /* ========== 语言闸（批次③）：算法对、语言慢 → 只换语言、不改算法 ========== */

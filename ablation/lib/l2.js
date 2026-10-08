@@ -25,6 +25,8 @@ const llm = require('../../lib/llm');
 const agentloop = require('../../lib/agentloop');
 const env = require('./env');
 const record = require('./record');
+const ruler = require('./ruler');
+const cffetch = require('./cffetch');
 
 /** 系统提示词 → 角色（callAgent 一般会直接给 role，这里只作为兜底） */
 const ROLE_MARKERS = [
@@ -84,6 +86,60 @@ function clip(s, n) {
 }
 
 /**
+ * 应用侧题面缓存的候选目录（谁有这道题的 JSON 就用谁）。
+ *
+ * 为什么是"候选目录列表"而不是一个目录：缓存可能在两个地方 —— 打包版 exe 的数据目录
+ * （`env.dataDir()`，人用界面取题时写进去的）与仓库开发目录（`data/cf-problems`，本机
+ * 取题/测试时写进去的）。两边都可能有一半，硬编码一个必然漏。
+ */
+function cacheDirs() {
+  const out = [];
+  try {
+    const d = cffetch.appCacheDir();
+    if (d) out.push(d);
+  } catch (e) { /* 没有应用数据目录也没关系，下面还有仓库目录 */ }
+  out.push(path.join(__dirname, '..', '..', 'data', 'cf-problems'));
+  return out;
+}
+
+function pickCacheDir(id) {
+  const dirs = cacheDirs();
+  for (const d of dirs) {
+    try {
+      if (fs.existsSync(path.join(d, id + '.json'))) return d;
+    } catch (e) { /* 读不到的目录直接跳过 */ }
+  }
+  return dirs[0] || null;
+}
+
+/**
+ * 官方时限 —— 性能闸（批次③语言闸）唯一的合法判据。
+ *
+ * 为什么实验台要自己解析（2026-10-10 通宵实测踩到）：harness 解析时限只认 CF 题面里
+ * "time limit per test: N seconds" 那一整句，而题库里的题面是**纯正文**（没有 CF 头），
+ * 于是性能闸记 `perf-gate-skipped`（原文"题面里没解析出官方时限"）—— 语言闸在实验台里
+ * **永远不会触发**：A1 实验里 2250C 就这么白跑了一格（lang=python、iters=60、status=ok）。
+ *
+ * 权威顺序与离线尺子**完全一致**（limits.json 覆盖 → 题库字段 → 应用侧题面缓存 → 默认值），
+ * 且**解析不出来就不传**：宁可不做性能闸，也绝不拿自己编的时限当判据（这条纪律写在
+ * harness 的 perf-gate-skipped 分支里，实验台不许松动）。
+ */
+function resolveTimeLimit(problem, outDir) {
+  let overrides = {};
+  try {
+    overrides = JSON.parse(fs.readFileSync(path.join(outDir, 'limits.json'), 'utf8')) || {};
+  } catch (e) { overrides = {}; }
+  let lim = null;
+  try {
+    lim = ruler.resolveLimits(problem, { overrides, cacheDir: pickCacheDir(problem.id) });
+  } catch (e) { lim = null; }
+  if (!lim || !(lim.timeLimitMs > 0) || lim.source === 'default') {
+    return { timeLimitMs: 0, source: (lim && lim.source) || 'none' };
+  }
+  return { timeLimitMs: Number(lim.timeLimitMs), source: lim.source, memoryLimitMb: lim.memoryLimitMb || null };
+}
+
+/**
  * 跑一次 L2。
  * @param {{problem:object, statement:string, target:object, params:object, run:object, name:string,
  *          lang?:string, rich?:boolean, iterations?:number, maxStressMs?:number, depth?:string}} ctx
@@ -99,6 +155,8 @@ async function runL2(ctx) {
   const usage = { promptTokens: 0, completionTokens: 0, calls: 0 };
   const byRole = {};
   const events = [];
+  // 官方时限：解析得到才交给 harness（性能闸/语言闸的判据），解析不到就 0 = 不做性能闸。
+  const tl = resolveTimeLimit(problem, run.outDir);
   const rec = {
     level: 'L2', problem: problem.id, model: target.model, providerId: target.providerId,
     startedAt: new Date(t0).toISOString(),
@@ -109,7 +167,9 @@ async function runL2(ctx) {
       stream: true, hasTools: false, pipeline: 'cf-coach/runPipeline',
       intent: 'full', rich: !!ctx.rich, lang, wsKey: key,
       perTier: ctx.iterations || 30, maxStressMs: ctx.maxStressMs || 90000, depth: ctx.depth || 'L3',
-      docEffort: ctx.docEffort || ''   // '' = 默认（讲解带思考）；'none' = 实验臂"关思考写文档"
+      docEffort: ctx.docEffort || '',   // '' = 默认（讲解带思考）；'none' = 实验臂"关思考写文档"
+      timeLimitMs: tl.timeLimitMs || 0,  // 0 = 没有官方时限（性能闸会跳过，不编时限）
+      timeLimitSource: tl.source          // override / problem / cache / none —— 记录里要能自证
     }
   };
 
@@ -168,6 +228,8 @@ async function runL2(ctx) {
       docEffort: ctx.docEffort === 'none' ? 'none' : '',
       perTier: ctx.iterations || 30,
       maxStressMs: ctx.maxStressMs || 90000,
+      // 性能闸（=批次③语言闸）的判据：0 会被 harness 当成"没有官方时限"，闸门照旧跳过。
+      timeLimitMs: tl.timeLimitMs || 0,
       log: () => {},
       emit: (ev) => {
         if (!ev || !ev.type) return;
@@ -253,4 +315,4 @@ async function runL2(ctx) {
   }
 }
 
-module.exports = { runL2, prepareWorkspace, convFor, roleOf };
+module.exports = { runL2, prepareWorkspace, convFor, roleOf, resolveTimeLimit, pickCacheDir };
