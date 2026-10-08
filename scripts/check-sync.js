@@ -31,6 +31,8 @@ const FILES = [
   'lib/serialqueue.js',
   // 死循环特征检测（用"没有新信息"取代无脑的时间/次数上限）
   'lib/loopguard.js',
+  // 多解题的本地 checker（按题面判"这份输出合不合法"，而不是"和标准答案一不一样"）
+  'lib/checker.js',
   // 出问题时把"这台机器上到底发生了什么"打包成一份文本（设置页 / CLI / 测试台共用）
   'lib/diagbundle.js',
   'public/index.html', 'public/styles.css', 'public/js/app.js', 'public/js/review.js',

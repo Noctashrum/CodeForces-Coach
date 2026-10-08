@@ -451,6 +451,170 @@ const callAgent = async (opts) => {
     && (resMA.notes || []).join('').indexOf('不等于') >= 0,
     { notes: (resMA.notes || []).join(' | ').slice(0, 200) });
 
+  /* ---------------- 多解题 + **本地 checker**：判得动就照判，判不动才停 ----------------
+   * 批次②（2026-10-10）：离线尺子已经证明"按题面写一份 checker"能把多解题从"不可判"变成真判词
+   * （2250F / 2257C / 2267B 三题 24 条记录 15 条 ★CF-AC）。这里钉住产品侧接线后的三条语义：
+   *   ① checker 判题解**合法** → 这条"不一致"不成立：不改写题解、不花仲裁调用，仍然如实标 multi-answer；
+   *   ② checker 判题解**不合法** → 这才是有背书的真反例，走正常"修题解"，并且喂给它的是 **checker 判词**
+   *      而不是"暴力解输出（期望）" —— 多解题上把另一份合法答案当期望，等于诱导它去逐字凑暴力解；
+   *   ③ checker 本身不可信（自检不过 / 弃权 / 超时）→ 与改造前完全一致：停下，如实说"本地判不了"。
+   * 两个夹具各用独立的工作区 key：checker 源码会落到 `<工作区>/checker/checker.py`（好让它活过
+   * clearScratch 的临时区清理、下一轮直接复用），共用 key 会让两个夹具互相污染。 */
+  console.log('parallel: 多解题 + 本地 checker（判得动就照判，判不动才停）');
+  // 排列 checker：只判"是不是 1..n 的一个排列"，与标准答案逐字比较无关（这正是多解题需要的判据）
+  const CK_PERM_PY = [
+    'import sys',
+    'a = open(sys.argv[1]).read().split()',
+    'b = open(sys.argv[2]).read().split()',
+    'n = int(a[0])',
+    'try:',
+    '    v = [int(x) for x in b]',
+    'except Exception:',
+    '    print("输出里出现了非整数"); sys.exit(2)',
+    'if len(v) != n:',
+    '    print("应输出 %d 个数，实际 %d 个" % (n, len(v))); sys.exit(1)',
+    'if sorted(v) != list(range(1, n + 1)):',
+    '    print("输出的不是 1..%d 的排列：%s" % (n, " ".join(b))); sys.exit(1)',
+    'sys.exit(0)'
+  ].join('\n');
+  // 故意"苛刻"的 checker：要求恰好是 1 2 3 …（题面其实允许多解）。它**能通过官方样例自检**
+  // （样例就是 1 2 3），所以会被采信 —— 用来验证"checker 判不合法 → 带判词走修题解"这条路。
+  const CK_ORDER_PY = [
+    'import sys',
+    'a = open(sys.argv[1]).read().split()',
+    'b = open(sys.argv[2]).read().split()',
+    'n = int(a[0])',
+    'want = " ".join(str(i) for i in range(1, n + 1))',
+    'got = " ".join(b).strip()',
+    'if got != want:',
+    '    print("必须是 %s，实际是 %s" % (want, got)); sys.exit(1)',
+    'sys.exit(0)'
+  ].join('\n');
+  const runMA = async (agent, key, samples) => harness.runPipeline({
+    conv: { id: key, title: '多解题+checker' },
+    lang: 'python', intent: 'full',
+    statement: MA_STATEMENT,
+    samples: samples || [{ input: '3', output: '1 2 3' }],
+    workspace, wsKey: key,
+    callAgent: agent, tiers: [4, 6], perTier: 6, bruteTimeoutMs: 5000,
+    emit: () => {}, log: () => {}
+  });
+
+  // ① checker 判"题解输出合法" → 不算不一致：不改题解、不仲裁，结论仍然如实标 multi-answer
+  {
+    const key = 'multi-answer-ck-ok';
+    let ckOkSol = 0;
+    let ckOkAdj = 0;
+    let ckOkCalls = 0;
+    const agentCkOk = async (opts) => {
+      const sys = String(opts.system || '');
+      const label = String(opts.label || '');
+      if (sys.indexOf('【checker Agent】') >= 0) { ckOkCalls++; return '```python\n' + CK_PERM_PY + '\n```'; }
+      if (sys.indexOf('【题解 Agent】') >= 0) { ckOkSol++; return '思路：任意排列。\n\n```python\n' + MA_SOL + '\n```'; }
+      if (sys.indexOf('【暴力 Agent】') >= 0) return '暴力。\n\n```python\n' + MA_BRUTE + '\n```';
+      if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + MA_GEN + '\n```';
+      if (sys.indexOf('错因仲裁') >= 0 || label.indexOf('仲裁') >= 0) { ckOkAdj++; return '{"wrong":"sol","reason":"输出与样例不同"}'; }
+      if (sys.indexOf('【讲解 Agent】') >= 0) {
+        return '## 题面拆解\n多解题：1..n 的任意排列都合法。\n## 验证\n与暴力解输出不同**不等于**错；本轮**不能**声称已验证。';
+      }
+      return '{}';
+    };
+    const resCkOk = await runMA(agentCkOk, key);
+    const tCkOk = (resCkOk.trajectory || []).map((t) => t.kind);
+    ok('多解+checker：写出的 checker 通过官方样例自检后才被采信（轨迹 checker-trusted）',
+      ckOkCalls === 1 && tCkOk.indexOf('checker-trusted') >= 0, { calls: ckOkCalls, traj: tCkOk.join(',') });
+    ok('多解+checker：判题解输出**合法** → 这条不一致不成立（checker-ac；不再走"本地判不了"停手）',
+      tCkOk.indexOf('checker-ac') >= 0 && tCkOk.indexOf('multi-answer-undecidable') < 0, tCkOk.join(','));
+    ok('多解+checker：判合法就不改写题解、不花仲裁调用',
+      ckOkSol === 1 && ckOkAdj === 0, { sol: ckOkSol, adj: ckOkAdj });
+    ok('多解+checker：结论仍然如实标 multi-answer，且**不**声称已验证',
+      resCkOk.status === 'multi-answer' && resCkOk.verification.status === 'multi-answer'
+      && resCkOk.verification.multiAnswer === true && resCkOk.verification.claimVerified === false
+      && resCkOk.verification.scopeComplete === false,
+      { status: resCkOk.status, v: resCkOk.verification && resCkOk.verification.status,
+        claim: resCkOk.verification && resCkOk.verification.claimVerified });
+    ok('多解+checker：evidence 里写明"本地 checker 判题解输出合法 N 次"',
+      String(resCkOk.verification.scopeNote || '').indexOf('判题解输出合法 1 次') >= 0,
+      String(resCkOk.verification.scopeNote || '').slice(0, 240));
+    ok('多解+checker：提醒里说明"不同来自多解性本身、不能声称已验证"',
+      (resCkOk.notes || []).join('').indexOf('本地 checker') >= 0
+      && (resCkOk.notes || []).join('').indexOf('合法答案') >= 0
+      && (resCkOk.notes || []).join('').indexOf('不能') >= 0,
+      { notes: (resCkOk.notes || []).join(' | ').slice(0, 200) });
+    ok('多解+checker：checker 源码落在 <工作区>/checker/checker.py（下一轮直接复用、不用再花调用）',
+      fs.existsSync(path.join(workspace.convDir(key), 'checker', 'checker.py')), workspace.convDir(key));
+  }
+
+  // ② checker 判"题解输出**不合法**" → 有背书的真反例：带 checker 判词走修题解（**不给**"暴力解期望"）
+  {
+    const key = 'multi-answer-ck-wa';
+    let ckWaSol = 0;
+    let ckWaCk = 0;
+    const ckWaSolUsers = [];
+    const agentCkWa = async (opts) => {
+      const sys = String(opts.system || '');
+      const label = String(opts.label || '');
+      if (sys.indexOf('【checker Agent】') >= 0) { ckWaCk++; return '```python\n' + CK_ORDER_PY + '\n```'; }
+      if (sys.indexOf('【题解 Agent】') >= 0) {
+        ckWaSol++;
+        ckWaSolUsers.push(String(opts.user || ''));
+        return '```python\n' + (ckWaSol === 1 ? MA_SOL : MA_BRUTE) + '\n```';
+      }
+      if (sys.indexOf('【暴力 Agent】') >= 0) return '```python\n' + MA_BRUTE + '\n```';
+      if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + MA_GEN + '\n```';
+      if (sys.indexOf('错因仲裁') >= 0 || label.indexOf('仲裁') >= 0) return '{"wrong":"sol","reason":"输出与样例不同"}';
+      if (sys.indexOf('【讲解 Agent】') >= 0) return '## 题面拆解\n按 checker 的判词改。\n## 验证\n已按题面上限计时。';
+      return '{}';
+    };
+    const resCkWa = await runMA(agentCkWa, key);
+    const tCkWa = (resCkWa.trajectory || []).map((t) => t.kind);
+    ok('多解+checker：判题解输出**不合法** → 记下有背书的真反例（checker-wa，而不是"判不了"停手）',
+      ckWaCk === 1 && tCkWa.indexOf('checker-wa') >= 0 && tCkWa.indexOf('multi-answer-undecidable') < 0,
+      { ck: ckWaCk, traj: tCkWa.join(',') });
+    ok('多解+checker：带着这根反例去修题解（题解 Agent 被再叫一次）',
+      ckWaSol >= 2, { sol: ckWaSol });
+    ok('多解+checker：修题解的提示词给的是 **checker 判词**，**不是**"暴力解输出（期望）"',
+      ckWaSolUsers.length >= 2
+      && ckWaSolUsers[1].indexOf('checker 的判词') >= 0
+      && ckWaSolUsers[1].indexOf('必须是 1 2') >= 0
+      && ckWaSolUsers[1].indexOf('暴力解输出（期望）') < 0,
+      { rewriteHasJudge: ckWaSolUsers.length >= 2 && ckWaSolUsers[1].indexOf('checker 的判词') >= 0,
+        rewriteHasBruteExpect: ckWaSolUsers.length >= 2 && ckWaSolUsers[1].indexOf('暴力解输出（期望）') >= 0 });
+    ok('多解+checker：修好后对拍通过（checker 判不合法的那一版被真的修掉了）',
+      resCkWa.status === 'ok', { status: resCkWa.status, reason: resCkWa.reason });
+    ok('多解+checker：即使最后对拍通过，"与标尺逐字一致"这条判据对多解题仍不成立 → 不声称已验证',
+      resCkWa.verification.multiAnswer === true && resCkWa.verification.claimVerified === false,
+      { multi: resCkWa.verification && resCkWa.verification.multiAnswer,
+        claim: resCkWa.verification && resCkWa.verification.claimVerified });
+  }
+
+  // ③ checker 自己不可信（自检不过）→ 必须回落到改造前行为：停下、如实说"本地判不了"
+  {
+    const key = 'multi-answer-ck-bad';
+    let badAdj = 0;
+    const agentCkBad = async (opts) => {
+      const sys = String(opts.system || '');
+      const label = String(opts.label || '');
+      // 这份 checker 对**官方样例自己**都判 1 → 自检不过 → 绝不采信
+      if (sys.indexOf('【checker Agent】') >= 0) {
+        return '```python\nimport sys\nprint("永远拒绝")\nsys.exit(1)\n```';
+      }
+      if (sys.indexOf('【题解 Agent】') >= 0) return '```python\n' + MA_SOL + '\n```';
+      if (sys.indexOf('【暴力 Agent】') >= 0) return '```python\n' + MA_BRUTE + '\n```';
+      if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + MA_GEN + '\n```';
+      if (sys.indexOf('错因仲裁') >= 0 || label.indexOf('仲裁') >= 0) { badAdj++; return '{"wrong":"sol","reason":"输出与样例不同"}'; }
+      if (sys.indexOf('【讲解 Agent】') >= 0) return '## 题面拆解\n多解题。\n## 验证\n与样例不同不等于错。';
+      return '{}';
+    };
+    const resCkBad = await runMA(agentCkBad, key);
+    const tCkBad = (resCkBad.trajectory || []).map((t) => t.kind);
+    ok('多解+checker：连官方样例都判错的 checker → 不采信（checker-untrusted，绝不拿没背书的判据改题解）',
+      tCkBad.indexOf('checker-untrusted') >= 0 && tCkBad.indexOf('checker-trusted') < 0, tCkBad.join(','));
+    ok('多解+checker：不可信就回落到改造前的"本地判不了"（multi-answer-undecidable、不花仲裁）',
+      tCkBad.indexOf('multi-answer-undecidable') >= 0 && badAdj === 0 && resCkBad.status === 'multi-answer',
+      { adj: badAdj, status: resCkBad.status, traj: tCkBad.join(',') });
+  }
+
   /* ---------------- 数值范围：**只提醒，绝不改数据** ----------------
    * 曾经以为"机械缩放数值"是代码层的稳妥解法，结果把二进制串字段 00100010 改成 16，
    * 把整轮带沟里（仲裁判生成器有罪、白重写 3 次）。现在改成：把上限告诉生成器（argv[2]），

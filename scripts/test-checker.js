@@ -163,8 +163,20 @@ const samples = [
     assert.ok(/not a permutation/.test(r.detail), r.detail);
     return r;
   });
-  const peBuilt = await ck.build({ file: writeFixture('ws-pe/checker.py', PE_PY), lang: 'python' });
-  await okAsync('runOnce：exit 2 → PE（也是"候选不合法"，但不是 WA）', async () => {
+  /* 判词编码：判词是喂给解题 Agent 的证据，乱码等于没有证据。
+   * 实测踩过（2026-10-10，本机 Windows）：不给子进程指定编码时，python 按控制台代码页输出中文，
+   * Node 按 UTF-8 解码 → 判词变成 "������ 1 2" —— 夹具里那条 "必须是 1 2" 断言就是这么炸出来的。 */
+  const CN_PY = 'import sys\nprint("必须是 1 2 3，实际是 3 2 1")\nsys.exit(1)\n';
+  const cnBuilt = await ck.build({ file: writeFixture('ws-cn/checker.py', CN_PY), lang: 'python' });
+  await okAsync('runOnce：checker 打印中文判词 → 原样收回（不许变成乱码）', async () => {
+    const r = await ck.runOnce(cnBuilt, { input: '3\n', participant: '3 2 1\n', jury: '1 2 3\n' });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.ac, false);
+    assert.ok(r.detail.indexOf('必须是 1 2 3') >= 0, '判词乱码了：' + r.detail);
+    assert.ok(r.detail.indexOf('\uFFFD') < 0, '判词里还有替换字符：' + r.detail);
+    return r;
+  });
+  const peBuilt = await ck.build({ file: writeFixture('ws-pe/checker.py', PE_PY), lang: 'python' });  await okAsync('runOnce：exit 2 → PE（也是"候选不合法"，但不是 WA）', async () => {
     const r = await ck.runOnce(peBuilt, { input: '1\n', participant: 'x\n', jury: 'x\n' });
     assert.strictEqual(r.ok, true, r.error);
     assert.strictEqual(r.verdict, 'PE');

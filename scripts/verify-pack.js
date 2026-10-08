@@ -57,6 +57,12 @@ check('诊断包：主进程交底 userData（免得靠猜 APPDATA）', 'electro
 // 可见窗口因为 loadURL().catch 这条路径没过滤 -3，0.5 秒就判失败 → 表现为"稳定扒不到题"。
 check('取题：可见窗口接管时的 -3 重试', 'electron/main.js', ['isAbortError', 'startLoad', '初始导航被取代']);
 
+// 批次②：多解题不再一律"判不了" —— 本地 checker 库 + 它接进 harness 的多解题站点。
+// 判据必须三态可分：合法（checker-ac）/ 不合法（checker-wa）/ 判不了（回落 multi-answer-undecidable）。
+check('多解 checker：本地 checker 库', 'lib/checker.js', ['resolve', 'runOnce', 'selfTest', 'judgeSol']);
+check('多解 checker：接进 harness 的多解题站点',
+  'lib/harness.js', ['checkerLib', 'ensureChecker', 'checker-ac', 'checker-wa', 'multi-answer-undecidable']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
