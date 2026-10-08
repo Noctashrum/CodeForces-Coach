@@ -1155,6 +1155,45 @@ async function main() {
         JSON.stringify(Object.keys(bigSampleRow)));
     }
 
+    // ⑪ 官方时限管道（2026-10-10 通宵）：harness 解析时限只认 CF 题面里
+    //    "time limit per test: N seconds" 那一整句，而题库里的题面是**纯正文**（没有 CF 头），
+    //    于是 `perf-gate-skipped`：性能闸/语言闸在实验台里**永远不会触发**
+    //    （A1 实验实证：2250C 记 perf-gate-skipped，lang=python、iters=60、status=ok，白跑一格）。
+    //    这里守住三条：解析不到**就不传**（绝不自己编时限）；limits.json 覆盖能进管道；
+    //    应用侧题面缓存（取题通道写下的那份）里的官方时限也能进管道。
+    console.log('\n⑪ 官方时限管道（性能闸/语言闸的判据只能来自官方来源）');
+    {
+      const tlRoot = path.join(tmp, 'tl-store');
+      fs.mkdirSync(tlRoot, { recursive: true });
+      const noTl = { id: 'ck920', statement: 'The first line contains n (1 ≤ n ≤ 100). Print the answer.', samples: [] };
+      const t1 = l2.resolveTimeLimit(noTl, tlRoot);
+      check('拿不到官方时限 → 传 0（宁可不做性能闸，也不许自己编时限）',
+        t1.timeLimitMs === 0 && t1.source === 'default', JSON.stringify(t1));
+
+      fs.writeFileSync(path.join(tlRoot, 'limits.json'),
+        JSON.stringify({ ck920: { timeLimitMs: 2500, note: '手写覆盖（自测）' } }), 'utf8');
+      const t2 = l2.resolveTimeLimit(noTl, tlRoot);
+      check('limits.json 覆盖 → 真时限进管道（source=override）',
+        t2.timeLimitMs === 2500 && t2.source === 'override', JSON.stringify(t2));
+
+      // 应用侧题面缓存：把应用数据目录指到临时目录，造一份 cf-problems/<题号>.json（取题通道写下的形状）
+      const fakeData = path.join(tmp, 'fake-app-data');
+      fs.mkdirSync(path.join(fakeData, 'cf-problems'), { recursive: true });
+      fs.writeFileSync(path.join(fakeData, 'cf-problems', 'ck921.json'),
+        JSON.stringify({ contestId: 900, index: 'Z', timeLimit: '3 seconds', memoryLimit: '256 megabytes' }), 'utf8');
+      const oldDataDir = process.env.CHATBOX_DATA_DIR;
+      process.env.CHATBOX_DATA_DIR = fakeData;
+      try {
+        const t3 = l2.resolveTimeLimit({ id: 'ck921', statement: 'no time limit sentence here', samples: [] }, tlRoot);
+        check('应用侧题面缓存里的官方时限 → 也进管道（source=cache，取题通道写下的就是这份）',
+          t3.timeLimitMs === 3000 && t3.source === 'cache'
+          && l2.pickCacheDir('ck921') === path.join(fakeData, 'cf-problems'),
+          JSON.stringify(t3) + ' cacheDir=' + l2.pickCacheDir('ck921'));
+      } finally {
+        if (oldDataDir === undefined) delete process.env.CHATBOX_DATA_DIR; else process.env.CHATBOX_DATA_DIR = oldDataDir;
+      }
+    }
+
     run.writeSummary({ selftest: true });
     const lines = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
     check('records.jsonl 每条跑分一行（L0/L1/L1 兜底/L2/错解 L2/错解 L0 = 6 行）', lines.length === 6, 'lines=' + lines.length);
