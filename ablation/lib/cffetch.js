@@ -98,7 +98,14 @@ function fetchProblem(ref, opts) {
   const refArg = parsed.contestId + parsed.index;
   const timeoutMs = o.timeoutMs > 0 ? o.timeoutMs : 180000;
 
-  log('取题 ' + refArg + '：起应用内嵌浏览器（隐藏窗口 → 过不了挑战再用可见窗口，可能要 10–60 秒）');
+  // 工作台"抓题"是实测把整机拖到黑屏的那个入口（可见窗口里跑 Cloudflare 挑战页 → 显卡驱动复位）。
+  // 所以**默认只允许隐藏窗口**：过不了挑战就如实失败，宁可不抓。要恢复"隐藏失败后改可见"的老行为，
+  // 显式设 CFCOACH_CF_ALLOW_VISIBLE=1（并且建议同时设 CFCOACH_CF_SAFE_GPU=1 关掉硬件加速）。
+  const allowVisible = process.env.CFCOACH_CF_ALLOW_VISIBLE === '1';
+  const hiddenOnly = !allowVisible || process.env.CFCOACH_CF_HIDDEN_ONLY === '1';
+  log('取题 ' + refArg + '：起应用内嵌浏览器（'
+    + (hiddenOnly ? '只允许隐藏窗口，过不了挑战即失败' : '隐藏窗口 → 过不了挑战再用可见窗口')
+    + '，可能要 10–60 秒）');
   let fd = null;
   let child = null;
   try {
@@ -111,6 +118,7 @@ function fetchProblem(ref, opts) {
         CHATBOX_SMOKE: '1',            // 跳过单实例锁：用户的应用开着也能取题
         CHATBOX_CF_API_TEST: refArg,
         CHATBOX_CF_JSON: jsonFile,
+        ...(hiddenOnly ? { CFCOACH_CF_HIDDEN_ONLY: '1' } : {}),
         ...(o.debug ? { CFCOACH_DEBUG_EDITORIAL: '1' } : {})
       }),
       // 输出重定向到文件（不是管道）：受限环境里管道读子进程会被拒，且 GUI 版 exe 没有控制台
@@ -132,6 +140,15 @@ function fetchProblem(ref, opts) {
       try { if (fd != null) fs.closeSync(fd); } catch { /* ignore */ }
       try { if (child && !exited) child.kill(); } catch { /* ignore */ }
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+      // 失败时把"为什么没退到可见窗口"说清楚：默认就是不让它弹可见窗口（那条路会把整机拖到黑屏）
+      if (r && r.ok === false && hiddenOnly && !/CFCOACH_CF_ALLOW_VISIBLE/.test(String(r.error || ''))) {
+        r = Object.assign({}, r, {
+          error: String(r.error || '取题失败')
+            + '｜本次只允许隐藏窗口（工作台抓题默认如此：可见取题窗口实测会把整机拖到黑屏）。'
+            + '确实需要可见窗口时设 CFCOACH_CF_ALLOW_VISIBLE=1，并建议同时设 CFCOACH_CF_SAFE_GPU=1；'
+            + '更稳的办法是用"导应用缓存"把题面/题解导进来，不必联网取题。'
+        });
+      }
       resolve(Object.assign({ ms: Date.now() - t0 }, r));
     };
     child.on('exit', () => {
