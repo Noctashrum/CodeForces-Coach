@@ -362,6 +362,21 @@ never inferred from a blocked or failed fetch.
 When a fetch fails, the app opens a dialog that names the reason — no such problem / blocked by anti-bot / fetch
 failed — and offers two buttons: open the problem in the browser, or paste the statement yourself.
 
+**Safety switches for the fetch window (off by default — normal behaviour is unchanged).** The embedded fetch window
+puts a real window on screen and runs the Cloudflare challenge inside it; its timers and rendering are deliberately
+*not* throttled (a throttled window never passes the challenge and re-triggers it forever). The price is a GPU-heavy
+page: on at least one machine this **froze the whole device, blacked out the screen, reported a display-adapter error
+and required a reboot**. Two switches exist for that:
+
+| Environment variable | What it does |
+| --- | --- |
+| `CFCOACH_CF_HIDDEN_ONLY=1` | Fetch with the **hidden window only**; never show a visible window. If the hidden window cannot pass the challenge the fetch fails honestly (the error names the switch that blocked it). |
+| `CFCOACH_CF_SAFE_GPU=1` | Call `app.disableHardwareAcceleration()` before ready, so the challenge page renders in software instead of risking a driver reset. Can be combined with the one above. |
+
+The ablation workbench's "fetch problem" ships `CFCOACH_CF_HIDDEN_ONLY=1` **by default** — that is the entry point
+that took the machine down; set `CFCOACH_CF_ALLOW_VISIBLE=1` if you really want the visible window. Judging
+(`ablation/rejudge.js`) only compiles and runs C++/Python and never starts a browser, so it is unaffected.
+
 ---
 
 ## Configuration highlights

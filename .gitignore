@@ -43,6 +43,8 @@ profile-log.jsonl
 .probe/*.json
 .probe/*.har
 .probe/*.log
+# 验证日志的子目录（`.probe/*.log` 只匹配一层，e2e/判分/打包日志都写在这里）
+.probe/logs/
 .probe/cookies*
 .cf-dump/
 smoke.png

@@ -132,6 +132,13 @@ function fetchHtmlViaBrowserNow(url, opts) {
   const o = opts || {};
   return new Promise((resolve, reject) => {
     if (!CF_HOST_RE.test(url)) { reject(new Error('仅允许抓取 codeforces.com 页面')); return; }
+    // 可见窗口是整机黑屏的嫌疑入口：设了 CFCOACH_CF_HIDDEN_ONLY=1 就**永不**走到那一步。
+    if (o.visible && CF_HIDDEN_ONLY) {
+      reject(new Error('取题已设为只允许隐藏窗口（CFCOACH_CF_HIDDEN_ONLY=1）：'
+        + '可见取题窗口会把整机拖到黑屏（实测两次），因此不再弹出。'
+        + '需要可见窗口时去掉该环境变量（或设 CFCOACH_CF_ALLOW_VISIBLE=1 用工作台抓题）。'));
+      return;
+    }
     let settled = false;
     let deadline = null;
     const wanted = url.split('?')[0];
@@ -431,6 +438,29 @@ try {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 } catch (e) { /* ignore */ }
 
+/**
+ * 取题窗口的**安全开关**（默认都不开，不改变正常行为）。
+ *
+ * 为什么要（2026-10-08 用户实测，两次）：跑工作台"抓题"时**整机会卡死、屏幕黑掉、报
+ * "显示设备出错"，必须重启机器**。判分链路已排除（`ablation/judge.js` 只编译运行 C++/Python，
+ * 不碰浏览器）；唯一会起 Chromium 的就是取题窗口。最合理的解释：Cloudflare 挑战页是 GPU 重的
+ * 页面（离屏 canvas / WebGL 指纹探测），在部分显卡驱动上直接把 GPU 打到 TDR ——
+ * 驱动复位失败就表现为"显示设备出错 + 整机黑屏"。
+ *
+ *   · CFCOACH_CF_HIDDEN_ONLY=1  取题**只用隐藏窗口**，永不弹可见窗口（过不了挑战就如实失败）。
+ *   · CFCOACH_CF_SAFE_GPU=1     **关闭硬件加速**（必须在 app ready 之前设置），挑战页走软件渲染。
+ * 两个可以同时开（最保守）。工作台的"抓题"入口默认给第一个（见 ablation/lib/cffetch.js）。
+ */
+const CF_HIDDEN_ONLY = process.env.CFCOACH_CF_HIDDEN_ONLY === '1';
+if (process.env.CFCOACH_CF_SAFE_GPU === '1') {
+  try {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch('disable-gpu-compositing');
+    app.commandLine.appendSwitch('disable-gpu-rasterization');
+    console.log('[cf] CFCOACH_CF_SAFE_GPU=1：已关闭硬件加速（取题窗口走软件渲染），避免把显卡驱动打到复位');
+  } catch (e) { /* ignore */ }
+}
+
 /* ---------------- CF 会话预热（"冷启动第一条必失败"的根治） ---------------- */
 
 /**
@@ -493,6 +523,11 @@ async function warmCfSession(win) {
 }
 
 function ensureCfWindow(visible) {
+  if (visible && CF_HIDDEN_ONLY) {
+    // 兜底：任何路径想用可见窗口都被按回隐藏窗口（见 fetchHtmlViaBrowserNow 的同名开关）
+    console.log('[cf] CFCOACH_CF_HIDDEN_ONLY=1：拒绝创建/露出可见抓取窗口，改用隐藏窗口');
+    visible = false;
+  }
   if (cfWindow && !cfWindow.isDestroyed()) {
     // 需要抓取时把窗口**摆在屏内并显示**（showInactive：不抢焦点，但 Chromium 不会再把它
     // 当作被遮挡而节流）——这是 Cloudflare 挑战能跑完的前提。
