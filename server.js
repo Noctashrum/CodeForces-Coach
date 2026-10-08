@@ -1966,7 +1966,7 @@ async function handleChat(req, res) {
                 statement: stmt,
                 question: vo.idea,
                 contract: harness.extractContract(stmt),
-                solCode: workspace.readFile(key, workspace.solName(vo.lang))
+                solCode: workspace.readSolFile(key, vo.lang).code
               });
               send('toolResult', { results: [{ id: 'idea1', name: 'harness_idea', ok: !!idea.viable,
                 summary: (idea.viable ? '该做法可行' : '该做法不可行') + (idea.reason ? '：' + idea.reason : '')
@@ -2337,7 +2337,6 @@ async function handleChat(req, res) {
         const wsKey = workspace.keyFor({ id: conv.id, cfProblem: conv.cfProblem });
         const wsMeta = workspace.loadMeta(wsKey);
         const verified = !!(wsMeta && wsMeta.verification && wsMeta.verification.status === 'ok');
-        const solName = workspace.solName(lang);
         const bruteName = workspace.bruteName(lang);
         let reuse = {};
         let skipChain = false;
@@ -2381,7 +2380,7 @@ async function handleChat(req, res) {
                   callAgent: agentCall,
                   statement, question: userTextFull,
                   contract: harness.extractContract(statement),
-                  solCode: workspace.readFile(wsKey, solName)
+                  solCode: workspace.readSolFile(wsKey, lang).code
                 });
                 send('toolResult', { results: [{ id: 'id', name: 'harness_idea', ok: !!idea.viable,
                   summary: (idea.viable ? '该做法可行' : '该做法不可行') + (idea.reason ? '：' + idea.reason : '')
