@@ -2052,8 +2052,8 @@
       'degraded-brute': ['warn', '⚠ 降级：交付暴力解']
     };
     const st = v ? (statusMap[v.status] || ['warn', v.status || '未知']) : null;
-    // P0：对拍被截断 / 题解没过样例时不许显示成"✓ 对拍通过"——部分验证必须看得见。
-    if (v && v.status === 'ok' && v.scopeComplete === false) st[1] = '◐ 部分验证';
+    // P0：对拍被截断 / 题解没过样例 / 交付前最大规模计时没过时不许显示成"✓ 对拍通过"——部分验证必须看得见。
+    if (v && v.status === 'ok' && (v.scopeComplete === false || v.claimVerified === false)) st[1] = '◐ 部分验证';
     let html = '<div class="pp-card" data-pp-ws><div class="pp-sec-title">🧪 验证工作区'
       + (st ? '<span class="pp-ws-status ' + st[0] + '">' + MD.escapeHtml(st[1]) + '</span>' : '')
       + '</div>';
