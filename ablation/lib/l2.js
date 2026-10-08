@@ -205,7 +205,11 @@ async function runL2(ctx) {
     rec.toolsUsed = Object.keys(byRole);
     rec.verification = v;
     rec.verificationStatus = v ? v.status : null;
-    rec.assertedVerified = !!(v && v.status === 'ok');
+    // P0-⑤（2026-10-09）：**"链声称已验证"必须与"验证范围完整"是同一件事**。
+    //   原来只看 status==='ok'，于是库里出现 `assert=true` 而 `scope=false` 的假自信格子
+    //   （2241B/2247B/1978D/1978E/2252F）。现在优先读 harness 新给的 claimVerified；
+    //   老记录（没有该字段）回落到 status==='ok'，保持历史可比。
+    rec.assertedVerified = v ? (v.claimVerified != null ? v.claimVerified === true : v.status === 'ok') : false;
     rec.scopeComplete = v ? (v.scopeComplete !== false) : false;
     rec.delivered = v ? (v.delivered || null) : null;
     rec.solRollback = v ? !!v.solRollback : false;

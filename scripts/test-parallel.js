@@ -863,6 +863,74 @@ const callAgent = async (opts) => {
       docAsks);
   }
 
+  /* ---------------- 交付前性能闸：算法对但最大规模超时的题，不许说"已验证" ----------------
+   * 真实丢分（两机消融 + 14 题对照）：2247D2 与 oracle 逐 token 相同但最大档 7.33× 于 oracle、
+   * 2250C 交付的代码连样例都超时；我们的链只在小规模对拍，从不按题面真实上限计时。
+   * 这里用一条**写着官方时限**的题面 + 一个"只在大 n 慢"的题解验证两条：
+   *   ① 超时 → claimVerified=false + 轨迹 perf-gate-slow；② 不超时 → perf-gate-pass + 仍为 true。 */
+  console.log('\nparallel: 交付前性能闸（按题面上限计时一次）');
+  {
+    const oldGateMaxN = process.env.CFCOACH_PERF_GATE_MAXN;
+    const oldGateFactor = process.env.CFCOACH_PERF_GATE_FACTOR;
+    process.env.CFCOACH_PERF_GATE_MAXN = '200';   // 真实上限 2·10^5，测试里缩到 200（秒级完成）
+    process.env.CFCOACH_PERF_GATE_FACTOR = '2';
+    try {
+      const GATE_STATEMENT = STATEMENT + '\n\ntime limit per test: 1 second\nmemory limit per test: 256 megabytes';
+      // 生成器按 argv[1]（规模档）产数据：性能闸会拿 maxN=200 要一组数据。
+      // 注意：大规模档必须**确定性地**给满规模（否则"最大规模超时"这条断言会随机不触发）。
+      const GATE_GEN = [
+        'import random, sys',
+        'm = int(sys.argv[1]) if len(sys.argv) > 1 else 8',
+        'n = m if m > 8 else random.randint(1, max(1, m))',
+        'print(1)',
+        'print(n)',
+        'print(*[random.randint(0, 6) for _ in range(n)])'
+      ].join('\n');
+      // 只在大 n 慢（小数据完全正确）——"算法对、最大规模超时"的最小复现
+      const GATE_SLOW_SOL = SOL
+        .replace('import sys, heapq', 'import sys, heapq, time')
+        .replace('    n = int(d[p]); p += 1', '    n = int(d[p]); p += 1\n    if n > 50: time.sleep(6)');
+      const mkGateAgent = (sol) => async (opts) => {
+        const sys = String(opts.system || '');
+        if (sys.indexOf('【题解 Agent】') >= 0) return '```python\n' + sol + '\n```';
+        if (sys.indexOf('【暴力 Agent】') >= 0) return '```python\n' + BRUTE + '\n```';
+        if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + GATE_GEN + '\n```';
+        return callAgent(opts);
+      };
+      const runGate = (wsKey, sol) => harness.runPipeline({
+        conv: { id: wsKey, title: '性能闸' },
+        lang: 'python', intent: 'full', statement: GATE_STATEMENT,
+        samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+        workspace, wsKey,
+        callAgent: mkGateAgent(sol), tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+        emit: () => {}, log: () => {}
+      });
+      const resSlow = await runGate('perfgate-slow', GATE_SLOW_SOL);
+      const trajSlow = (resSlow.trajectory || []).map((t) => t.kind).join(',');
+      const vSlow = resSlow.verification || {};
+      ok('性能闸：最大规模超时 → 轨迹留证 perf-gate-slow，且不许声称"已验证"',
+        /perf-gate-slow/.test(trajSlow) && vSlow.status === 'ok'
+        && vSlow.claimVerified === false && vSlow.scopeComplete === false,
+        { traj: trajSlow, status: vSlow.status, claim: vSlow.claimVerified, scope: vSlow.scopeComplete });
+      ok('性能闸：覆盖范围如实写明"最大规模计时没过"（讲解据此降级）',
+        /最大规模/.test(String(vSlow.scopeNote || '')) && /超过|超时/.test(String(vSlow.scopeNote || '')),
+        String(vSlow.scopeNote || '').slice(0, 200));
+
+      const resFast = await runGate('perfgate-pass', SOL);
+      const trajFast = (resFast.trajectory || []).map((t) => t.kind).join(',');
+      const vFast = resFast.verification || {};
+      ok('性能闸：不超时 → 轨迹 perf-gate-pass，claimVerified 仍为 true',
+        /perf-gate-pass/.test(trajFast) && vFast.status === 'ok'
+        && vFast.claimVerified === true && vFast.scopeComplete === true,
+        { traj: trajFast, status: vFast.status, claim: vFast.claimVerified, scope: vFast.scopeComplete });
+    } finally {
+      if (oldGateMaxN === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN;
+      else process.env.CFCOACH_PERF_GATE_MAXN = oldGateMaxN;
+      if (oldGateFactor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR;
+      else process.env.CFCOACH_PERF_GATE_FACTOR = oldGateFactor;
+    }
+  }
+
   /**
    * 多题并行 = 不同题号真的同时跑 + 同一道题绝不并发改同一批文件。
    * 这两条由两个底座保证：lib/serialqueue.js（串行队列）与 workspace.withKeyLock（按 key 分链）。
