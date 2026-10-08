@@ -836,7 +836,7 @@ async function main() {
       const child = spawn(process.execPath, [
         path.join(__dirname, 'serve.js'), '--port', String(freePort), '--root', uiRoot,
         '--base-url', mock.url, '--api-key', 'mock', '--model', 'mock-gpt-4'
-      ], { stdio: 'ignore' });
+      ], { windowsHide: true, stdio: 'ignore' });
       const base = 'http://127.0.0.1:' + freePort;
       let up = null;
       try {

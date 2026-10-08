@@ -27,7 +27,7 @@ fs.mkdirSync(testData, { recursive: true });
 
 console.log('[smoke] 目标: ' + electronExe + (packaged ? '' : ' ' + ROOT));
 console.log('[smoke] 测试数据目录: ' + testData);
-const child = spawn(electronExe, appArg, {
+const child = spawn(electronExe, appArg, { windowsHide: true,
   env: Object.assign({}, process.env, { CHATBOX_SMOKE: '1', CHATBOX_DATA_DIR: testData }),
   stdio: 'inherit',
   windowsHide: false

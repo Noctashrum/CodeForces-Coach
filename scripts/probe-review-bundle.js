@@ -34,12 +34,12 @@ function getJson(url, timeoutMs) {
 }
 
 (async () => {
-  const proc = spawn(EXE, [], { cwd: path.dirname(EXE), stdio: 'ignore' });
+  const proc = spawn(EXE, [], { windowsHide: true, cwd: path.dirname(EXE), stdio: 'ignore' });
   let port = 0;
   for (let i = 0; i < 40 && !port; i++) {
     await new Promise((r) => setTimeout(r, 1500));
     try {
-      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { encoding: 'utf8' });
+      const out = execSync('powershell -NoProfile -Command "(Get-NetTCPConnection -OwningProcess ' + proc.pid + ' -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).LocalPort"', { windowsHide: true, encoding: 'utf8' });
       port = parseInt(String(out).trim(), 10) || 0;
     } catch (e) { /* 等 */ }
   }
