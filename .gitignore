@@ -52,6 +52,8 @@ smoke.png
 # Ablation experiment output: raw model answers, transcripts and the token bill.
 # Inputs (problem list, prompts, harness code) are tracked; results are not.
 ablation/out/
+# 尺子的 special judge 是**输入**（ablation/checker/<题号>.cpp 入库），但编译缓存不是。
+ablation/checker/.build/
 
 # Diagnostics handed over for review. A bundle tells one machine's story and its
 # file name carries that machine's hostname (by design — see lib/diagbundle.js);

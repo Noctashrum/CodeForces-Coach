@@ -21,7 +21,9 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFileSync, spawnSync } = require('child_process');
 const runner = require('../../lib/runner');
 const statementLib = require('../../lib/statement');
 
@@ -397,6 +399,144 @@ async function genCaseBig(arena, tier, valueCap, opts) {
   return { g: null, sc: null, tries, err: lastErr };
 }
 
+/* ------------------------------------------------------- checker（special judge）
+ * 多解题（合法答案不唯一）的终极判据是 checker：给它「输入 / 选手输出 / 标尺答案」三份文件，
+ * 它说合法就是 AC，说不合法就是 WA —— 这比"两边文本一样"强得多，也是 2257C / 2267B / 2250F
+ * 这些格子从"不可判"变成"可判"的唯一办法。
+ *
+ * 纪律（都为了让判分可信，而不是为了让候选好过）：
+ *   ① checker 必须先**自检**：拿官方样例答案同时当"选手输出"与"标尺答案"喂进去，必须判 AC。
+ *      自检不过 → 这把 checker 不可信，本次直接忽略它（记 checker.trusted=false），回落 special-judge。
+ *      宁可不可判，也不拿坏 checker 判候选的错。
+ *   ② checker 自己跑挂/超时 → 不判 WA，记下原因并回落 special-judge（不可判）。
+ *   ③ 候选在这一档超时/跑挂，先按 TLE/RE 走（那是"慢"与"崩"，不是"答案不合法"）。
+ *   ④ 退出码按 testlib 约定读：0=OK、1=WA、2=PE，**其它（含 3=FAIL）都算"checker 没给出结论"**
+ *      → 回落 special-judge。元宝的 checker 会在"jury 不是最优"时返回 3：那是标尺的锅，不是候选的锅。
+ */
+
+/** 找这道题的 checker：limits.json 的 `checker` 字段（最权威）→ <storeDir>/checker/<id>.* → ablation/checker/<id>.* */
+function resolveChecker(storeDir, problem, overrides) {
+  const id = problem && problem.id;
+  if (!id) return null;
+  const exts = ['.py', '.exe', '.cpp', '.cc', '.cxx'];
+  const ov = (overrides || {})[problem.id] || {};
+  const cands = [];
+  if (ov.checker) {
+    const f = path.isAbsolute(ov.checker) ? ov.checker : path.resolve(storeDir || '.', ov.checker);
+    cands.push({ file: f, source: 'override' });
+  }
+  const dirs = [];
+  if (storeDir) { dirs.push({ dir: path.join(storeDir, 'checker'), source: 'store' }); dirs.push({ dir: storeDir, source: 'store' }); }
+  dirs.push({ dir: path.join(__dirname, '..', 'checker'), source: 'repo' });
+  for (const d of dirs) for (const ext of exts) cands.push({ file: path.join(d.dir, id + ext), source: d.source });
+  for (const c of cands) {
+    let st = null;
+    try { st = fs.statSync(c.file); } catch (e) { st = null; }
+    if (!st || !st.isFile()) continue;
+    const ext = path.extname(c.file).toLowerCase();
+    return { file: c.file, lang: ext === '.py' ? 'python' : (ext === '.exe' ? 'exe' : 'cpp'), source: c.source };
+  }
+  return null;
+}
+
+/** 准备 checker：.cpp 编译一次（按 mtime 缓存到 .build/），.py / .exe 直接用 */
+function buildChecker(ck, opts) {
+  if (!ck) return { ok: false, error: 'no-checker' };
+  if (ck.lang !== 'cpp') return { ok: true, exe: ck.file };
+  const buildDir = (opts && opts.buildDir) || path.join(path.dirname(ck.file), '.build');
+  try { fs.mkdirSync(buildDir, { recursive: true }); } catch (e) { /* 建不出来就让编译自己报错 */ }
+  const exe = path.join(buildDir, path.basename(ck.file).replace(/\.[^.]+$/, '') + '.exe');
+  try {
+    if (fs.existsSync(exe) && fs.statSync(exe).mtimeMs >= fs.statSync(ck.file).mtimeMs) return { ok: true, exe, cached: true };
+  } catch (e) { /* 继续编译 */ }
+  const r = spawnSync('g++', ['-O2', '-std=c++17', '-Wl,--stack,268435456', ck.file, '-o', exe], {
+    encoding: 'utf8', timeout: 120000, windowsHide: true
+  });
+  if (r.error) return { ok: false, error: 'g++：' + String(r.error.message || r.error).slice(0, 200) };
+  if (r.status !== 0 || !fs.existsSync(exe)) {
+    const msg = String(r.stderr || r.stdout || '').trim().split(/\r?\n/).slice(0, 3).join(' / ');
+    return { ok: false, error: 'g++ 编译失败（exit ' + r.status + '）：' + msg.slice(0, 300) };
+  }
+  return { ok: true, exe };
+}
+
+/**
+ * 跑一次 checker：三份临时文件 → 退出码判定（0 = 候选合法；1/2 = 候选不合法；
+ * 其它含 3 = FAIL = checker 自己没给出结论，见下方注释）。
+ */
+function runCheckerOnce(built, input, participant, jury, timeoutMs) {
+  let dir = null;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfac-checker-'));
+    const fi = path.join(dir, 'in.txt');
+    const fo = path.join(dir, 'out.txt');
+    const fa = path.join(dir, 'ans.txt');
+    fs.writeFileSync(fi, String(input == null ? '' : input));
+    fs.writeFileSync(fo, String(participant == null ? '' : participant));
+    fs.writeFileSync(fa, String(jury == null ? '' : jury));
+    const isPy = /\.py$/i.test(built.exe);
+    const cmd = isPy ? (process.platform === 'win32' ? 'python' : 'python3') : built.exe;
+    const argv = isPy ? [built.exe, fi, fo, fa] : [fi, fo, fa];
+    const r = spawnSync(cmd, argv, { cwd: dir, encoding: 'utf8', timeout: timeoutMs || 15000, windowsHide: true });
+    const out = String((r.stdout || '') + '\n' + (r.stderr || '')).trim();
+    const detail = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(-2).join(' | ').slice(0, 220);
+    if (r.error) return { ok: false, error: 'checker 起不来：' + String(r.error.message || r.error).slice(0, 200) };
+    if (r.status === null || r.signal) return { ok: false, error: 'checker 超时或被信号终止' + (detail ? '：' + detail : '') };
+    // 退出码约定（testlib：0=OK / 1=WA / 2=PE / 3=FAIL）：
+    //   0 → 候选合法；1 / 2 → 候选不合法（WA / PE）；**其它（含 3=FAIL）→ checker 自己没给出可用结论** ⇒
+    //   不能算候选的错，调用方必须回落 special-judge（2257C 的 checker 在"jury 不是最优"时会返回 3，
+    //   那是标尺（我们的 oracle）不行，不是候选不行 —— 这一条不区分开就会把标尺的锅扣到候选头上）。
+    if (r.status === 0) return { ok: true, ac: true, exit: 0, detail: detail || 'OK' };
+    if (r.status === 1 || r.status === 2) {
+      return { ok: true, ac: false, exit: r.status, verdict: r.status === 2 ? 'PE' : 'WA', detail: detail || ('exit ' + r.status) };
+    }
+    return { ok: false, error: 'checker 自己没给出可用结论（exit ' + r.status + '）' + (detail ? '：' + detail : '') };
+  } catch (e) {
+    return { ok: false, error: 'checker 运行异常：' + String(e && e.message || e).slice(0, 200) };
+  } finally {
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* 只降级 */ } }
+  }
+}
+
+/**
+ * 从 `arena.compare` 的一次运行结果里取**完整输出**。
+ * `compare` 返回的 `output` 是给报告用的截断版（1500 字符），checker 必须吃 `full`；
+ * 没有 `full`（老的 runner）时退回 `output`，宁可像以前那样"checker 说 jury 太短"也不要崩。
+ */
+function fullOut(r) {
+  if (!r) return '';
+  return r.full != null ? String(r.full) : String(r.output || '');
+}
+
+/**
+ * 从样例结果里取**完整**的 input / actual / expected（`arena.runSamples` 的 `*Full` 字段）。
+ * 官方样例也可能输出很长（截断版只有 800 字符）→ 拿截断版喂 checker 会把对的判成
+ * "output ended at line 1" 这类假 PE。
+ */
+function sampleFull(r, which) {
+  const k = which + 'Full';
+  if (r && r[k] != null) return String(r[k]);
+  return String((r && r[which]) || '');
+}
+
+/** checker 自检：官方样例答案当选手输出必须 AC；样例全过才算可信 */
+function checkerSelfTest(built, samples) {
+  const list = (samples || []).filter((s) => s && s.input != null && s.output != null);
+  if (!list.length) return { trusted: true, tested: 0, note: '没有官方样例可自检：按可信处理，但无法自证' };
+  const failures = [];
+  for (const s of list) {
+    const r = runCheckerOnce(built, s.input, s.output, s.output, 15000);
+    if (!r.ok || !r.ac) {
+      failures.push({
+        input: String(s.input).replace(/\s+/g, ' ').slice(0, 80),
+        why: r.ok ? ('checker 把官方答案判成 WA：' + r.detail) : r.error
+      });
+    }
+  }
+  if (failures.length) return { trusted: false, tested: list.length, failures, note: 'checker 与官方答案矛盾 → 本次忽略它，回落到 special-judge（不可判）' };
+  return { trusted: true, tested: list.length };
+}
+
 /* ------------------------------------------------------------------ 主流程 */
 
 function readPart(part) {
@@ -451,6 +591,25 @@ async function runRuler(opts) {
       ? !!statementLib.looksSpecialJudge(problem && problem.statement)
       : false);
   base.specialJudge = special;
+  // 多解题的终极判据：checker（有就判得动；没有就只能 special-judge = 不可判）
+  let checkerUsable = null;
+  if (special && !o.noChecker) {
+    const ck = o.checker === undefined ? resolveChecker(o.storeDir, problem, overrides) : o.checker;
+    if (ck) {
+      const built = buildChecker(ck, { buildDir: o.checkerBuildDir });
+      if (!built.ok) {
+        base.checker = { file: ck.file, lang: ck.lang, source: ck.source, trusted: false, note: 'checker 准备失败：' + built.error };
+      } else {
+        const st = checkerSelfTest(built, problem.samples);
+        base.checker = {
+          file: ck.file, lang: ck.lang, source: ck.source,
+          trusted: !!st.trusted, selfTested: st.tested || 0, note: st.note || null
+        };
+        if (st.failures) base.checker.selfTestFailures = st.failures;
+        if (st.trusted) checkerUsable = built;
+      }
+    }
+  }
   if (!code.trim()) return Object.assign(base, { cfac: false, verdict: 'no-code' });
   const oracle = readPart(problem.oracle);
   if (!oracle) return Object.assign(base, { cfac: false, verdict: 'no-oracle' });
@@ -482,6 +641,29 @@ async function runRuler(opts) {
       // 多解题：样例对不上 ≠ 错（题面允许任意合法答案）→ 样例关不作为判错依据，继续往下判
       samples.verdict = 'special-judge';
       samples.note = '这题是多解题：样例对不上不能当判错依据（要判得靠 checker）';
+      // 有可信 checker 时，样例只有一条合法答案也不是问题：让 checker 判候选输出**合不合法**
+      if (checkerUsable) {
+        const fails = smp.results.filter((r) => r.verdict !== 'AC' && r.verdict !== 'OK');
+        const judged = [];
+        for (const r of fails.slice(0, 3)) {
+          const ck = runCheckerOnce(checkerUsable, sampleFull(r, 'input'), sampleFull(r, 'actual'), sampleFull(r, 'expected'), 30000);
+          judged.push({ index: r.index, ok: ck.ok, ac: ck.ok ? !!ck.ac : undefined, detail: ck.ok ? ck.detail : ck.error });
+        }
+        samples.checker = judged;
+        if (judged.length && judged.every((j) => j.ok && j.ac)) {
+          samples.verdict = 'AC';
+          samples.note = '多解题：checker 判定官方样例上的输出合法（与官方答案文本不同不算错）';
+        } else if (judged.length && judged.every((j) => j.ok && !j.ac)) {
+          base.checker = Object.assign({}, base.checker, { decided: 'sample-WA' });
+          return Object.assign(base, {
+            cfac: false, verdict: 'sample-WA', samples,
+            detail: 'checker 判定候选输出在官方样例上不合法（这题是多解题，所以这里靠 checker 而不是文本比对）'
+          });
+        } else {
+          samples.note += '；checker 在样例上没给出可用结论（'
+            + judged.map((j) => '样例' + j.index + '：' + (j.ok ? (j.ac ? 'AC' : 'WA') : '跑不动')).join('、') + '）';
+        }
+      }
     }
 
     // ② 多档规模随机对拍（与外部 AC 提交比）
@@ -528,7 +710,24 @@ async function runRuler(opts) {
           diffs[diffs.length - 1].detail = String(c.b.err || '').slice(0, 200);
           break;
         }
-        // 多解题 + 没有 checker：两边都可能是对的 → 这一格不可判，别冒充候选错（与老判分同一立场）
+        // 有可信 checker：答案形态不同不算错，让 checker 判候选输出合不合法
+        if (checkerUsable) {
+          // 必须用 full（未截断）输出：`output` 被截到 1500 字符，大输出会被 checker 判成
+          // "jury output is too short" → 本来能判的格子退回"不可判"（2026-10-10 实测 2257C tier 2000）。
+          const ck = runCheckerOnce(checkerUsable, picked.g.input, fullOut(c.b), fullOut(c.a), 30000);
+          const row = diffs[diffs.length - 1];
+          if (ck.ok && ck.ac) { row.status = 'checker-ac'; row.checker = 'accept'; continue; }
+          if (ck.ok && !ck.ac) {
+            row.status = 'checker-wa';
+            row.checker = 'reject';
+            row.detail = 'checker 判定候选输出不合法：' + ck.detail;
+            diffVerdict = 'WA';
+            break;
+          }
+          row.checker = 'error';
+          row.checkerError = ck.error;
+        }
+        // 多解题 + 没有（可信）checker：两边都可能是对的 → 这一格不可判，别冒充候选错（与老判分同一立场）
         diffVerdict = special ? 'special-judge' : 'WA';
         break;
       }
@@ -543,7 +742,13 @@ async function runRuler(opts) {
       };
       if (diffVerdict === 'special-judge') {
         out.diffUnreliable = true;
-        out.detail = '对拍不一致，但这题是多解题且没有 checker：两边都可能是对的 → 这一格不可判';
+        // 文案必须区分"没有 checker"和"有 checker 但它自己没给出结论"：
+        // 后者是我们标尺侧的问题（例如 jury 输出被截断 / checker 认为 jury 不是最优），
+        // 写成"没有 checker"会让人以为这题压根没救 —— 修起来的方向完全不同。
+        const bad = diffs.find((d) => d.checker === 'error');
+        out.detail = bad
+          ? '对拍不一致，但这题是多解题且 checker 自己没给出结论（' + String(bad.checkerError || '').slice(0, 200) + '）→ 这一格不可判'
+          : '对拍不一致，但这题是多解题且没有 checker：两边都可能是对的 → 这一格不可判';
       } else if (diffVerdict === 'TLE') {
         out.detail = '候选代码在这一档超出时限（' + limits.timeLimitMs + 'ms）→ TLE，不是答案错';
       } else if (diffVerdict === 'RE') {
@@ -630,17 +835,37 @@ async function runRuler(opts) {
     maxScale.same = same;
     maxScale.ratioToOracle = oracleRun.timeMs ? Number((solRun.timeMs / Math.max(1, oracleRun.timeMs)).toFixed(2)) : null;
     if (!same) {
-      if (special) {
+      // 多解题：形态不同但 checker 说合法 → 与 same 等价，继续走"跑得动 + 时间限"那两关
+      let checkerAccepted = false;
+      if (special && checkerUsable) {
+        const ck = runCheckerOnce(checkerUsable, gBig.input, solRun.output, oracleRun.output, 30000);
+        maxScale.checker = ck.ok ? (ck.ac ? 'accept' : 'reject') : 'error';
+        if (ck.ok && ck.ac) checkerAccepted = true;
+        else if (ck.ok && !ck.ac) {
+          base.checker = Object.assign({}, base.checker, { decided: 'WA-at-max' });
+          return Object.assign(base, {
+            cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
+            detail: 'checker 判定候选输出在最大规模上不合法：' + ck.detail
+          });
+        } else {
+          maxScale.checkerError = ck.error;
+        }
+      }
+      if (!checkerAccepted) {
+        if (special) {
+          return Object.assign(base, {
+            cfac: false, verdict: 'special-judge', samples, diffs, maxScale, diffUnreliable: true,
+            detail: '最大规模上答案不一致，但这是多解题'
+              + (checkerUsable ? '且 checker 自己跑不动 → ' : '且没有 checker → ')
+              + '不可判（跑得动/跑不动的实测仍记在 maxScale 里）'
+          });
+        }
         return Object.assign(base, {
-          cfac: false, verdict: 'special-judge', samples, diffs, maxScale, diffUnreliable: true,
-          detail: '最大规模上答案不一致，但这是多解题且没有 checker → 不可判（跑得动/跑不动的实测仍记在 maxScale 里）'
+          cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
+          expected: String(oracleRun.output || '').slice(0, 400),
+          actual: String(solRun.output || '').slice(0, 400)
         });
       }
-      return Object.assign(base, {
-        cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
-        expected: String(oracleRun.output || '').slice(0, 400),
-        actual: String(solRun.output || '').slice(0, 400)
-      });
     }
     // 跑得动、答案对、且在真实时限内
     if (solRun.timeMs > limits.timeLimitMs) {
@@ -700,6 +925,10 @@ module.exports = {
   flattenStatement,
   scanStatement,
   loadOverrides,
+  resolveChecker,
+  buildChecker,
+  runCheckerOnce,
+  checkerSelfTest,
   resolveLimits,
   resolveScale,
   resolveGen,
