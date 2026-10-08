@@ -31,6 +31,7 @@ const problemsLib = require('./lib/problems');
 const ladderLib = require('./lib/ladder');
 const runlog = require('./lib/runlog');
 const judge = require('./judge');
+const ruler = require('./lib/ruler');
 const diagbundle = require('../lib/diagbundle');
 const { startMockLlm } = require('./mockllm');
 const runner = require('../lib/runner');
@@ -989,6 +990,169 @@ async function main() {
       } finally {
         global.fetch = realFetch;
       }
+    }
+
+    // ⑩ 多解题 checker：合法答案不唯一时，只有 checker 能把"不可判"变成"可判"
+    //    （2257C / 2267B / 2250F 就是这类；没有 checker 这尺子只能给 special-judge = 不可判）
+    {
+      const ckRoot = path.join(tmp, 'checker-store');
+      fs.mkdirSync(path.join(ckRoot, 'gen-scale'), { recursive: true });
+      fs.mkdirSync(path.join(ckRoot, 'checker'), { recursive: true });
+      const ckId = 'ck900';
+      const ckStmt = 'The first line contains n (1 ≤ n ≤ 8). The second line contains n distinct integers '
+        + 'a_1, ..., a_n (1 ≤ a_i ≤ 1000). Print any permutation of a_1, ..., a_n. '
+        + 'If there are multiple valid answers, output any one of them.';
+      const ckSamples = [{ input: '3\n1 5 2\n', output: '1 5 2\n' }];
+      // 规模/时限走 limits.json 覆盖，别让题面解析决定（这题的上限就是 n ≤ 8）
+      fs.writeFileSync(path.join(ckRoot, 'limits.json'),
+        JSON.stringify({ [ckId]: { maxN: 8, maxV: 1000, timeLimitMs: 2000 } }, null, 2), 'utf8');
+      // 生成器必须读 argv（不读 → 尺子直接判 gen-weak，规模不可信）
+      fs.writeFileSync(path.join(ckRoot, 'gen-scale', ckId + '.py'), [
+        'import sys, random',
+        'n = int(sys.argv[1])',
+        'vals = random.sample(range(1, 1001), n)',
+        'print(n)',
+        'print(" ".join(map(str, vals)))'
+      ].join('\n') + '\n', 'utf8');
+      const oracleFile = path.join(ckRoot, ckId + '.oracle.cpp');
+      fs.writeFileSync(oracleFile, [
+        '#include <cstdio>',
+        'int main(){int n;if(scanf("%d",&n)!=1)return 0;for(int i=0;i<n;i++){int x;scanf("%d",&x);printf("%d%c",x,i==n-1?10:32);}return 0;}'
+      ].join('\n') + '\n', 'utf8');
+      // 合法但**答案文本与标尺不同**：逆序输出
+      const goodSrc = [
+        '#include <cstdio>',
+        'int a[100005];',
+        'int main(){int n;scanf("%d",&n);for(int i=0;i<n;i++)scanf("%d",&a[i]);',
+        'for(int i=n-1;i>=0;i--)printf("%d%c",a[i],i==0?10:32);return 0;}'
+      ].join('\n') + '\n';
+      // 不合法：把第一个数重复 n 次
+      const badSrc = [
+        '#include <cstdio>',
+        'int a[100005];',
+        'int main(){int n;scanf("%d",&n);for(int i=0;i<n;i++)scanf("%d",&a[i]);',
+        'for(int i=0;i<n;i++)printf("%d%c",a[0],i==n-1?10:32);return 0;}'
+      ].join('\n') + '\n';
+      const checkerFile = path.join(ckRoot, 'checker', ckId + '.cpp');
+      fs.writeFileSync(checkerFile, [
+        '#include <cstdio>',
+        '#include <map>',
+        'int main(int argc,char**argv){',
+        '  if(argc<4){printf("usage: checker in out ans\\n");return 2;}',
+        '  FILE*fi=fopen(argv[1],"r");FILE*fo=fopen(argv[2],"r");',
+        '  if(!fi||!fo){printf("cannot open files\\n");return 2;}',
+        '  int n=0; if(fscanf(fi,"%d",&n)!=1){printf("judge error: bad input\\n");return 2;}',
+        '  std::map<int,int> need, got;',
+        '  for(int i=0;i<n;i++){int x;if(fscanf(fi,"%d",&x)!=1){printf("judge error: bad input\\n");return 2;} need[x]++;}',
+        '  for(int i=0;i<n;i++){int x;if(fscanf(fo,"%d",&x)!=1){printf("WA: expected %d numbers, got %d\\n",n,i);return 1;} got[x]++;}',
+        '  char extra[64];',
+        '  if(fscanf(fo,"%63s",extra)==1){printf("WA: extra token \'%s\'\\n",extra);return 1;}',
+        '  for(std::map<int,int>::iterator it=need.begin();it!=need.end();++it)',
+        '    if(got[it->first]!=it->second){printf("WA: element %d appears %d times, expected %d\\n",it->first,got[it->first],it->second);return 1;}',
+        '  for(std::map<int,int>::iterator it=got.begin();it!=got.end();++it)',
+        '    if(need.count(it->first)==0){printf("WA: element %d not in the input\\n",it->first);return 1;}',
+        '  printf("OK\\n"); return 0;',
+        '}'
+      ].join('\n') + '\n', 'utf8');
+
+      const ckProblem = { id: ckId, statement: ckStmt, samples: ckSamples, oracle: { file: oracleFile, lang: 'cpp' } };
+      const ckOpts = { storeDir: ckRoot, problem: ckProblem, codeLang: 'cpp', tiers: [8], bruteTimeoutMs: 20000, genTimeoutMs: 20000 };
+
+      const rc = ruler.resolveChecker(ckRoot, ckProblem, {});
+      check('尺子：checker 从 <store>/checker/<id>.cpp 找到（source=store / lang=cpp）',
+        !!rc && rc.source === 'store' && rc.lang === 'cpp', JSON.stringify(rc));
+
+      const vGood = await ruler.runRuler(Object.assign({ code: goodSrc }, ckOpts));
+      check('多解题 + 可信 checker：输出合法但文本与标尺不同 → 判 AC（不再是"不可判"）',
+        vGood.cfac === true && vGood.verdict === 'AC',
+        JSON.stringify([vGood.cfac, vGood.verdict, vGood.samples && vGood.samples.verdict, vGood.detail]));
+      check('多解题 checker：先自检（官方答案当选手输出必须 AC），样例关交给 checker 而不是文本比对',
+        !!vGood.checker && vGood.checker.trusted === true && vGood.checker.selfTested === 1
+        && vGood.samples.verdict === 'AC' && (vGood.samples.checker || []).length === 1,
+        JSON.stringify([vGood.checker, vGood.samples]));
+
+      const vBad = await ruler.runRuler(Object.assign({ code: badSrc }, ckOpts));
+      check('多解题 checker：候选输出不合法 → sample-WA（checker 说了算，不许放过）',
+        vBad.cfac === false && vBad.verdict === 'sample-WA'
+        && !!vBad.checker && vBad.checker.decided === 'sample-WA',
+        JSON.stringify([vBad.cfac, vBad.verdict, vBad.detail]));
+
+      const vNo = await ruler.runRuler(Object.assign({ code: goodSrc, checker: null }, ckOpts));
+      check('没有 checker 时不许冒充"候选错"：回落 special-judge（不可判）',
+        vNo.cfac === false && vNo.verdict === 'special-judge' && vNo.diffUnreliable === true,
+        JSON.stringify([vNo.cfac, vNo.verdict, vNo.detail]));
+
+      // 坏 checker：连官方答案都判 WA → 必须忽略它，宁可不可判也不拿它判候选的错
+      const badChecker = path.join(ckRoot, 'checker', ckId + '.always-wa.cpp');
+      fs.writeFileSync(badChecker, '#include <cstdio>\nint main(){printf("WA: always\\n");return 1;}\n', 'utf8');
+      const vUntrust = await ruler.runRuler(Object.assign({
+        code: goodSrc, checker: { file: badChecker, lang: 'cpp', source: 'override' }
+      }, ckOpts));
+      check('checker 自检不过（连官方答案都判 WA）→ trusted=false 且回落 special-judge',
+        vUntrust.cfac === false && vUntrust.verdict === 'special-judge'
+        && !!vUntrust.checker && vUntrust.checker.trusted === false
+        && Array.isArray(vUntrust.checker.selfTestFailures) && vUntrust.checker.selfTestFailures.length === 1,
+        JSON.stringify([vUntrust.verdict, vUntrust.checker]));
+
+      // checker 自己返回 FAIL(3)（例如"jury 不是最优"）→ 那是标尺的锅，不能算候选 WA
+      const failChecker = path.join(ckRoot, 'checker', ckId + '.fail3.cpp');
+      fs.writeFileSync(failChecker, '#include <cstdio>\nint main(){printf("FAIL: jury answer is not optimal\\n");return 3;}\n', 'utf8');
+      const vFail3 = await ruler.runRuler(Object.assign({
+        code: goodSrc, checker: { file: failChecker, lang: 'cpp', source: 'override' }
+      }, ckOpts));
+      check('checker 返回 FAIL(3)：算"checker 没给出结论"→ 回落 special-judge，不许扣到候选头上',
+        vFail3.cfac === false && vFail3.verdict === 'special-judge' && vFail3.checker.trusted === false,
+        JSON.stringify([vFail3.verdict, vFail3.checker]));
+      const builtFail = ruler.buildChecker({ file: failChecker, lang: 'cpp', source: 'override' }, { buildDir: path.join(ckRoot, '.build') });
+      const rFail = ruler.runCheckerOnce({ exe: builtFail.exe }, '3\n1 5 2\n', '1 5 2\n', '1 5 2\n', 10000);
+      check('退出码约定：3(FAIL) 不当"候选 WA"，而是"checker 没给出结论"（1/2 才算候选不合法）',
+        rFail.ok === false && /exit 3/.test(String(rFail.error)), JSON.stringify(rFail));
+
+      // 大输出回归（2026-10-10 真机踩到）：checker 必须吃到**未截断**的输入/输出。
+      //   `arena.compare` 把输出截到 1500、`arena.runSamples` 把 input/expected/actual 截到 800/500，
+      //   于是 2257C 的 tier 2000 被 checker 判成 "FAIL: jury output is too short" → 本来能判的格子退回
+      //   "不可判"（更糟的是样例关：截断的候选输出会被判成假 PE/WA）。这里造一个大输出多解题守住它。
+      const bigRoot = path.join(tmp, 'checker-big-store');
+      fs.mkdirSync(path.join(bigRoot, 'gen-scale'), { recursive: true });
+      fs.mkdirSync(path.join(bigRoot, 'checker'), { recursive: true });
+      const bigId = 'ck910';
+      const bigN = 400;                    // 差分档：400 个数（≈6 位）→ 输出 > 1500 字符，必定被截断
+      const sampleN = 300;                 // 样例关：300 个数 → 输出 > 800 字符（样例截断上限）
+      fs.copyFileSync(checkerFile, path.join(bigRoot, 'checker', bigId + '.cpp'));
+      const bigStatement = 'The first line contains n (1 ≤ n ≤ ' + bigN + '). The second line contains n distinct '
+        + 'integers a_1, ..., a_n (1 ≤ a_i ≤ 1000000). Print any permutation of a_1, ..., a_n.';
+      const sampleVals = Array.from({ length: sampleN }, (_, i) => String(1000000 - i * 7));
+      const bigSamples = [{ input: sampleN + '\n' + sampleVals.join(' ') + '\n', output: sampleVals.join(' ') + '\n' }];
+      fs.writeFileSync(path.join(bigRoot, 'limits.json'),
+        JSON.stringify({ [bigId]: { maxN: bigN, maxV: 1000000, timeLimitMs: 5000 } }, null, 2), 'utf8');
+      fs.writeFileSync(path.join(bigRoot, 'gen-scale', bigId + '.py'), [
+        'import sys, random',
+        'n = int(sys.argv[1])',
+        'vals = random.sample(range(1, 1000001), n)',
+        'print(n)',
+        'print(" ".join(map(str, vals)))'
+      ].join('\n') + '\n', 'utf8');
+      const bigOracle = path.join(bigRoot, bigId + '.oracle.cpp');
+      fs.writeFileSync(bigOracle, fs.readFileSync(oracleFile, 'utf8'), 'utf8');
+      const bigGood = path.join(bigRoot, bigId + '.good.cpp');
+      fs.writeFileSync(bigGood, goodSrc, 'utf8');
+      const vBig = await ruler.runRuler({
+        code: fs.readFileSync(bigGood, 'utf8'),
+        storeDir: bigRoot, codeLang: 'cpp', tiers: [bigN], bruteTimeoutMs: 40000, genTimeoutMs: 40000,
+        problem: { id: bigId, statement: bigStatement, samples: bigSamples, oracle: { file: bigOracle, lang: 'cpp' } }
+      });
+      const bigRow = (vBig.diffs || [])[0] || {};
+      check('大输出多解题（样例 ' + bigSamples[0].output.length + ' 字符、差分档输出被截断）→ 仍判 AC：checker 拿到的是原文不是截断版',
+        bigSamples[0].output.length > 800 && /已截断/.test(String(bigRow.expected || ''))
+        && vBig.cfac === true && vBig.verdict === 'AC' && vBig.samples.verdict === 'AC',
+        JSON.stringify([bigSamples[0].output.length, String(bigRow.expected || '').length, vBig.cfac, vBig.verdict,
+          vBig.samples && vBig.samples.verdict, vBig.detail]));
+      // 原文能被 checker 读到，但**不许**被顺手写进判词/记录（不可枚举）：
+      const bigSampleRow = (vBig.samples.results || [])[0] || {};
+      check('完整输出只走不可枚举字段：*Full 属性存在（checker 读得到）但不在可枚举键里（不会被写进记录）',
+        ('actualFull' in bigSampleRow) && Object.keys(bigSampleRow).indexOf('actualFull') === -1
+        && JSON.stringify(bigSampleRow).indexOf('actualFull') === -1,
+        JSON.stringify(Object.keys(bigSampleRow)));
     }
 
     run.writeSummary({ selftest: true });
