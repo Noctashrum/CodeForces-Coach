@@ -50,6 +50,21 @@ const MAX_SCALE_TRIES = 4;
  */
 const DEFAULT_ORACLE_MS = 60000;
 const DEFAULT_ORACLE_TRIES = 3;
+/**
+ * 最大档要抽几份数据。生成器是随机的（`random.randint`、洗牌、随机树…），**一份数据只是一次抽样**：
+ * 抽到一份宽容的就能过、抽到一份苛刻的就误杀。产品侧的性能闸已经改成"抽 3 份取最慢"
+ * （docs/why-we-lag-2026-10-09.md §6.9），尺子必须同一口径，否则 CF-AC 判定也会押运气。
+ */
+const DEFAULT_MAX_SCALE_CASES = 3;
+const MAX_SCALE_CASES = 10;
+/**
+ * 对拍档（30/200/2000）每一档也抽几份。同一个道理：一份随机数据只是一次抽样，
+ * 同一格两次重判可能一次 mismatch 一次 same —— 2026-10-10 实测 2257F1 的 200 档：
+ * 老判分记 `diff-WA（200:mismatch）`，抽 3 份最大档重判时同档三次都 same，最后判的是 `slow`。
+ * 判据取"这一档抽的每一份都一致"，抽到错答就照旧立刻判 WA（真 bug 不看运气，是"没有 bug"要看运气）。
+ */
+const DEFAULT_DIFF_CASES = 2;
+const MAX_DIFF_CASES = 10;
 
 /* ------------------------------------------------------------------ 解析 */
 
@@ -672,70 +687,97 @@ async function runRuler(opts) {
     }
 
     // ② 多档规模随机对拍（与外部 AC 提交比）
+    // 每一档抽**若干份**随机数据：一份数据只是一次抽样，同一格两次重判可能一次 mismatch 一次 same
+    // （2026-10-10 实测 2257F1 的 200 档，两次重判结论不同）⇒ 一档多抽几份，判据取"全一致"。
     const tiers = (o.tiers || DIFF_TIERS).slice();
     const diffs = [];
     let diffVerdict = 'AC';
+    const diffCases = Math.max(1, Math.min(MAX_DIFF_CASES, Number(o.diffCases) || DEFAULT_DIFF_CASES));
     for (const tier of tiers) {
-      const picked = await genCaseBig(arena, tier, scale.maxV, { genTimeoutMs: o.genTimeoutMs, tries: o.diffTries || 3 });
-      if (!picked.g) { diffVerdict = 'run-error'; diffs.push({ tier, status: 'gen-error', detail: String(picked.err || '').slice(0, 200) }); break; }
-      if (!picked.sc.ok) { diffVerdict = 'gen-weak'; diffs.push({ tier, status: 'gen-weak', scale: picked.sc, tries: picked.tries }); break; }
-      const c = await arena.compare(picked.g.input, 'brute', 'sol', limits.timeLimitMs);
-      diffs.push({
-        tier,
-        status: c.same ? 'same' : 'mismatch',
-        scale: picked.sc,
-        tries: picked.tries,
-        solMs: c.b && c.b.timeMs,
-        oracleMs: c.a && c.a.timeMs,
-        expected: c.same ? null : c.a.output,
-        actual: c.same ? null : c.b.output
-      });
-      if (!c.same) {
-        // 先把"不是候选的错"分出去，别一律记成 WA（2026-10-09）：
-        //   · 候选在**这一档**超时      → TLE（候选太慢，不是答案错）
-        //   · 候选在这一档跑挂（RE/编译失败）→ RE
-        //   · 标尺（外部 AC 提交）自己跑挂  → oracle-run-error（不可判，不能算候选头上）
-        // 老判分把这三类统统落到 `diff-WA`：2247F 就是这么被记错的 —— 交付码与 oracle 逐 token 相同，
-        // 只是最大规模档 12.1s 撞上 3s 时限，判分却写 `diff-WA`，让人以为"答案是错的"。
-        if (c.a && !c.a.ok) {
-          diffVerdict = 'oracle-run-error';
-          diffs[diffs.length - 1].status = 'oracle-error';
-          diffs[diffs.length - 1].detail = String(c.a.err || '').slice(0, 200);
+      let row = null;
+      let bad = false;
+      for (let k = 1; k <= diffCases && !bad; k++) {
+        const picked = await genCaseBig(arena, tier, scale.maxV, {
+          genTimeoutMs: o.genTimeoutMs,
+          tries: k === 1 ? (o.diffTries || 3) : 1
+        });
+        if (!picked.g) {
+          diffVerdict = 'run-error';
+          row = { tier, cases: k, status: 'gen-error', detail: String(picked.err || '').slice(0, 200) };
+          bad = true;
           break;
         }
-        if (c.b && c.b.timedOut) {
-          diffVerdict = 'TLE';
-          diffs[diffs.length - 1].status = 'timeout';
-          diffs[diffs.length - 1].solMs = c.b.timeMs;
+        if (!picked.sc.ok) {
+          diffVerdict = 'gen-weak';
+          row = { tier, cases: k, status: 'gen-weak', scale: picked.sc, tries: picked.tries };
+          bad = true;
           break;
         }
-        if (c.b && !c.b.ok) {
-          diffVerdict = 'RE';
-          diffs[diffs.length - 1].status = 'run-error';
-          diffs[diffs.length - 1].detail = String(c.b.err || '').slice(0, 200);
-          break;
-        }
-        // 有可信 checker：答案形态不同不算错，让 checker 判候选输出合不合法
-        if (checkerUsable) {
-          // 必须用 full（未截断）输出：`output` 被截到 1500 字符，大输出会被 checker 判成
-          // "jury output is too short" → 本来能判的格子退回"不可判"（2026-10-10 实测 2257C tier 2000）。
-          const ck = runCheckerOnce(checkerUsable, picked.g.input, fullOut(c.b), fullOut(c.a), 30000);
-          const row = diffs[diffs.length - 1];
-          if (ck.ok && ck.ac) { row.status = 'checker-ac'; row.checker = 'accept'; continue; }
-          if (ck.ok && !ck.ac) {
-            row.status = 'checker-wa';
-            row.checker = 'reject';
-            row.detail = 'checker 判定候选输出不合法：' + ck.detail;
-            diffVerdict = 'WA';
+        const c = await arena.compare(picked.g.input, 'brute', 'sol', limits.timeLimitMs);
+        row = {
+          tier,
+          cases: k,
+          status: c.same ? 'same' : 'mismatch',
+          scale: picked.sc,
+          tries: picked.tries,
+          solMs: c.b && c.b.timeMs,
+          oracleMs: c.a && c.a.timeMs,
+          expected: c.same ? null : c.a.output,
+          actual: c.same ? null : c.b.output
+        };
+        if (!c.same) {
+          // 先把"不是候选的错"分出去，别一律记成 WA（2026-10-09）：
+          //   · 候选在**这一档**超时      → TLE（候选太慢，不是答案错）
+          //   · 候选在这一档跑挂（RE/编译失败）→ RE
+          //   · 标尺（外部 AC 提交）自己跑挂  → oracle-run-error（不可判，不能算候选头上）
+          // 老判分把这三类统统落到 `diff-WA`：2247F 就是这么被记错的 —— 交付码与 oracle 逐 token 相同，
+          // 只是最大规模档 12.1s 撞上 3s 时限，判分却写 `diff-WA`，让人以为"答案是错的"。
+          bad = true;
+          if (c.a && !c.a.ok) {
+            diffVerdict = 'oracle-run-error';
+            row.status = 'oracle-error';
+            row.detail = String(c.a.err || '').slice(0, 200);
             break;
           }
-          row.checker = 'error';
-          row.checkerError = ck.error;
+          if (c.b && c.b.timedOut) {
+            diffVerdict = 'TLE';
+            row.status = 'timeout';
+            row.solMs = c.b.timeMs;
+            break;
+          }
+          if (c.b && !c.b.ok) {
+            diffVerdict = 'RE';
+            row.status = 'run-error';
+            row.detail = String(c.b.err || '').slice(0, 200);
+            break;
+          }
+          // 有可信 checker：答案形态不同不算错，让 checker 判候选输出合不合法
+          if (checkerUsable) {
+            // 必须用 full（未截断）输出：`output` 被截到 1500 字符，大输出会被 checker 判成
+            // "jury output is too short" → 本来能判的格子退回"不可判"（2026-10-10 实测 2257C tier 2000）。
+            const ck = runCheckerOnce(checkerUsable, picked.g.input, fullOut(c.b), fullOut(c.a), 30000);
+            if (ck.ok && ck.ac) { row.status = 'checker-ac'; row.checker = 'accept'; bad = false; continue; }
+            if (ck.ok && !ck.ac) {
+              row.status = 'checker-wa';
+              row.checker = 'reject';
+              row.detail = 'checker 判定候选输出不合法：' + ck.detail;
+              diffVerdict = 'WA';
+              break;
+            }
+            row.checker = 'error';
+            row.checkerError = ck.error;
+          }
+          // 多解题 + 没有（可信）checker：两边都可能是对的 → 这一格不可判，别冒充候选错（与老判分同一立场）
+          diffVerdict = special ? 'special-judge' : 'WA';
+          break;
         }
-        // 多解题 + 没有（可信）checker：两边都可能是对的 → 这一格不可判，别冒充候选错（与老判分同一立场）
-        diffVerdict = special ? 'special-judge' : 'WA';
-        break;
       }
+      if (row) {
+        // 这一档抽了几份、其中几份与标尺逐 token 一致（status==='same' 就是全一致）
+        row.sameCases = row.status === 'same' ? row.cases : Math.max(0, Number(row.cases || 0) - 1);
+        diffs.push(row);
+      }
+      if (bad) break;
     }
     if (diffVerdict !== 'AC') {
       const named = diffVerdict === 'special-judge' || diffVerdict === 'TLE' || diffVerdict === 'RE'
@@ -766,124 +808,188 @@ async function runRuler(opts) {
     }
 
     // ③ 最大规模 + 真实时限（这一关才是"CF 上能不能过"）
-    // oracle 先跑（它是标准答案的来源）。oracle 自己跑不完时**换一份随机输入重试**：
-    // 判成 oracle-error-at-max 让候选背锅是不对的（受影响过：ui 的 L1 2268C、cost-sample 的 L2 2268C，
-    // 同一条 oracle 在别的随机抽样上只要几百毫秒 —— 差别全在运气）。
+    // 抽若干份最大档数据、**取最慢的那份**（一份数据只是一次抽样，与产品侧性能闸同源，见 §6.9）。
+    // oracle（外部 AC 提交）先跑：oracle 自己就超过题面时限的那份数据**不是**官方最坏输入
+    // （官方最坏输入上标准答案至少跑得完）⇒ 这份抽样直接**剔掉**、另画一份，不让候选背锅。
+    // 2026-10-10 现场：机器2 的 2247D2，oracle 4.8s vs 时限 2000ms（判出来的 TLE 是尺子自己的锅）。
     const oracleMs = o.oracleMs || DEFAULT_ORACLE_MS;
     const oracleTries = Math.max(1, Number(o.oracleTries) || DEFAULT_ORACLE_TRIES);
-    let pickedBig = null;
-    let gBig = null;
-    let bigScale = null;
-    let oracleRun = null;
-    let oracleAttempts = 0;
+    const wantCases = Math.max(1, Math.min(MAX_SCALE_CASES, Number(o.maxScaleCases) || DEFAULT_MAX_SCALE_CASES));
+    const usable = [];        // 可用抽样：oracle 在真实时限内跑完（≥1 份才判得了）
+    const rejected = [];      // 被剔掉的抽样：oracle 自己就超了题面时限
+    let oracleGiveUp = 0;     // oracle 连宽松预算（oracleMs）都跑不完的抽样
     let oracleLastFail = null;
-    for (let i = 1; i <= oracleTries; i++) {
-      oracleAttempts = i;
-      // 第一次多试几次拿到"真的够大"的数据；重试时只抽一次（要的是**另一份**数据，不是更大的）
-      pickedBig = await genCaseBig(arena, scale.maxN, scale.maxV, {
+    let triesSeen = 0;
+    const drawCap = wantCases + oracleTries;  // 补被剔掉的抽样所允许的额外抽样次数
+    let lastScale = null;
+    let genFail = '';
+    for (let i = 1; i <= drawCap && usable.length < wantCases; i++) {
+      triesSeen = i;
+      // 第一次多试几次拿到"真的够大"的数据；后面对拍重画时只抽一次（要的是**另一份**数据，不是更大的）
+      const pickedBig = await genCaseBig(arena, scale.maxN, scale.maxV, {
         genTimeoutMs: o.genTimeoutMs,
         tries: i === 1 ? (o.maxTries || MAX_SCALE_TRIES) : 1
       });
-      gBig = pickedBig.g;
-      if (!gBig) return Object.assign(base, { cfac: false, verdict: 'gen-error-at-max', samples, diffs, detail: String(pickedBig.err || '').slice(0, 300) });
-      bigScale = Object.assign({}, pickedBig.sc, { tries: pickedBig.tries });
-      if (!bigScale.ok) {
-        return Object.assign(base, { cfac: false, verdict: 'gen-weak-at-max', samples, diffs, maxScale: bigScale });
+      if (!pickedBig.g) {
+        genFail = String(pickedBig.err || '').slice(0, 300);
+        // 一份都没抽到才算"生成器在最大档给不出数据"；已经测过几份就如实记下来、按已测的判
+        if (!usable.length) return Object.assign(base, { cfac: false, verdict: 'gen-error-at-max', samples, diffs, detail: genFail });
+        break;
       }
-      oracleRun = await arena.run('brute', gBig.input, oracleMs);
-      if (oracleRun.ok) break;
-      oracleLastFail = {
-        ok: false, timedOut: !!oracleRun.timedOut,
-        inputTokens: bigScale.tokens, bytes: Buffer.byteLength(gBig.input, 'utf8'),
-        err: String(oracleRun.err || '').slice(0, 300)
-      };
+      const sc = Object.assign({}, pickedBig.sc, { tries: pickedBig.tries });
+      lastScale = sc;
+      if (!sc.ok) {
+        if (!usable.length) return Object.assign(base, { cfac: false, verdict: 'gen-weak-at-max', samples, diffs, maxScale: sc });
+        break;
+      }
+      const orun = await arena.run('brute', pickedBig.g.input, oracleMs);
+      if (!orun.ok) {
+        oracleGiveUp++;
+        oracleLastFail = {
+          ok: false, timedOut: !!orun.timedOut,
+          inputTokens: sc.tokens, bytes: Buffer.byteLength(pickedBig.g.input, 'utf8'),
+          err: String(orun.err || '').slice(0, 300)
+        };
+        continue;
+      }
+      if (Number(orun.timeMs || 0) > Number(limits.timeLimitMs)) {
+        // oracle 都超了时限 ⇒ 这份随机数据比官方最坏输入还狠，剔掉（记下来，报告里要看得见）
+        rejected.push({ oracleMs: Number(orun.timeMs) || 0, inputTokens: sc.tokens, bytes: Buffer.byteLength(pickedBig.g.input, 'utf8') });
+        continue;
+      }
+      const srun = await arena.run('sol', pickedBig.g.input, limits.timeLimitMs);
+      usable.push({
+        input: pickedBig.g.input, sc, oracleMs: orun.timeMs, oracleOut: orun.output,
+        solMs: srun.timedOut ? limits.timeLimitMs : srun.timeMs,
+        timeout: !!srun.timedOut, ok: !!srun.ok, err: String(srun.err || '').slice(0, 300),
+        output: srun.output
+      });
+      if (srun.timedOut) break;   // 已经撞上最坏情形（超时），不必再抽
     }
-    bigScale.oracleAttempts = oracleAttempts;
-    bigScale.oracleBudgetMs = oracleMs;
-    if (!oracleRun || !oracleRun.ok) {
+    const baseScale = Object.assign({}, lastScale || {}, {
+      oracleAttempts: triesSeen,
+      oracleBudgetMs: oracleMs,
+      cases: usable.length,
+      draws: triesSeen,
+      rejectedOracleSlow: rejected.length,
+      oracleGiveUp,
+      genFail
+    });
+    if (!usable.length) {
+      if (rejected.length) {
+        const fastest = Math.min.apply(null, rejected.map((r) => Number(r.oracleMs) || 0));
+        return Object.assign(base, {
+          cfac: false, verdict: 'oracle-over-tl-at-max', samples, diffs, maxScale: baseScale,
+          oracle: { attempts: triesSeen, rejected: rejected.slice(0, 5) },
+          detail: '抽了 ' + rejected.length + ' 份最大档数据，oracle 自己每一份都超了题面时限（最快 ' + fastest
+            + 'ms > 时限 ' + limits.timeLimitMs + 'ms）→ 这些数据比官方最坏输入还狠，这份尺子在这题的最大规模上判不了（不是候选的错）'
+        });
+      }
       return Object.assign(base, {
-        cfac: false, verdict: 'oracle-error-at-max', samples, diffs, maxScale: bigScale,
-        oracle: Object.assign({ attempts: oracleAttempts }, oracleLastFail),
-        detail: '换了 ' + oracleAttempts + ' 份随机数据，oracle 自己在 ' + oracleMs + 'ms 内都没跑完 → 这份尺子在这题的最大规模上不成立，这一格不可判（不是候选的错）'
+        cfac: false, verdict: 'oracle-error-at-max', samples, diffs, maxScale: baseScale,
+        oracle: Object.assign({ attempts: triesSeen }, oracleLastFail),
+        detail: '换了 ' + triesSeen + ' 份随机数据，oracle 自己在 ' + oracleMs + 'ms 内都没跑完 → 这份尺子在这题的最大规模上不成立，这一格不可判（不是候选的错）'
       });
     }
-    const solRun = await arena.run('sol', gBig.input, limits.timeLimitMs);
-    const maxScale = Object.assign({}, bigScale, {
-      oracleMs: oracleRun.timeMs,
+    const msEach = usable.map((u) => u.solMs);
+    const worst = usable.reduce((a, b) => (b.solMs > a.solMs ? b : a));
+    const oracleWorst = usable.reduce((a, b) => (Number(b.oracleMs) > Number(a.oracleMs) ? b : a)).oracleMs;
+    const maxScale = Object.assign({}, baseScale, {
+      oracleMs: oracleWorst,
+      msEach,
+      oracleMsEach: usable.map((u) => Number(u.oracleMs) || 0),
       timeLimitMs: limits.timeLimitMs,
-      // 尺子的自觉：oracle 自己在**这一档**就超了题面时限时，这份数据比官方最坏输入还狠
-      // （官方最坏输入上标准答案至少得跑得完），据此判出来的 TLE/slow 存疑 —— 别让候选为尺子的过重数据背锅，
-      // 也别为它花钱做性能优化。2026-10-10 现场：机器2 的 2247D2，oracle 4.8s vs 时限 2000ms。
-      oracleOverTl: Number(oracleRun.timeMs || 0) > Number(limits.timeLimitMs || 0),
-      measuredMs: solRun.timedOut ? limits.timeLimitMs : solRun.timeMs
+      // 能走到这里的抽样，oracle 都在时限内 ⇒ 这一格没有"过重的数据"在替候选判死刑
+      oracleOverTl: false,
+      overTlRejected: rejected.length,
+      measuredMs: worst.timeout ? limits.timeLimitMs : worst.solMs
     });
-    const same = !solRun.timedOut && solRun.ok && runner.compareOutputs(oracleRun.output, solRun.output).ok;
-    const overTlNote = maxScale.oracleOverTl
-      ? '⚠️ 尺子自证不了这一档比官方最坏输入更轻：oracle 自己就跑了 ' + oracleRun.timeMs + 'ms（> 时限 '
-        + limits.timeLimitMs + 'ms）⇒ 这个判定存疑，别据此断定候选过不了 CF，也别为它做性能优化'
-      : '';
+    const rejectNote = rejected.length
+      ? '（另有 ' + rejected.length + ' 份抽样因为 oracle 自己超时限被剔掉 → maxScale.rejectedOracleSlow）' : '';
+
+    // 逐份核答案：多解题交给 checker；checker 判不了就如实说判不了（不冒充 WA）
+    const sameFlags = [];
+    let checkerRejected = null;
+    let specialUndecided = null;
+    let crashed = null;
+    let mismatchSample = null;
+    for (const u of usable) {
+      if (u.timeout) { sameFlags.push(false); continue; }
+      if (!u.ok) { crashed = u; sameFlags.push(false); continue; }
+      if (runner.compareOutputs(u.oracleOut, u.output).ok) { sameFlags.push(true); continue; }
+      if (!mismatchSample) mismatchSample = u;
+      if (special && checkerUsable) {
+        const ck = runCheckerOnce(checkerUsable, u.input, u.output, u.oracleOut, 30000);
+        u.checker = ck.ok ? (ck.ac ? 'accept' : 'reject') : 'error';
+        if (ck.ok && ck.ac) { sameFlags.push(true); continue; }          // 形态不同但合法 ⇒ 与 same 等价
+        if (ck.ok && !ck.ac) {
+          if (!checkerRejected) checkerRejected = { u, detail: ck.detail };
+          sameFlags.push(false);
+          continue;
+        }
+        maxScale.checkerError = ck.error;                                // checker 自己跑不动 ⇒ 判不了
+        if (!specialUndecided) specialUndecided = { u };
+        sameFlags.push(false);
+        continue;
+      }
+      if (special && !specialUndecided) specialUndecided = { u };
+      sameFlags.push(false);
+    }
+    maxScale.same = sameFlags.every(Boolean);
 
     let verdict;
-    if (solRun.timedOut) {
-      // 轻超时？还是差了数量级？用宽松上限再跑一次 —— 报告要能区分这两件事
-      const retry = await arena.run('sol', gBig.input, o.generousMs || DEFAULT_GENEROUS_MS);
+    const anyTimeout = usable.some((u) => u.timeout);
+    if (anyTimeout) {
+      // 轻超时？还是差了数量级？用宽松上限在**那一份**数据上重跑一次 —— 报告要能区分这两件事
+      const t = usable.filter((u) => u.timeout)[0];
+      const retry = await arena.run('sol', t.input, o.generousMs || DEFAULT_GENEROUS_MS);
       maxScale.generousMs = o.generousMs || DEFAULT_GENEROUS_MS;
       if (retry.ok) {
         verdict = 'slow';
-        maxScale.measuredMs = retry.timeMs;
+        maxScale.measuredMs = Math.max(Number(retry.timeMs) || 0, ...usable.filter((u) => !u.timeout).map((u) => u.solMs));
       } else {
         verdict = 'TLE';
         maxScale.measuredMs = null;
       }
-      maxScale.same = same;
-      maxScale.ratioToOracle = maxScale.measuredMs && oracleRun.timeMs
-        ? Number((maxScale.measuredMs / Math.max(1, oracleRun.timeMs)).toFixed(2)) : null;
-      return Object.assign(base, { cfac: false, verdict, samples, diffs, maxScale, detail: overTlNote });
+      maxScale.ratioToOracle = maxScale.measuredMs && oracleWorst
+        ? Number((maxScale.measuredMs / Math.max(1, oracleWorst)).toFixed(2)) : null;
+      return Object.assign(base, { cfac: false, verdict, samples, diffs, maxScale, detail: rejectNote });
     }
-    if (!solRun.ok) {
+    if (crashed) {
       return Object.assign(base, {
         cfac: false, verdict: 'RE', samples, diffs, maxScale,
-        err: String(solRun.err || '').slice(0, 300)
+        err: String(crashed.err || '').slice(0, 300), detail: rejectNote
       });
     }
-    maxScale.same = same;
-    maxScale.ratioToOracle = oracleRun.timeMs ? Number((solRun.timeMs / Math.max(1, oracleRun.timeMs)).toFixed(2)) : null;
-    if (!same) {
-      // 多解题：形态不同但 checker 说合法 → 与 same 等价，继续走"跑得动 + 时间限"那两关
-      let checkerAccepted = false;
-      if (special && checkerUsable) {
-        const ck = runCheckerOnce(checkerUsable, gBig.input, solRun.output, oracleRun.output, 30000);
-        maxScale.checker = ck.ok ? (ck.ac ? 'accept' : 'reject') : 'error';
-        if (ck.ok && ck.ac) checkerAccepted = true;
-        else if (ck.ok && !ck.ac) {
-          base.checker = Object.assign({}, base.checker, { decided: 'WA-at-max' });
-          return Object.assign(base, {
-            cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
-            detail: 'checker 判定候选输出在最大规模上不合法：' + ck.detail
-          });
-        } else {
-          maxScale.checkerError = ck.error;
-        }
-      }
-      if (!checkerAccepted) {
-        if (special) {
-          return Object.assign(base, {
-            cfac: false, verdict: 'special-judge', samples, diffs, maxScale, diffUnreliable: true,
-            detail: '最大规模上答案不一致，但这是多解题'
-              + (checkerUsable ? '且 checker 自己跑不动 → ' : '且没有 checker → ')
-              + '不可判（跑得动/跑不动的实测仍记在 maxScale 里）'
-          });
-        }
+    maxScale.ratioToOracle = oracleWorst ? Number((maxScale.measuredMs / Math.max(1, oracleWorst)).toFixed(2)) : null;
+    if (checkerRejected) {
+      base.checker = Object.assign({}, base.checker, { decided: 'WA-at-max' });
+      return Object.assign(base, {
+        cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
+        detail: 'checker 判定候选输出在最大规模上不合法：' + checkerRejected.detail + rejectNote
+      });
+    }
+    if (!maxScale.same) {
+      // 走到这里只有两种情形：多解题判不了（specialUndecided），或者普通题答案不一致
+      if (special && specialUndecided) {
         return Object.assign(base, {
-          cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
-          expected: String(oracleRun.output || '').slice(0, 400),
-          actual: String(solRun.output || '').slice(0, 400)
+          cfac: false, verdict: 'special-judge', samples, diffs, maxScale, diffUnreliable: true,
+          detail: '最大规模上答案不一致，但这是多解题'
+            + (checkerUsable ? '且 checker 自己跑不动 → ' : '且没有 checker → ')
+            + '不可判（跑得动/跑不动的实测仍记在 maxScale 里）' + rejectNote
         });
       }
+      const m = mismatchSample || worst;
+      return Object.assign(base, {
+        cfac: false, verdict: 'WA-at-max', samples, diffs, maxScale,
+        expected: String(m.oracleOut || '').slice(0, 400),
+        actual: String(m.output || '').slice(0, 400),
+        detail: rejectNote
+      });
     }
-    // 跑得动、答案对、且在真实时限内
-    if (solRun.timeMs > limits.timeLimitMs) {
-      return Object.assign(base, { cfac: false, verdict: 'slow', samples, diffs, maxScale, detail: overTlNote });
+    // 跑得动、答案对、且在真实时限内（判据取最慢的那份）
+    if (maxScale.measuredMs > limits.timeLimitMs) {
+      return Object.assign(base, { cfac: false, verdict: 'slow', samples, diffs, maxScale, detail: rejectNote });
     }
     return Object.assign(base, { cfac: true, verdict: 'AC', samples, diffs, maxScale });
   } finally {
@@ -919,9 +1025,11 @@ async function runRuler(opts) {
     else if (verdict === 'slow') g.slow++;
     else if (/WA/.test(verdict)) g.wa++;
     else if (verdict === 'RE') g.re++;
+    else if (verdict === 'oracle-over-tl-at-max') g.oracleOverTl++;
     else if (/oracle-error/.test(verdict)) g.oracleBroken++;
     else if (verdict !== 'AC') g.other++;
-    // "存疑 TLE/slow"：尺子的最大档数据比官方最坏输入还狠（oracle 自己就超了时限）⇒ 这条 TLE/slow 不可信
+    // 老口径（10-10 之前）：尺子只抽一份数据，oracle 自己就超了时限时仅标"存疑"但照样判 TLE/slow。
+    // 现在这种抽样会被直接剔掉（oracle-over-tl-at-max），这里保留是为了读旧 store 的判定文件。
     if ((verdict === 'TLE' || verdict === 'slow') && v.maxScale && v.maxScale.oracleOverTl) g.oracleOverTl++;
   }
   return groups;
@@ -935,6 +1043,10 @@ module.exports = {
   DEFAULT_GENEROUS_MS,
   DEFAULT_ORACLE_MS,
   DEFAULT_ORACLE_TRIES,
+  DEFAULT_MAX_SCALE_CASES,
+  MAX_SCALE_CASES,
+  DEFAULT_DIFF_CASES,
+  MAX_DIFF_CASES,
   parseTimeLimitMs,
   parseMemoryMb,
   parseNumExpr,

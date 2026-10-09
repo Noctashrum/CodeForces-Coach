@@ -6,6 +6,8 @@
  *   node ablation/rejudge.js [--store ablation/out/ui] [--out <file>] [--only 2268C,2267B]
  *                           [--levels L0,L0C,L1,L2] [--latest] [--limit N]
  *                           [--tiers 30,200,2000] [--generous 20000] [--gen-dir <别的store>,...]
+ *                           [--max-scale-cases N]          （最大档抽几份取最慢，默认 3；oracle 自己超时限的抽样会被剔掉）
+ *                           [--diff-cases N]               （对拍档每一档抽几份，默认 2；一份数据只是一次抽样）
  *                           [--problems <problems.json>]   （跑分目录里没有 problems.json 时用）
  *                           [--resume]                     （接着上次判，跳过已判完的记录；机器重启后必用）
  *
@@ -33,7 +35,7 @@ const problemsLib = require('./lib/problems');
 const ROOT = path.join(__dirname, '..');
 
 function parseArgs(argv) {
-  const a = { store: path.join(__dirname, 'out', 'ui'), levels: null, only: null, latest: false, limit: 0, tiers: null, generous: 0, oracleMs: 0, oracleTries: 0 };
+  const a = { store: path.join(__dirname, 'out', 'ui'), levels: null, only: null, latest: false, limit: 0, tiers: null, generous: 0, oracleMs: 0, oracleTries: 0, maxScaleCases: 0, diffCases: 0 };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--store') a.store = argv[++i];
@@ -46,6 +48,8 @@ function parseArgs(argv) {
     else if (k === '--generous') a.generous = Number(argv[++i]) || 0;
     else if (k === '--oracle-ms') a.oracleMs = Number(argv[++i]) || 0;
     else if (k === '--oracle-tries') a.oracleTries = Number(argv[++i]) || 0;
+    else if (k === '--max-scale-cases') a.maxScaleCases = Number(argv[++i]) || 0;
+    else if (k === '--diff-cases') a.diffCases = Number(argv[++i]) || 0;
     else if (k === '--gen-dir') a.genDirs = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
     else if (k === '--problems') a.problems = argv[++i];
     else if (k === '--resume') a.resume = true;
@@ -149,6 +153,8 @@ async function main() {
         storeDir: store, problem: p, code: rec.code, codeLang: rec.codeLang,
         cacheDir, tiers: args.tiers || ruler.DIFF_TIERS, generousMs: args.generous || undefined,
         oracleMs: args.oracleMs || undefined, oracleTries: args.oracleTries || undefined,
+        maxScaleCases: args.maxScaleCases || undefined,
+        diffCases: args.diffCases || undefined,
         overrides, genRoots
       });
     } catch (e) {
@@ -162,9 +168,13 @@ async function main() {
     results.push(row);
     out.write(JSON.stringify(row) + '\n');
 
-    const diffTxt = (v.diffs || []).map((d) => d.tier + ':' + (d.status === 'same' ? 'same' : d.status)).join(' ');
+    const diffTxt = (v.diffs || []).map((d) => d.tier + ':' + (d.status === 'same' ? 'same' : d.status)
+      + (Number(d.cases) > 1 ? '×' + (Number(d.cases) === Number(d.sameCases || d.cases) ? d.cases : (d.sameCases || 0) + '/' + d.cases) : '')).join(' ');
+    const ms = v.maxScale || {};
     const maxTxt = v.maxScale
-      ? ('max ' + (v.maxScale.measuredMs == null ? '超时' : fmtMs(v.maxScale.measuredMs)) + '/oracle ' + fmtMs(v.maxScale.oracleMs) + ' TL' + v.timeLimitMs)
+      ? ('max ' + (ms.measuredMs == null ? '超时' : fmtMs(ms.measuredMs)) + '/oracle ' + fmtMs(ms.oracleMs) + ' TL' + v.timeLimitMs
+        + (Number(ms.cases) > 1 ? '  抽' + ms.cases + '份[' + (ms.msEach || []).map(fmtMs).join('/') + ']' : '')
+        + (Number(ms.rejectedOracleSlow) > 0 ? '  剔' + ms.rejectedOracleSlow + '份(oracle自己超时限)' : ''))
       : '';
     console.log(tag + ' → ' + (v.verdict || '?') + (v.cfac ? '  ★CF-AC' : '') + '  (' + row.secs + 's)  ' + diffTxt + '  ' + maxTxt + (v.detail ? '  ' + String(v.detail).slice(0, 80) : ''));
   }
@@ -186,7 +196,7 @@ async function main() {
       + '  | no-code ' + g.noCode + '  gen-weak ' + g.genWeak + '  no-gen ' + g.noGen
       + '  TLE ' + g.tle + '  slow ' + g.slow + '  WA ' + g.wa
       + '  RE ' + g.re + '  oracle坏 ' + (g.oracleBroken || 0)
-      + '  ⚠️存疑TLE/slow ' + (g.oracleOverTl || 0) + '（尺子的最大档比官方最坏输入还狠：oracle 自己就超了时限）');
+      + '  ⚠️oracle超时限无法判 ' + (g.oracleOverTl || 0) + '（尺子抽 N 份最大档数据，oracle 自己就超时限的那些抽样已剔掉；剔光 ⇒ oracle-over-tl-at-max）');
   }
 
   // 花费与 ¥/CF-AC
