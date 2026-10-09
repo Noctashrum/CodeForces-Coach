@@ -689,6 +689,47 @@ async function main() {
     if (oldRepairMax === undefined) delete process.env.CFCOACH_PERF_REPAIR_MAX; else process.env.CFCOACH_PERF_REPAIR_MAX = oldRepairMax;
     if (oldSw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = oldSw;
 
+    // 2c) 题面规模解析（lib/limits.js）：闸说的"按题面上限计时"必须有依据，且来源不许含糊。
+    //     活例子见 docs/why-we-lag-2026-10-09.md §6.7：2250C 真实上限 n≤5000/值≤1e9，
+    //     旧闸拿自造的 n=200000/值≤200 跑出 134ms 就写了 claimVerified，尺子上是 3.8s slow。
+    const limits2 = require('../lib/limits');
+    check('题面规模：数字表达式（2\\cdot10^5 / 10^9 / 2^{18}）',
+      limits2.parseNumExpr('2\\cdot10^5') === 200000 && limits2.parseNumExpr('10^9') === 1000000000
+        && limits2.parseNumExpr('2^{18}') === 262144 && limits2.parseNumExpr('abc') === null);
+    const scEn = limits2.scanStatement('n (1 <= n <= 5000)\n' + '1 <= a_i <= 10^9');
+    check('题面规模：英文题面解析出 n 与值域',
+      scEn.maxN === 5000 && scEn.maxV === 1000000000, scEn);
+    const scCn = limits2.scanStatement('给定 n 张牌（1 ≤ n ≤ 8），第二行 n 个整数。');
+    check('题面规模：全角括号的中文题面解析不出（宁缺勿编）',
+      scCn.maxN == null && scCn.maxV == null, scCn);
+    const rParsed = limits2.resolveGateScale({ statement: 'n (1 <= n <= 5000)\n1 <= a_i <= 10^9' });
+    check('题面规模：两侧都能解析 → source=parsed，文案敢说"题面上限"',
+      rParsed.source === 'parsed' && rParsed.maxN === 5000 && rParsed.maxV === 1000000000
+        && limits2.scaleLabel(rParsed).indexOf('题面解析出的上限') >= 0, limits2.scaleLabel(rParsed));
+    const rPartial = limits2.resolveGateScale({ statement: 'n (1 <= n <= 100)' });
+    check('题面规模：只解析出 n → source=partial，文案写明"兜底"',
+      rPartial.source === 'partial' && rPartial.maxN === 100 && rPartial.maxV === limits2.DEFAULT_MAX_VALUE
+        && limits2.scaleLabel(rPartial).indexOf('兜底') >= 0, limits2.scaleLabel(rPartial));
+    const rDefault = limits2.resolveGateScale({ statement: '给定 n 张牌（1 ≤ n ≤ 8）' });
+    check('题面规模：解析不出 → source=default，文案必须自认"自造最大档"',
+      rDefault.source === 'default' && rDefault.maxN === limits2.DEFAULT_MAX_SCALE
+        && limits2.scaleLabel(rDefault).indexOf('自造最大档') >= 0
+        && limits2.scaleLabel(rDefault).indexOf('题面上限') < 0, limits2.scaleLabel(rDefault));
+    const rOver = limits2.resolveGateScale({ statement: 'n (1 <= n <= 5000)', overrideN: 200, overrideV: 300 });
+    check('题面规模：显式覆盖优先于题面（夹具/A-B 要确定性）',
+      rOver.source === 'override' && rOver.maxN === 200 && rOver.maxV === 300
+        && limits2.scaleLabel(rOver).indexOf('A/B 指定') >= 0, limits2.scaleLabel(rOver));
+    check('题面规模：文案里的数字压缩（5000 写全、2e5 / 1e9 用科学计数）',
+      limits2.fmtNum(5000) === '5000' && limits2.fmtNum(200000) === '2e5' && limits2.fmtNum(1000000000) === '1e9');
+    const pgNoEnv = harness.perfGateConfig();
+    check('性能闸：没设 env 时不产生"显式覆盖"（生产路径靠题面解析）',
+      pgNoEnv.maxNOverride === null && pgNoEnv.maxVOverride === null, pgNoEnv);
+    process.env.CFCOACH_PERF_GATE_MAXV = '123';
+    const pgV = harness.perfGateConfig();
+    check('性能闸：CFCOACH_PERF_GATE_MAXV 是显式覆盖（不是兜底）',
+      pgV.maxV === 123 && pgV.maxVOverride === 123, pgV);
+    delete process.env.CFCOACH_PERF_GATE_MAXV;
+
     // 3) 生成器去退化：写死的随机种子让"对拍 N 组"变成同一组用例跑 N 遍
     const d1 = harness.dedupeGenSeed('import random\nrandom.seed(123456789)\nprint(random.randint(0, 9))');
     check('生成器去退化：random.seed(数字) → random.seed()',

@@ -33,6 +33,8 @@ const FILES = [
   'lib/loopguard.js',
   // 多解题的本地 checker（按题面判"这份输出合不合法"，而不是"和标准答案一不一样"）
   'lib/checker.js',
+  // 题面里的最坏输入规模解析（性能闸的"按题面上限计时"必须真的有依据；口径与 CF-AC 尺子一致）
+  'lib/limits.js',
   // 出问题时把"这台机器上到底发生了什么"打包成一份文本（设置页 / CLI / 测试台共用）
   'lib/diagbundle.js',
   'public/index.html', 'public/styles.css', 'public/js/app.js', 'public/js/review.js',

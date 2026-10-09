@@ -70,6 +70,15 @@ check('同语言性能优化：接在性能闸里的默认路径',
 check('题解关思考：截断家族的实验旋钮（默认关）',
   'lib/harness.js', ['codeEffortNone', 'o.codeEffort', 'probe-sol-arms']);
 
+// 批次④-第一刀（2026-10-10）：性能闸必须按**题面真实上限**计时，不许把自造的档说成"题面上限"。
+// 活例子：2250C 旧闸拿 n=200000/值≤200 跑出 134ms 就写 claimVerified，尺子在真实上限上是 3.8s slow。
+check('性能闸口径：题面规模解析库', 'lib/limits.js',
+  ['parseNumExpr', 'flattenStatement', 'scanStatement', 'resolveGateScale', 'scaleLabel', 'DEFAULT_MAX_VALUE']);
+check('性能闸口径：闸按题面解析出的上限计时（env 是显式覆盖）',
+  'lib/harness.js', ['limitsLib', 'resolveGateScale', 'maxNOverride', 'scaleNotes', 'gateLine', '自造最大档']);
+// 容差内已超时限也必须说出来（2250C 复跑：闸 2072ms / 时限 2000ms，尺子判 slow）
+check('性能闸口径：容差内已超题面时限要如实告知', 'lib/harness.js', ['overTl', '已经超过题面时限']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
