@@ -662,6 +662,33 @@ async function main() {
     if (oldFactor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR; else process.env.CFCOACH_PERF_GATE_FACTOR = oldFactor;
     if (oldMaxN === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = oldMaxN;
 
+    // 2b) 同语言性能优化（默认开、上限 1 次）与语言闸（默认关）
+    //     用户口径 2026-10-10：交付的语言必须就是被要求的那门 ⇒ Python 超时要在 Python 里修算法，
+    //     "换 C++"只是把"这份代码在这门语言里慢"藏起来 ⇒ 语言闸降级成显式 A/B 旋钮。
+    const oldRepair = process.env.CFCOACH_PERF_REPAIR;
+    const oldRepairMax = process.env.CFCOACH_PERF_REPAIR_MAX;
+    const oldSw = process.env.CFCOACH_LANG_SWITCH;
+    delete process.env.CFCOACH_PERF_REPAIR;
+    delete process.env.CFCOACH_PERF_REPAIR_MAX;
+    delete process.env.CFCOACH_LANG_SWITCH;
+    const prDefault = harness.perfRepairConfig();
+    check('同语言优化：默认开启、整轮上限 1 次',
+      prDefault.on === true && prDefault.max === 1, prDefault);
+    check('语言闸：默认关闭（交付的语言就是被要求的那门）',
+      harness.langSwitchEnabled() === false);
+    process.env.CFCOACH_PERF_REPAIR = '0';
+    check('同语言优化：CFCOACH_PERF_REPAIR=0 可关掉', harness.perfRepairConfig().on === false);
+    process.env.CFCOACH_PERF_REPAIR = '1';
+    process.env.CFCOACH_PERF_REPAIR_MAX = '3';
+    check('同语言优化：上限可用 CFCOACH_PERF_REPAIR_MAX 覆盖',
+      harness.perfRepairConfig().on === true && harness.perfRepairConfig().max === 3);
+    process.env.CFCOACH_LANG_SWITCH = '1';
+    check('语言闸：CFCOACH_LANG_SWITCH=1 才打开（A/B 用）',
+      harness.langSwitchEnabled() === true);
+    if (oldRepair === undefined) delete process.env.CFCOACH_PERF_REPAIR; else process.env.CFCOACH_PERF_REPAIR = oldRepair;
+    if (oldRepairMax === undefined) delete process.env.CFCOACH_PERF_REPAIR_MAX; else process.env.CFCOACH_PERF_REPAIR_MAX = oldRepairMax;
+    if (oldSw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = oldSw;
+
     // 3) 生成器去退化：写死的随机种子让"对拍 N 组"变成同一组用例跑 N 遍
     const d1 = harness.dedupeGenSeed('import random\nrandom.seed(123456789)\nprint(random.randint(0, 9))');
     check('生成器去退化：random.seed(数字) → random.seed()',

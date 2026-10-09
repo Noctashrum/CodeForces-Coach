@@ -1276,19 +1276,23 @@ const callAgent = async (opts) => {
     }
   }
 
-  /* ========== 语言闸（批次③）：算法对、语言慢 → 只换语言、不改算法 ========== */
+  /* ========== 语言闸（批次③）：算法对、语言慢 → 只换语言、不改算法。
+     2026-10-10 用户口径之后这条路径**默认关闭**（交付的语言必须就是被要求的那门），
+     所以这里显式 CFCOACH_LANG_SWITCH=1 把它当 A/B 旋钮验证，并关掉同语言优化以免两条路径互相干扰。 ========== */
   {
-    console.log('parallel: 语言闸 —— Python 在最大规模档太慢 → 换成 C++（只换语言）');
+    console.log('parallel: 语言闸（显式打开 A/B 开关）—— Python 在最大规模档太慢 → 换成 C++（只换语言）');
     const envSaved = {
       gate: process.env.CFCOACH_PERF_GATE,
       factor: process.env.CFCOACH_PERF_GATE_FACTOR,
       maxn: process.env.CFCOACH_PERF_GATE_MAXN,
-      sw: process.env.CFCOACH_LANG_SWITCH
+      sw: process.env.CFCOACH_LANG_SWITCH,
+      repair: process.env.CFCOACH_PERF_REPAIR
     };
     process.env.CFCOACH_PERF_GATE = '1';
     process.env.CFCOACH_PERF_GATE_FACTOR = '1';
     process.env.CFCOACH_PERF_GATE_MAXN = '6';
-    delete process.env.CFCOACH_LANG_SWITCH;
+    process.env.CFCOACH_LANG_SWITCH = '1';    // 默认关 ⇒ 要显式打开
+    process.env.CFCOACH_PERF_REPAIR = '0';    // 隔离：这个块只验证"换语言"那条 A/B 路径
 
     // 生成器：永远出 n=m 的数据（这样"最大规模档"一定落在 n=6 上，慢不慢可复现）
     const GEN_FULL = [
@@ -1388,11 +1392,11 @@ const callAgent = async (opts) => {
       !!workspace.readFile('lang-switch-bad', 'sol.py') && workspace.readFile('lang-switch-bad', 'sol.cpp') == null,
       { py: !!workspace.readFile('lang-switch-bad', 'sol.py'), cpp: !!workspace.readFile('lang-switch-bad', 'sol.cpp') });
 
-    console.log('parallel: 语言闸 —— 关掉开关时一个字都不换');
+    console.log('parallel: 语言闸 —— 开关关掉（默认状态）时一个字都不换');
     process.env.CFCOACH_LANG_SWITCH = '0';
     const rOff = await runLang(mkLangAgent(SOL_CPP), 'lang-switch-off');
     const kOff = (rOff.trajectory || []).map((t) => t.kind);
-    ok('语言闸开关：CFCOACH_LANG_SWITCH=0 → 完全不换语言（没有 lang-switch-* 轨迹）',
+    ok('语言闸开关：默认关（CFCOACH_LANG_SWITCH=0）→ 完全不换语言（没有 lang-switch-* 轨迹）',
       kOff.filter((k) => /lang-switch/.test(k)).length === 0 && rOff.solLang === 'python'
       && kOff.indexOf('perf-gate-slow') >= 0,
       kOff.filter((k) => /lang-switch|perf-gate/.test(k)));
@@ -1401,6 +1405,173 @@ const callAgent = async (opts) => {
     if (envSaved.factor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR; else process.env.CFCOACH_PERF_GATE_FACTOR = envSaved.factor;
     if (envSaved.maxn === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = envSaved.maxn;
     if (envSaved.sw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = envSaved.sw;
+    if (envSaved.repair === undefined) delete process.env.CFCOACH_PERF_REPAIR; else process.env.CFCOACH_PERF_REPAIR = envSaved.repair;
+  }
+
+  /* ========== 同语言性能优化（2026-10-10 用户口径）：太慢就在**同一门语言**里修快 ========== */
+  {
+    console.log('parallel: 同语言优化 —— Python 在最大规模档太慢 → 还是 Python，只把算法/常数改快');
+    const envSaved2 = {
+      gate: process.env.CFCOACH_PERF_GATE,
+      factor: process.env.CFCOACH_PERF_GATE_FACTOR,
+      maxn: process.env.CFCOACH_PERF_GATE_MAXN,
+      sw: process.env.CFCOACH_LANG_SWITCH,
+      repair: process.env.CFCOACH_PERF_REPAIR
+    };
+    process.env.CFCOACH_PERF_GATE = '1';
+    process.env.CFCOACH_PERF_GATE_FACTOR = '1';
+    process.env.CFCOACH_PERF_GATE_MAXN = '6';
+    delete process.env.CFCOACH_LANG_SWITCH;    // 默认 = 关：不许换语言
+    delete process.env.CFCOACH_PERF_REPAIR;    // 默认 = 开
+
+    const GEN_FULL2 = [
+      'import random, sys',
+      'm = int(sys.argv[1]) if len(sys.argv) > 1 else 6',
+      'print(1)',
+      'print(m)',
+      'print(*[random.randint(0, 6) for _ in range(m)])'
+    ].join('\n');
+    // 正确但**故意慢**的 Python 版（与语言闸夹具同一手法：n>=6 时睡 0.8s）
+    const SOL_SLOW2 = SOL.replace('d = sys.stdin.read().split()',
+      'import time\nd = sys.stdin.read().split()\nif int(d[1]) >= 6: time.sleep(0.8)');
+    // "优化"了但**还是一样慢**的版本（文本不同 ⇒ 不会被"逐字相同"那条守卫挡掉，必须靠重新计时识破）
+    const SOL_SLOW_ALT = SOL.replace('d = sys.stdin.read().split()',
+      'import time\nd = sys.stdin.read().split()\nif int(d[1]) >= 6:\n    time.sleep(0.8)  # 优化了个寂寞');
+    // 快但**答案是错的**版本（用来验证"速度不能靠牺牲正确性换"）
+    const SOL_WRONG_FAST = [
+      'import sys',
+      'd = sys.stdin.buffer.read().split()',
+      't = int(d[0])',
+      'out = []',
+      'for _ in range(t):',
+      '    n = int(d[1])',
+      '    out.append(str(n))',
+      "sys.stdout.write('\\n'.join(out) + '\\n')"
+    ].join('\n');
+    const mkExplainer2 = (code) => '## 题面拆解\nx\n## 关键观察\nx\n## 为什么\nx\n## 手算演示\n拿 n=2 举例\n'
+      + '<viz-steps title="t"><viz-step title="第 1 步">a</viz-step></viz-steps>\n'
+      + '## 算法\nx\n## 复杂度分析\n$O(n\\log n)$\n'
+      + '<viz-formula title="复杂度" fx="$T(n)=O(n\\log n)$" legend="n" why="堆"/>\n'
+      + '## 代码\n```python\n' + code + '\n```\n## 讲解\nx\n## 易错点\nx\n'
+      + '<viz-callout type="danger" title="易错">x</viz-callout>\n## 验证\n官方样例通过。';
+    /**
+     * 假 agent：**题解角色**要分两类提问 —— 第一次是"解题"，之后那次是"把这份代码改快"。
+     * 判据用 user 提示词里的"改快"（perfRepairUser 的抬头），system 两边都是【题解 Agent】。
+     */
+    const mkRepairAgent = (repairCode, onPrompt) => {
+      let repairCalls = 0;
+      let solCalls = 0;
+      const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+      const f = async (opts) => {
+        const sys = String(opts.system || '');
+        const usr = String(opts.user || '');
+        if (sys.indexOf('【讲解 Agent】') >= 0) { await delay(10); return mkExplainer2(repairCode); }
+        if (sys.indexOf('【题解 Agent】') >= 0) {
+          if (usr.indexOf('改快') >= 0) {
+            repairCalls++;
+            if (onPrompt) onPrompt(usr);
+            await delay(10);
+            return '```python\n' + repairCode + '\n```';
+          }
+          solCalls++;
+          await delay(10);
+          return '```python\n' + SOL_SLOW2 + '\n```';
+        }
+        if (sys.indexOf('【暴力 Agent】') >= 0) { await delay(10); return '```python\n' + BRUTE + '\n```'; }
+        if (sys.indexOf('【数据生成 Agent】') >= 0) { await delay(10); return '```python\n' + GEN_FULL2 + '\n```'; }
+        return '{}';
+      };
+      f.repairCalls = () => repairCalls;
+      f.solCalls = () => solCalls;
+      return f;
+    };
+    const runRepair = (agent, key) => harness.runPipeline({
+      conv: { id: key, title: '同语言优化测试' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: key, timeLimitMs: 200,
+      callAgent: agent, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+
+    console.log('parallel: 同语言优化 —— 优化成功：同一门语言里改快 + 重新对拍 + 重新计时');
+    const seenPrompt = [];
+    const aOk = mkRepairAgent(SOL, (p) => seenPrompt.push(p));
+    const rOk = await runRepair(aOk, 'perf-repair-ok');
+    const kOk = (rOk.trajectory || []).map((t) => t.kind);
+    ok('同语言优化：触发 perf-repair-ok + perf-gate-pass（没有 perf-gate-slow）',
+      kOk.indexOf('perf-repair-ok') >= 0 && kOk.indexOf('perf-gate-pass') >= 0 && kOk.indexOf('perf-gate-slow') < 0,
+      kOk.filter((k) => /perf|lang/.test(k)));
+    ok('同语言优化：交付的仍然是 Python（solLang=python、代码里没有 #include）',
+      rOk.solLang === 'python' && !/#include/.test(String(rOk.solCode || '')) && /heapq/.test(String(rOk.solCode || '')),
+      { solLang: rOk.solLang, head: String(rOk.solCode || '').slice(0, 60) });
+    ok('同语言优化：优化提问明令"语言不许换"，且题解 Agent 只被问了"解题 1 次 + 优化 1 次"',
+      seenPrompt.length === 1 && seenPrompt[0].indexOf('语言不许换') >= 0
+      && aOk.repairCalls() === 1 && aOk.solCalls() === 1,
+      { prompts: seenPrompt.length, repair: aOk.repairCalls(), sol: aOk.solCalls(),
+        head: String(seenPrompt[0] || '').slice(0, 100) });
+    ok('同语言优化：优化版重新对拍 + 重新计时都过 → 仍算"完整验证"（claimVerified=true）',
+      !!(rOk.verification && rOk.verification.status === 'ok' && rOk.verification.claimVerified === true
+        && rOk.verification.perfGate && rOk.verification.perfGate.ok === true
+        && rOk.verification.perfGate.lang === 'python'
+        && rOk.verification.perfGate.repairedFrom && rOk.verification.perfGate.repairedFrom.ms > 0),
+      rOk.verification && { status: rOk.verification.status, claim: rOk.verification.claimVerified, gate: rOk.verification.perfGate });
+    ok('同语言优化：工作区里只有 sol.py（全程没换语言 ⇒ 不该出现 sol.cpp）',
+      !!workspace.readFile('perf-repair-ok', 'sol.py') && workspace.readFile('perf-repair-ok', 'sol.cpp') == null,
+      { py: !!workspace.readFile('perf-repair-ok', 'sol.py'), cpp: !!workspace.readFile('perf-repair-ok', 'sol.cpp') });
+
+    console.log('parallel: 同语言优化 —— 优化了个寂寞（还是一样慢）→ 原样回退，照样不声称已验证');
+    const aSlow = mkRepairAgent(SOL_SLOW_ALT);
+    const rSlow = await runRepair(aSlow, 'perf-repair-slow');
+    const kSlow = (rSlow.trajectory || []).map((t) => t.kind);
+    ok('同语言优化回退：记了 perf-repair-reject + perf-gate-slow，没有 perf-gate-pass',
+      kSlow.indexOf('perf-repair-reject') >= 0 && kSlow.indexOf('perf-gate-slow') >= 0
+      && kSlow.indexOf('perf-repair-ok') < 0 && kSlow.indexOf('perf-gate-pass') < 0,
+      kSlow.filter((k) => /perf|lang/.test(k)));
+    ok('同语言优化回退：拒绝理由是"重新计时仍然超时"（不是逐字相同那条轻量守卫）',
+      (rSlow.trajectory || []).some((t) => t.kind === 'perf-repair-reject' && /仍然超时/.test(String(t.note || ''))),
+      (rSlow.trajectory || []).filter((t) => t.kind === 'perf-repair-reject').map((t) => t.note));
+    ok('同语言优化回退：交付的还是原版 Python（被拒的"优化版"不许进交付物）',
+      rSlow.solLang === 'python' && /time\.sleep\(0\.8\)/.test(String(rSlow.solCode || ''))
+      && String(rSlow.solCode || '').indexOf('优化了个寂寞') < 0,
+      { solLang: rSlow.solLang, head: String(rSlow.solCode || '').slice(0, 80) });
+    ok('同语言优化回退：结论仍是"不许声称已验证"（claimVerified=false + 性能闸 ok=false）',
+      !!(rSlow.verification && rSlow.verification.claimVerified === false
+        && rSlow.verification.perfGate && rSlow.verification.perfGate.ok === false),
+      rSlow.verification && { claim: rSlow.verification.claimVerified, gate: rSlow.verification.perfGate });
+    ok('同语言优化回退：**不会退化成偷偷换语言**（默认没有 lang-switch-* 轨迹）',
+      kSlow.filter((k) => /lang-switch/.test(k)).length === 0,
+      kSlow.filter((k) => /lang-switch/.test(k)));
+
+    console.log('parallel: 同语言优化 —— 快了但答案错了 → 用官方样例打回');
+    const aWrong = mkRepairAgent(SOL_WRONG_FAST);
+    const rWrong = await runRepair(aWrong, 'perf-repair-wrong');
+    const kWrong = (rWrong.trajectory || []).map((t) => t.kind);
+    ok('同语言优化：快而错不算优化（perf-repair-reject 的理由是"没通过官方样例"）',
+      (rWrong.trajectory || []).some((t) => t.kind === 'perf-repair-reject' && /官方样例/.test(String(t.note || ''))),
+      (rWrong.trajectory || []).filter((t) => t.kind === 'perf-repair-reject').map((t) => t.note));
+    ok('同语言优化：交付物没被那次"快而错"污染（还是原版 + 仍然 perf-gate-slow + 不许声称已验证）',
+      rWrong.solLang === 'python' && /time\.sleep\(0\.8\)/.test(String(rWrong.solCode || ''))
+      && kWrong.indexOf('perf-gate-slow') >= 0 && kWrong.indexOf('perf-gate-pass') < 0
+      && !!(rWrong.verification && rWrong.verification.claimVerified === false),
+      { solLang: rWrong.solLang, kinds: kWrong.filter((k) => /perf|lang/.test(k)),
+        claim: rWrong.verification && rWrong.verification.claimVerified });
+
+    console.log('parallel: 同语言优化 —— 关掉开关（CFCOACH_PERF_REPAIR=0）时连试都不试');
+    process.env.CFCOACH_PERF_REPAIR = '0';
+    const aOff = mkRepairAgent(SOL);
+    const rOff2 = await runRepair(aOff, 'perf-repair-off');
+    const kOff2 = (rOff2.trajectory || []).map((t) => t.kind);
+    ok('同语言优化开关：CFCOACH_PERF_REPAIR=0 → 一次优化提问都不发，直接就是 perf-gate-slow',
+      aOff.repairCalls() === 0 && kOff2.indexOf('perf-gate-slow') >= 0
+      && kOff2.filter((k) => /perf-repair/.test(k)).length === 0,
+      { repair: aOff.repairCalls(), kinds: kOff2.filter((k) => /perf|lang/.test(k)) });
+
+    if (envSaved2.gate === undefined) delete process.env.CFCOACH_PERF_GATE; else process.env.CFCOACH_PERF_GATE = envSaved2.gate;
+    if (envSaved2.factor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR; else process.env.CFCOACH_PERF_GATE_FACTOR = envSaved2.factor;
+    if (envSaved2.maxn === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = envSaved2.maxn;
+    if (envSaved2.sw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = envSaved2.sw;
+    if (envSaved2.repair === undefined) delete process.env.CFCOACH_PERF_REPAIR; else process.env.CFCOACH_PERF_REPAIR = envSaved2.repair;
   }
 
   console.log('\nparallel: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));
