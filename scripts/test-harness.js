@@ -689,6 +689,54 @@ async function main() {
     if (oldRepairMax === undefined) delete process.env.CFCOACH_PERF_REPAIR_MAX; else process.env.CFCOACH_PERF_REPAIR_MAX = oldRepairMax;
     if (oldSw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = oldSw;
 
+    // 2b-2) 最大档抽多份取最慢（worst-of-N）：生成器随机的题里，**一份**随机数据只是一次抽样，
+    //       只测一份就写"已验证"等于把结论押在运气上（2250C 的假"已验证"就是这么漏过去的）。
+    const oldCases = process.env.CFCOACH_PERF_GATE_CASES;
+    delete process.env.CFCOACH_PERF_GATE_CASES;
+    check('多档抽取：默认抽 3 份最大档数据', harness.perfGateCases() === 3);
+    process.env.CFCOACH_PERF_GATE_CASES = '5';
+    check('多档抽取：CFCOACH_PERF_GATE_CASES 可覆盖', harness.perfGateCases() === 5);
+    process.env.CFCOACH_PERF_GATE_CASES = '99';
+    check('多档抽取：抽数封顶 10（闸不许变成无底洞）', harness.perfGateCases() === 10);
+    if (oldCases === undefined) delete process.env.CFCOACH_PERF_GATE_CASES; else process.env.CFCOACH_PERF_GATE_CASES = oldCases;
+
+    const pgFake = { maxN: 100, maxV: 1000, wallMs: 60000 };
+    const mkFakeArena = (times, opts) => {
+      const o = opts || {};
+      let gen = 0;
+      let runs = 0;
+      return {
+        genCalls: () => gen,
+        genCase: async () => {
+          gen++;
+          if (o.genFailAt && o.genFailAt === gen) return { ok: false, err: '生成器挂了' };
+          return { ok: true, input: 'case' + gen };
+        },
+        run: async () => {
+          const t = times[Math.min(runs, times.length - 1)];
+          runs++;
+          if (t === 'timeout') return { ok: false, timedOut: true, timeMs: 9000 };
+          return { ok: true, timedOut: false, timeMs: t };
+        }
+      };
+    };
+    const aWorst = mkFakeArena([100, 300, 200]);
+    const rWorst = await harness.measureWorstOnMaxScale(aWorst, pgFake, 5000, 'seed');
+    check('多档抽取：抽 3 份取最慢（100/300/200 → 300），第一份用闸已生成的那份数据',
+      rWorst.worst.ms === 300 && rWorst.cases === 3 && rWorst.msEach.join('/') === '100/300/200'
+        && rWorst.worst.ok === true && rWorst.worst.timedOut === false && aWorst.genCalls() === 2,
+      { worst: rWorst.worst, msEach: rWorst.msEach, cases: rWorst.cases, gen: aWorst.genCalls() });
+    const aTo = mkFakeArena([100, 'timeout', 200]);
+    const rTo = await harness.measureWorstOnMaxScale(aTo, pgFake, 5000, 'seed');
+    check('多档抽取：一出现超时就停手（那已经是判据），不再白烧时间',
+      rTo.cases === 2 && rTo.worst.timedOut === true && rTo.worst.ms === 9000 && aTo.genCalls() === 1,
+      { worst: rTo.worst, cases: rTo.cases, gen: aTo.genCalls() });
+    const aGenFail = mkFakeArena([100, 200, 200], { genFailAt: 2 });
+    const rGenFail = await harness.measureWorstOnMaxScale(aGenFail, pgFake, 5000, 'seed');
+    check('多档抽取：还想再抽时生成器给不出数据 → 按已有份数（seed + 已抽到的 1 份）判定，并如实记下 genFail',
+      rGenFail.cases === 2 && !!rGenFail.genFail && rGenFail.worst.ms === 200,
+      { worst: rGenFail.worst, cases: rGenFail.cases, genFail: rGenFail.genFail });
+
     // 2c) 题面规模解析（lib/limits.js）：闸说的"按题面上限计时"必须有依据，且来源不许含糊。
     //     活例子见 docs/why-we-lag-2026-10-09.md §6.7：2250C 真实上限 n≤5000/值≤1e9，
     //     旧闸拿自造的 n=200000/值≤200 跑出 134ms 就写了 claimVerified，尺子上是 3.8s slow。
