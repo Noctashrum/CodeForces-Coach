@@ -148,4 +148,43 @@ ok('代码评估：手里有反例却没引用 → 提醒', () => {
   assert.ok(v.warnings.some((w) => /最小反例/.test(w)), JSON.stringify(v.warnings));
 });
 
+ok('诚实否定不算"假声称"：还没能验证通过 → 不拦（旧规则会把这种句子判成假声称，白跑一次重写调用）', () => {
+  const honest = GOOD + '\n\n<viz-callout type="warn" title="先说明白：这题我还没能验证通过">下面的代码只在小规模数据上对拍过。</viz-callout>';
+  const v = ed.validate(honest, { intent: 'full', level: 'L3', solCode: CODE, verification: { status: 'unverified', reason: '未收敛' } });
+  assert.ok(!v.errors.some((e) => /声称"已验证"/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('部分验证（status=ok 但 claimVerified=false）也不许写"已验证" → 拦下', () => {
+  const v = ed.validate(GOOD + '\n以上代码已验证通过，可以直接提交。', {
+    intent: 'full', level: 'L3', solCode: CODE,
+    verification: { status: 'ok', claimVerified: false, scopeComplete: false, scopeNote: '对拍没跑满' }
+  });
+  assert.strictEqual(v.ok, false);
+  assert.ok(v.errors.some((e) => /声称"已验证"/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('部分验证时讲解必须写清验证边界（P2 徽章）→ 没写就拦下', () => {
+  const v = ed.validate(GOOD, {
+    intent: 'full', level: 'L3', solCode: CODE,
+    verification: { status: 'ok', claimVerified: false, scopeComplete: false }
+  });
+  assert.ok(v.errors.some((e) => /验证口径/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('部分验证 + 写清了边界与"不要把这份代码当作已验证" → 通过', () => {
+  const doc = GOOD + '\n\n## 验证情况\n这题只做到**部分验证**：暴力解在规模档 50 撑不住，对拍没跑满；'
+    + '请不要把这份代码当作"已验证正确"的解法。';
+  const v = ed.validate(doc, {
+    intent: 'full', level: 'L3', solCode: CODE,
+    verification: { status: 'ok', claimVerified: false, scopeComplete: false }
+  });
+  assert.ok(!v.errors.some((e) => /声称|验证口径/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('claimWordHits：否定语境算 hedge，孤立结论不算', () => {
+  assert.ok(ed.claimWordHits('这题我还没能验证通过').every((h) => h.hedged));
+  assert.ok(ed.claimWordHits('不能声称已对拍通过').every((h) => h.hedged));
+  assert.ok(ed.claimWordHits('以上代码已验证通过。').every((h) => !h.hedged));
+});
+
 console.log('\nexplaindoc: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));
