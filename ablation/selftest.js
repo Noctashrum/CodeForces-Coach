@@ -1153,6 +1153,62 @@ async function main() {
         ('actualFull' in bigSampleRow) && Object.keys(bigSampleRow).indexOf('actualFull') === -1
         && JSON.stringify(bigSampleRow).indexOf('actualFull') === -1,
         JSON.stringify(Object.keys(bigSampleRow)));
+
+      // 尺子的自觉（2026-10-10 通宵）：oracle 在**尺子自己的最大档**上就超了题面时限，
+      // 说明这份数据比官方最坏输入还狠（官方最坏输入上标准答案至少跑得完）⇒ 据此判出的 TLE/slow 存疑。
+      // 现场：机器2 的 2247D2，rejudge 打印 `max 超时/oracle 4.8s TL2000` —— 别让候选为尺子的过重数据背锅。
+      const ovRoot = path.join(tmp, 'overtl-store');
+      fs.mkdirSync(path.join(ovRoot, 'gen-scale'), { recursive: true });
+      const ovId = 'ck920';
+      fs.writeFileSync(path.join(ovRoot, 'limits.json'),
+        JSON.stringify({ [ovId]: { maxN: 20, maxV: 1000, timeLimitMs: 300 } }, null, 2), 'utf8');
+      fs.writeFileSync(path.join(ovRoot, 'gen-scale', ovId + '.py'), [
+        'import sys, random',
+        'n = int(sys.argv[1])',
+        'vals = [random.randint(1, 1000) for _ in range(n)]',
+        'print(n)',
+        'print(" ".join(map(str, vals)))'
+      ].join('\n') + '\n', 'utf8');
+      // 忙等 n*factor 毫秒（烧 CPU、可预测）：oracle n=20 → 900ms > 时限 300ms；
+      // 候选 n=20 → 600ms 超时限但远在宽松上限内 ⇒ 判 slow，且 maxScale 必须自暴 oracle 超时限。
+      const burnSrc = (perN) => [
+        '#include <cstdio>',
+        '#include <ctime>',
+        'int a[100005];',
+        'int main(){int n;if(scanf("%d",&n)!=1)return 0;for(int i=0;i<n;i++)scanf("%d",&a[i]);',
+        'clock_t t0=clock();double need=0.001*' + perN + '*(n>0?n:1);',
+        'while((double)(clock()-t0)/CLOCKS_PER_SEC<need){}',
+        'for(int i=0;i<n;i++)printf("%d%c",a[i],i==n-1?10:32);return 0;}'
+      ].join('\n') + '\n';
+      const ovOracle = path.join(ovRoot, ovId + '.oracle.cpp');
+      fs.writeFileSync(ovOracle, burnSrc(45), 'utf8');
+      const vOverTl = await ruler.runRuler({
+        code: burnSrc(30),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000,
+        problem: {
+          id: ovId,
+          statement: 'The first line contains n（1 ≤ n ≤ 20）. The second line contains n integers '
+            + 'a_1, ..., a_n（1 ≤ a_i ≤ 1000）. Print them in the same order, separated by spaces.',
+          samples: [{ input: '3\n4 7 2\n', output: '4 7 2\n' }],
+          oracle: { file: ovOracle, lang: 'cpp' }
+        }
+      });
+      check('尺子自觉：oracle 自己在最大档就超时限 → 判词明说"存疑"，maxScale 记下 oracleOverTl',
+        vOverTl.cfac === false && vOverTl.verdict === 'slow'
+        && !!vOverTl.maxScale && vOverTl.maxScale.oracleOverTl === true
+        && Number(vOverTl.maxScale.oracleMs) > 300 && /存疑/.test(String(vOverTl.detail)),
+        JSON.stringify([vOverTl.verdict, vOverTl.maxScale, vOverTl.detail]));
+      const ovGroup = ruler.summarizeCfac([Object.assign({ level: 'L2' }, vOverTl)]).L2;
+      const ovSynth = ruler.summarizeCfac([
+        { level: 'L2', verdict: 'slow', maxScale: { oracleOverTl: false } },
+        { level: 'L2', verdict: 'TLE', maxScale: null },
+        { level: 'L2', verdict: 'AC', cfac: true, maxScale: { oracleOverTl: true } }
+      ]).L2;
+      check('汇总表把"存疑 TLE/slow"单独计数：oracle 没超时限的 TLE/slow、以及 AC 都不算在内',
+        ovGroup.oracleOverTl === 1 && ovGroup.slow === 1
+        && ovSynth.oracleOverTl === 0 && ovSynth.slow === 1 && ovSynth.tle === 1 && ovSynth.cfac === 1,
+        JSON.stringify([ovGroup, ovSynth]));
     }
 
     // ⑪ 官方时限管道（2026-10-10 通宵）：harness 解析时限只认 CF 题面里
