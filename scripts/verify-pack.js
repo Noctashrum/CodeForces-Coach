@@ -63,6 +63,11 @@ check('多解 checker：本地 checker 库', 'lib/checker.js', ['resolve', 'runO
 check('多解 checker：接进 harness 的多解题站点',
   'lib/harness.js', ['checkerLib', 'ensureChecker', 'checker-ac', 'checker-wa', 'multi-answer-undecidable']);
 
+// 批次③-修订（2026-10-10 用户口径）：太慢要**在同一门语言里**改快，换语言只是默认关掉的 A/B 旋钮。
+// 默认路径必须在包里：同语言优化提问 + 四步验收 + 成功/失败两种轨迹 + 默认关的语言闸。
+check('同语言性能优化：接在性能闸里的默认路径',
+  'lib/harness.js', ['perfRepairConfig', 'langSwitchEnabled', 'tryPerfRepair', 'perf-repair-ok', 'perf-repair-reject', '语言不许换']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
