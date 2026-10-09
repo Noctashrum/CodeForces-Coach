@@ -90,6 +90,13 @@ check('多档抽取：最大档抽 N 份取最慢（闸/同语言优化/换语�
 check('讲解验收线：诚实口径按就近语境判定，并与 claimVerified 对齐',
   'lib/explaindoc.js', ['claimWordHits', 'HONEST_CUE', 'CLAIM_LOOK_BEHIND', 'claimVerified', '验证没到']);
 
+// 批次④-第二刀（2026-10-10 深夜）：最小反例与验证范围由**验证链**直接写进交付物（图文一章 + Markdown 一节），
+// 并留一条交付物级硬验收线。校验签名命中最关键的几个符号，防止重构时把这条线整段丢掉。
+check('系统实测附录：反例与验证范围由验证链写入交付物',
+  'lib/explaindoc.js', ['APPENDIX_HEAD', 'splitAppendix', 'ensureAppendix', 'richAppendix', 'acceptDelivered', '系统实测']);
+check('系统实测附录：harness 两条交付路径都注入并留轨迹',
+  'lib/harness.js', ['explain-appendix', 'richWithAppendix', 'withAppendix', 'explain-appendix-fail']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);

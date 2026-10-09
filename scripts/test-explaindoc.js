@@ -187,4 +187,109 @@ ok('claimWordHits：否定语境算 hedge，孤立结论不算', () => {
   assert.ok(ed.claimWordHits('以上代码已验证通过。').every((h) => !h.hedged));
 });
 
+console.log('\nexplaindoc: 系统实测附录（反例与验证范围由验证链写入，不靠模型转述）');
+
+const CE_INPUT = '3\n3 3 0\n2\n5 0\n';
+const APP_CTX = {
+  counterexample: { input: CE_INPUT, expected: '5\n0', actual: '3\n5', from: 'user-vs-brute' },
+  verification: { status: 'ok', claimVerified: false, scopeNote: '官方样例 1 组全过；随机对拍 60 组；结论：部分验证' }
+};
+
+ok('systemAppendix：反例（输入/你的输出/正确输出）与验证范围都写进去，且标明来源', () => {
+  const a = ed.systemAppendix(APP_CTX);
+  assert.ok(a.indexOf(ed.APPENDIX_HEAD) === 0, a.slice(0, 40));
+  assert.ok(/最小反例/.test(a) && /你的代码/.test(a), a);
+  assert.ok(a.indexOf('3\n3 3 0\n2\n5 0') >= 0, '反例输入必须原文在内');
+  assert.ok(/你的代码 输出/.test(a) && /正确输出（暴力解标尺）/.test(a), a);
+  assert.ok(/同一次运行/.test(a), a);
+  assert.ok(a.indexOf(APP_CTX.verification.scopeNote) >= 0, a);
+  assert.ok(/验证范围（机器记录）/.test(a), a);
+});
+
+ok('ensureAppendix：补附录（正文没引用反例 ⇒ 两段都补），acceptDelivered 通过', () => {
+  const r = ed.ensureAppendix(GOOD, APP_CTX);
+  assert.deepStrictEqual(r.appended, ['counterexample', 'scope']);
+  assert.ok(r.text.indexOf(ed.APPENDIX_HEAD) > GOOD.length - 400, '附录必须在末尾');
+  assert.ok(r.text.indexOf(ed.APPENDIX_HEAD) > r.text.indexOf('## 验证'), '附录在正文之后');
+  const acc = ed.acceptDelivered(r.text, APP_CTX);
+  assert.strictEqual(acc.ok, true, JSON.stringify(acc.errors));
+});
+
+ok('ensureAppendix：正文已经原文引用过那条反例 ⇒ 不重复贴（但验证范围照补）', () => {
+  const doc = GOOD + '\n\n最小反例：输入\n```text\n' + CE_INPUT + '```\n你的输出 3 5，正确输出 5 0。';
+  const r = ed.ensureAppendix(doc, APP_CTX);
+  assert.deepStrictEqual(r.appended, ['scope']);
+  assert.strictEqual(r.text.split(ed.APPENDIX_HEAD).length - 1, 1, '附录标头只能出现一次');
+  assert.ok(/验证范围（机器记录）/.test(r.text), '验证范围仍要补');
+});
+
+ok('ensureAppendix：幂等（第二次调用不再改动文本）', () => {
+  const once = ed.ensureAppendix(GOOD, APP_CTX);
+  const twice = ed.ensureAppendix(once.text, APP_CTX);
+  assert.deepStrictEqual(twice.appended, []);
+  assert.strictEqual(twice.text, once.text);
+});
+
+ok('ensureAppendix：输入太短（1 1 这种）不做"已引用"判定，照补', () => {
+  const ctx = { counterexample: { input: '1 1', expected: '1', actual: '0', from: 'sol-vs-brute' } };
+  const r = ed.ensureAppendix(GOOD + '\n随口一提 1 1。', ctx);
+  assert.deepStrictEqual(r.appended, ['counterexample']);
+});
+
+ok('acceptDelivered：有验证结论却没有附录 → 拦下（边界不能只靠模型转述）', () => {
+  const acc = ed.acceptDelivered(GOOD, APP_CTX);
+  assert.strictEqual(acc.ok, false);
+  assert.ok(acc.errors.some((e) => /系统实测/.test(e)), JSON.stringify(acc.errors));
+  assert.ok(acc.errors.some((e) => /最小反例/.test(e)), JSON.stringify(acc.errors));
+});
+
+ok('acceptDelivered：有验证范围附录但反例原文不在 → 照样拦下', () => {
+  const only = ed.ensureAppendix(GOOD, { verification: APP_CTX.verification }).text;
+  const acc = ed.acceptDelivered(only, APP_CTX);
+  assert.strictEqual(acc.ok, false);
+  assert.ok(acc.errors.some((e) => /最小反例/.test(e)), JSON.stringify(acc.errors));
+});
+
+ok('validate：附录不算模型正文（结构类判据只看正文，附录救不了缺章节）', () => {
+  const onlyApp = ed.systemAppendix(APP_CTX);
+  const v = ed.validate(onlyApp, { intent: 'full', level: 'L3', solCode: CODE, verification: APP_CTX.verification });
+  assert.strictEqual(v.stats.appendix, true, 'stats 要标出附录');
+  assert.ok(v.stats.ownLen < 40, 'own 只剩空白');
+  assert.ok(v.errors.some((e) => /题面拆解/.test(e)), JSON.stringify(v.errors));
+  assert.ok(v.errors.some((e) => /代码/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('validate：附录里的验证范围能满足"写清边界"，但正文里把话说过头照样拦', () => {
+  const withApp = ed.ensureAppendix(GOOD + '\n以上代码已验证通过，可以直接提交。', APP_CTX).text;
+  const v = ed.validate(withApp, { intent: 'full', level: 'L3', solCode: CODE, verification: APP_CTX.verification });
+  assert.ok(v.errors.some((e) => /声称"已验证"/.test(e)), JSON.stringify(v.errors));
+  assert.ok(!v.errors.some((e) => /验证口径/.test(e)), '附录已经写明边界，不该再报"没写清口径"');
+});
+
+ok('validate：附录里的 ```text 反例不被当成代码块（代码保真只看正文）', () => {
+  const withApp = ed.ensureAppendix(GOOD, APP_CTX).text;
+  const v = ed.validate(withApp, { intent: 'full', level: 'L3', solCode: CODE, verification: APP_CTX.verification });
+  assert.strictEqual(v.stats.codeBlocks, 1, '正文只有 1 个代码块');
+  assert.ok(!v.errors.some((e) => /不一致/.test(e)), JSON.stringify(v.errors));
+});
+
+ok('richAppendix：图文文档末尾的同一份附录（一章），HTML 已经转义过', () => {
+  const frag = ed.richAppendix(APP_CTX);
+  assert.ok(/<section class="chapter">/.test(frag), frag.slice(0, 80));
+  assert.ok(/系统实测（验证链写入，不是模型转述）/.test(frag), frag);
+  assert.ok(/最小反例/.test(frag) && /验证范围（机器记录）/.test(frag), frag);
+  assert.ok(frag.indexOf(APP_CTX.verification.scopeNote) >= 0, frag);
+  const esc = ed.richAppendix({ counterexample: { input: 'a < b & c', expected: '<x>', actual: '&y', from: 'sol-vs-brute' } });
+  assert.ok(/a &lt; b &amp; c/.test(esc) && !/a < b & c/.test(esc), esc);
+  assert.ok(/&lt;x&gt;/.test(esc) && /&amp;y/.test(esc), esc);
+});
+
+ok('richAppendix：模型文档里已经引用过那条输入 ⇒ 不重复贴（只补验证范围）', () => {
+  const own = '<p>看这组：' + CE_INPUT.replace(/\n/g, '\n') + '</p>';
+  const frag = ed.richAppendix(Object.assign({ own }, APP_CTX));
+  assert.ok(!/最小反例/.test(frag), frag);
+  assert.ok(/验证范围（机器记录）/.test(frag), frag);
+  assert.strictEqual(ed.richAppendix({ own: 'x' }), '', '没有素材时不注入空章节');
+});
+
 console.log('\nexplaindoc: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));

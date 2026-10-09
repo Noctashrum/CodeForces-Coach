@@ -19,6 +19,7 @@ process.env.CHATBOX_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-paralle
 const workspace = require('../lib/workspace');
 workspace.setRoot(path.join(process.env.CHATBOX_DATA_DIR, 'workspace'));
 const harness = require('../lib/harness');
+const explaindoc = require('../lib/explaindoc');
 const runner = require('../lib/runner');
 
 let pass = 0;
@@ -273,6 +274,16 @@ const callAgent = async (opts) => {
   ok('富讲解容错：没有走"回落 Markdown"',
     !(res3.trajectory || []).some((t) => t.kind === 'richdoc-fallback'),
     (res3.trajectory || []).map((t) => t.kind));
+  /* 图文路径也要带「系统实测」附录（验证范围由验证链写入，不靠模型转述）：
+   * 注入点在 richdoc.validate 之后 —— 校验的是模型写的内容，附录是我们自己生成的。 */
+  ok('图文交付物：末尾带「系统实测」一章（验证范围由验证链写入）',
+    /系统实测（验证链写入，不是模型转述）/.test(String(res3.richDoc || ''))
+    && /验证范围（机器记录）/.test(String(res3.richDoc || ''))
+    && (res3.trajectory || []).some((t) => t.kind === 'explain-appendix'),
+    { hasAppendix: /系统实测/.test(String(res3.richDoc || '')), kinds: (res3.trajectory || []).map((t) => t.kind).filter((k) => /explain/.test(k)) });
+  ok('图文交付物：附录在模型文档之后（正文仍然是自己那份，不被顶掉）',
+    String(res3.richDoc || '').indexOf('heapq') < String(res3.richDoc || '').indexOf('系统实测（验证链写入'),
+    { at: String(res3.richDoc || '').indexOf('系统实测（验证链写入') });
 
   /* ---------------- 工作台时机：每个 Agent 的 chip 必须自己跑完就收 ----------------
    * 实测反馈："agent 确实并行了，但三个 chip 是一起结束的，提前跑完的也一直显示正在工作"。
@@ -1413,6 +1424,20 @@ const callAgent = async (opts) => {
       !!rFix.verification && rFix.verification.status === 'ok'
       && rFix.verification.solSamplesPass === true && rFix.verification.claimVerified === true,
       rFix.verification);
+    /* 交付物自带「系统实测」附录：反例与验证范围由验证链写入，不靠模型转述。
+     * 实测（.probe/counterexample-census.js）：19 个带最小反例的格子里只有 1 格在正文引用了它。 */
+    const bodyFix = String(rFix.explainerText || '');
+    ok('交付物自带「系统实测」附录（验证范围由验证链写入，不是模型转述）',
+      bodyFix.indexOf(explaindoc.APPENDIX_HEAD) >= 0 && /验证范围（机器记录）/.test(bodyFix)
+      && kFix.indexOf('explain-appendix') >= 0,
+      { kinds: kFix.filter((k) => /explain/.test(k)), tail: bodyFix.slice(-120) });
+    ok('交付物：附录在模型正文之后（正文照旧走结构校验）',
+      bodyFix.indexOf('## 题面拆解') >= 0
+      && bodyFix.indexOf('## 题面拆解') < bodyFix.indexOf(explaindoc.APPENDIX_HEAD),
+      { head: bodyFix.slice(0, 40), at: bodyFix.indexOf(explaindoc.APPENDIX_HEAD) });
+    ok('交付物：附录里的结论与链条口径一致（已验证 / 部分验证都不是模型说了算）',
+      /结论：(已验证|部分验证|未验证通过)/.test(bodyFix),
+      bodyFix.slice(bodyFix.indexOf(explaindoc.APPENDIX_HEAD)).slice(0, 300));
 
     console.log('parallel: 修不动时次数被整轮上限卡住');
     process.env.CFCOACH_SAMPLE_FIX_MAX = '2';
