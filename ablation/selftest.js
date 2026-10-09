@@ -1154,9 +1154,10 @@ async function main() {
         && JSON.stringify(bigSampleRow).indexOf('actualFull') === -1,
         JSON.stringify(Object.keys(bigSampleRow)));
 
-      // 尺子的自觉（2026-10-10 通宵）：oracle 在**尺子自己的最大档**上就超了题面时限，
-      // 说明这份数据比官方最坏输入还狠（官方最坏输入上标准答案至少跑得完）⇒ 据此判出的 TLE/slow 存疑。
-      // 现场：机器2 的 2247D2，rejudge 打印 `max 超时/oracle 4.8s TL2000` —— 别让候选为尺子的过重数据背锅。
+      // 尺子的自觉（2026-10-10 通宵，10-10 晚升级）：oracle 在**尺子自己的最大档**上就超了题面时限，
+      // 说明这份数据比官方最坏输入还狠（官方最坏输入上标准答案至少跑得完）⇒ 这种抽样**直接剔掉**、另画一份；
+      // 全被剔光就如实判"这份尺子在这题上判不了"，绝不让候选为尺子的过重数据背锅。
+      // 现场：机器2 的 2247D2，rejudge 打印 `max 超时/oracle 4.8s TL2000`。
       const ovRoot = path.join(tmp, 'overtl-store');
       fs.mkdirSync(path.join(ovRoot, 'gen-scale'), { recursive: true });
       const ovId = 'ck920';
@@ -1169,8 +1170,7 @@ async function main() {
         'print(n)',
         'print(" ".join(map(str, vals)))'
       ].join('\n') + '\n', 'utf8');
-      // 忙等 n*factor 毫秒（烧 CPU、可预测）：oracle n=20 → 900ms > 时限 300ms；
-      // 候选 n=20 → 600ms 超时限但远在宽松上限内 ⇒ 判 slow，且 maxScale 必须自暴 oracle 超时限。
+      // 忙等 n*factor 毫秒（烧 CPU、可预测）：n=20 时 perN=45 → 900ms（> 时限 300ms）、perN=1 → 20ms（远在时限内）
       const burnSrc = (perN) => [
         '#include <cstdio>',
         '#include <ctime>',
@@ -1182,32 +1182,107 @@ async function main() {
       ].join('\n') + '\n';
       const ovOracle = path.join(ovRoot, ovId + '.oracle.cpp');
       fs.writeFileSync(ovOracle, burnSrc(45), 'utf8');
+      const ovProblem = (lang, file) => ({
+        id: ovId,
+        statement: 'The first line contains n（1 ≤ n ≤ 20）. The second line contains n integers '
+          + 'a_1, ..., a_n（1 ≤ a_i ≤ 1000）. Print them in the same order, separated by spaces.',
+        samples: [{ input: '3\n4 7 2\n', output: '4 7 2\n' }],
+        oracle: { file: file, lang: lang }
+      });
       const vOverTl = await ruler.runRuler({
         code: burnSrc(30),
         storeDir: ovRoot, codeLang: 'cpp', tiers: [], generousMs: 20000,
-        bruteTimeoutMs: 30000, genTimeoutMs: 30000,
-        problem: {
-          id: ovId,
-          statement: 'The first line contains n（1 ≤ n ≤ 20）. The second line contains n integers '
-            + 'a_1, ..., a_n（1 ≤ a_i ≤ 1000）. Print them in the same order, separated by spaces.',
-          samples: [{ input: '3\n4 7 2\n', output: '4 7 2\n' }],
-          oracle: { file: ovOracle, lang: 'cpp' }
-        }
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000, maxScaleCases: 2, oracleTries: 1,
+        problem: ovProblem('cpp', ovOracle)
       });
-      check('尺子自觉：oracle 自己在最大档就超时限 → 判词明说"存疑"，maxScale 记下 oracleOverTl',
-        vOverTl.cfac === false && vOverTl.verdict === 'slow'
-        && !!vOverTl.maxScale && vOverTl.maxScale.oracleOverTl === true
-        && Number(vOverTl.maxScale.oracleMs) > 300 && /存疑/.test(String(vOverTl.detail)),
-        JSON.stringify([vOverTl.verdict, vOverTl.maxScale, vOverTl.detail]));
-      const ovGroup = ruler.summarizeCfac([Object.assign({ level: 'L2' }, vOverTl)]).L2;
+      check('尺子自觉：oracle 每一份抽样都超时限 → 全部剔掉，判"这份尺子判不了"（不是 TLE，也不是候选的错）',
+        vOverTl.cfac === false && vOverTl.verdict === 'oracle-over-tl-at-max'
+        && !!vOverTl.maxScale && vOverTl.maxScale.cases === 0 && vOverTl.maxScale.rejectedOracleSlow === 3
+        && Number(((vOverTl.oracle || {}).rejected || [{}])[0].oracleMs) > 300
+        && /判不了/.test(String(vOverTl.detail)) && /oracle 自己每一份都超了题面时限/.test(String(vOverTl.detail)),
+        JSON.stringify([vOverTl.verdict, vOverTl.maxScale, vOverTl.oracle, vOverTl.detail]));
+
+      // 抽 N 份取最慢：oracle 与候选都够快 ⇒ 判 AC，但必须**抽满**并逐份记账（一份数据只是一次抽样）
+      const ovFastOracle = path.join(ovRoot, ovId + '.fast.cpp');
+      fs.writeFileSync(ovFastOracle, burnSrc(1), 'utf8');
+      const vMulti = await ruler.runRuler({
+        code: burnSrc(1),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000,
+        problem: ovProblem('cpp', ovFastOracle)
+      });
+      check('尺子也抽 3 份最大档取最慢：AC 格子的 cases=3、逐份记账、measuredMs 就是那一摞里的最大值',
+        vMulti.cfac === true && vMulti.verdict === 'AC' && !!vMulti.maxScale
+        && vMulti.maxScale.cases === 3 && Array.isArray(vMulti.maxScale.msEach) && vMulti.maxScale.msEach.length === 3
+        && vMulti.maxScale.measuredMs === Math.max.apply(null, vMulti.maxScale.msEach)
+        && vMulti.maxScale.oracleOverTl === false && vMulti.maxScale.rejectedOracleSlow === 0,
+        JSON.stringify([vMulti.verdict, vMulti.maxScale]));
+      const vOne = await ruler.runRuler({
+        code: burnSrc(1),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000, maxScaleCases: 1,
+        problem: ovProblem('cpp', ovFastOracle)
+      });
+      check('maxScaleCases=1 时退回单抽（老口径仍可复现：cases=1）',
+        vOne.cfac === true && !!vOne.maxScale && vOne.maxScale.cases === 1 && vOne.maxScale.msEach.length === 1,
+        JSON.stringify([vOne.verdict, vOne.maxScale]));
+
+      // 对拍档也要抽几份（2026-10-10 晚，同一天第二次）：一份随机数据只是一次抽样 ——
+      // 现场 2257F1：老判分 `diff-WA（200:mismatch）`，抽 3 份最大档重判时同档三次都 same，最后判 `slow`。
+      // 判据 = 这一档抽的每一份都一致；抽到错答就照旧立刻判 WA（真 bug 不看运气，"没 bug"才看运气）。
+      const vDiffOk = await ruler.runRuler({
+        code: burnSrc(1),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [4], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000, maxScaleCases: 1,
+        problem: ovProblem('cpp', ovFastOracle)
+      });
+      check('对拍档默认抽 2 份：两份都与标尺一致才算这一档过（cases=2、sameCases=2）',
+        vDiffOk.cfac === true && vDiffOk.verdict === 'AC' && !!vDiffOk.diffs && !!vDiffOk.diffs[0]
+        && vDiffOk.diffs[0].tier === 4 && vDiffOk.diffs[0].status === 'same'
+        && vDiffOk.diffs[0].cases === 2 && vDiffOk.diffs[0].sameCases === 2,
+        JSON.stringify([vDiffOk.verdict, vDiffOk.diffs]));
+      const vDiff1 = await ruler.runRuler({
+        code: burnSrc(1),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [4], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000, maxScaleCases: 1, diffCases: 1,
+        problem: ovProblem('cpp', ovFastOracle)
+      });
+      check('diffCases=1 时退回单抽（老口径仍可复现：cases=1）',
+        vDiff1.cfac === true && !!vDiff1.diffs && vDiff1.diffs[0].cases === 1 && vDiff1.diffs[0].sameCases === 1,
+        JSON.stringify([vDiff1.verdict, vDiff1.diffs]));
+
+      // 只在 n>3 上错的候选（样例 n=3 照样过 ⇒ 能走到对拍档）：抽到错答立刻判 WA，不必把这一档抽满
+      const wrongBig = path.join(ovRoot, ovId + '.wrongbig.cpp');
+      fs.writeFileSync(wrongBig, [
+        '#include <cstdio>',
+        'int a[100005];',
+        'int main(){int n;if(scanf("%d",&n)!=1)return 0;for(int i=0;i<n;i++)scanf("%d",&a[i]);',
+        'if(n>3)a[0]=a[0]*2;',
+        'for(int i=0;i<n;i++)printf("%d%c",a[i],i==n-1?10:32);return 0;}'
+      ].join('\n') + '\n', 'utf8');
+      const vDiffWa = await ruler.runRuler({
+        code: fs.readFileSync(wrongBig, 'utf8'),
+        storeDir: ovRoot, codeLang: 'cpp', tiers: [4], generousMs: 20000,
+        bruteTimeoutMs: 30000, genTimeoutMs: 30000, maxScaleCases: 1,
+        problem: ovProblem('cpp', ovFastOracle)
+      });
+      check('对拍抽到错答 → 照旧 diff-WA（不必抽满这一档：cases=1、sameCases=0，不会因为多抽而放过）',
+        vDiffWa.cfac === false && vDiffWa.verdict === 'diff-WA' && !!vDiffWa.diffs && vDiffWa.diffs.length === 1
+        && vDiffWa.diffs[0].status === 'mismatch' && vDiffWa.diffs[0].cases === 1 && vDiffWa.diffs[0].sameCases === 0,
+        JSON.stringify([vDiffWa.verdict, vDiffWa.diffs]));
+
+      const ovGroup = ruler.summarizeCfac([Object.assign({ level: 'L2' }, vOverTl), Object.assign({ level: 'L2' }, vMulti)]).L2;
       const ovSynth = ruler.summarizeCfac([
+        { level: 'L2', verdict: 'slow', maxScale: { oracleOverTl: true } },
         { level: 'L2', verdict: 'slow', maxScale: { oracleOverTl: false } },
         { level: 'L2', verdict: 'TLE', maxScale: null },
+        { level: 'L2', verdict: 'oracle-error-at-max', maxScale: null },
         { level: 'L2', verdict: 'AC', cfac: true, maxScale: { oracleOverTl: true } }
       ]).L2;
-      check('汇总表把"存疑 TLE/slow"单独计数：oracle 没超时限的 TLE/slow、以及 AC 都不算在内',
-        ovGroup.oracleOverTl === 1 && ovGroup.slow === 1
-        && ovSynth.oracleOverTl === 0 && ovSynth.slow === 1 && ovSynth.tle === 1 && ovSynth.cfac === 1,
+      check('汇总表把"尺子判不了"单独计数：老口径的存疑 TLE/slow 仍认、oracle 跑不完算 oracleBroken、AC 不算',
+        ovGroup.oracleOverTl === 1 && ovGroup.cfac === 1 && ovGroup.other === 0
+        && ovSynth.oracleOverTl === 1 && ovSynth.slow === 2 && ovSynth.tle === 1
+        && ovSynth.oracleBroken === 1 && ovSynth.cfac === 1 && ovSynth.other === 0,
         JSON.stringify([ovGroup, ovSynth]));
     }
 
