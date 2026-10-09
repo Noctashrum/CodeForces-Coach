@@ -54,6 +54,10 @@ function usage() {
     '  --max-stress-ms N    L2 单次对拍时长上限（默认 90000）',
     '  --doc-effort none    L2 讲解 Agent 关思考写文档（**实验臂**：实测一份文档 3.5-5K 输出 token，',
     '                       带思考要 30-65K；代价是"想得少"，默认关。记录里写进 request.docEffort）',
+    '  --code-effort none   L2 **题解角色**关思考直接出码（**实验臂**：',
+    '                       .probe/probe-sol-arms.js 实测同一问法关思考出码只要 1/2-1/3 的价格且判分不更差，',
+    '                       默认关；暴力解与数据生成器**照旧带思考**——它们是尺子，不是交付物，',
+    '                       一起关掉会让 A/B 变成三个变量的对照。记录里写进 request.codeEffort）',
     '  --out DIR            输出目录（默认 ablation/out/<时间戳>）',
     '  --dry-run            只打印计划，不调模型'
   ].join('\n'));
@@ -130,6 +134,7 @@ async function main() {
     rich: env.bool(args.rich, false),
     depth: args.depth ? String(args.depth).toUpperCase() : 'L3',
     docEffort: args.docEffort ? String(args.docEffort).toLowerCase() : '',
+    codeEffort: args.codeEffort ? String(args.codeEffort).toLowerCase() : '',
     maxStressMs: env.num(args.maxStressMs, 90000)
   };
   await pool(jobsList, jobs, async (j) => {
