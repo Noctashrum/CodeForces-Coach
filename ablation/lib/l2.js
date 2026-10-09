@@ -168,6 +168,7 @@ async function runL2(ctx) {
       intent: 'full', rich: !!ctx.rich, lang, wsKey: key,
       perTier: ctx.iterations || 30, maxStressMs: ctx.maxStressMs || 90000, depth: ctx.depth || 'L3',
       docEffort: ctx.docEffort || '',   // '' = 默认（讲解带思考）；'none' = 实验臂"关思考写文档"
+      codeEffort: ctx.codeEffort || '',  // '' = 默认（代码角色带思考）；'none' = 实验臂"关思考直接出码"
       timeLimitMs: tl.timeLimitMs || 0,  // 0 = 没有官方时限（性能闸会跳过，不编时限）
       timeLimitSource: tl.source          // override / problem / cache / none —— 记录里要能自证
     }
@@ -226,6 +227,7 @@ async function runL2(ctx) {
       rich: !!ctx.rich,
       richTheme: 'dark',
       docEffort: ctx.docEffort === 'none' ? 'none' : '',
+      codeEffort: ctx.codeEffort === 'none' ? 'none' : '',
       perTier: ctx.iterations || 30,
       maxStressMs: ctx.maxStressMs || 90000,
       // 性能闸（=批次③语言闸）的判据：0 会被 harness 当成"没有官方时限"，闸门照旧跳过。

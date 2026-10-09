@@ -1027,6 +1027,51 @@ const callAgent = async (opts) => {
       docAsks);
   }
 
+  /* ---------------- 实验旋钮 codeEffort：让代码角色首轮也关思考 ----------------
+   * 依据（`.probe/probe-sol-arms.js`，真判分 = 官方样例 + 与 oracle 200 组差分）：
+   * 带思考的题解角色把 8192 全烧在思考上、正文 0 字符（思考 26K-31K 字符被切断，靠"落码抢救"
+   * 把半截推导落成代码），而**同一问法关思考直接出码**只要 6259/4586 输出 token（带思考 9538/12804），
+   * 判分一点不更差（2268D 两臂都过样例、都差分 WA；2268C 两臂都 WA）⇒ 截断家族里唯一便宜的杠杆。
+   * 旋钮默认关（不传 codeEffort 就是老行为），这里把两端都钉住。 */
+  console.log('\nparallel: 题解关思考的实验旋钮（--code-effort none）');
+  {
+    const asks = [];
+    const bruteAsks = [];
+    const mkEffAgent = (tag) => async (opts) => {
+      const sys = String(opts.system || '');
+      if (sys.indexOf('【题解 Agent】') >= 0) {
+        asks.push({ tag, effort: opts.reasoningEffort || null, maxTokens: opts.maxTokens || null });
+      } else if (sys.indexOf('【暴力 Agent】') >= 0) {
+        bruteAsks.push({ tag, effort: opts.reasoningEffort || null });
+      }
+      return callAgent(opts);
+    };
+    const runEffort = (codeEffort, key) => harness.runPipeline({
+      conv: { id: key, title: '题解关思考' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: key, codeEffort,
+      callAgent: mkEffAgent(codeEffort || 'default'), tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    });
+    const rEffOn = await runEffort('none', 'codeeffort-on');
+    const onFirst = asks.filter((a) => a.tag === 'none')[0] || null;
+    ok('实验旋钮：codeEffort=none 时题解 Agent 首轮就关思考并拿 8192（探针实测关思考 6259/4586 '
+      + '输出 token vs 带思考 9538/12804，判分不更差）',
+      !!onFirst && onFirst.effort === 'none' && onFirst.maxTokens === 8192, { onFirst, asks });
+    const rEffOff = await runEffort('', 'codeeffort-off');
+    const offFirst = asks.filter((a) => a.tag === 'default')[0] || null;
+    ok('对照：不传 codeEffort 时题解 Agent 首轮照旧带思考（老行为一个字都不改）',
+      !!offFirst && !offFirst.effort, { offFirst, asks });
+    ok('两条臂的题解代码一致（这条旋钮只改"想不想"，不改交付物本身）',
+      !!(rEffOn.solCode && rEffOff.solCode) && String(rEffOn.solCode).trim() === String(rEffOff.solCode).trim(),
+      { on: String(rEffOn.solCode || '').slice(0, 40), off: String(rEffOff.solCode || '').slice(0, 40) });
+    const bruteOn = bruteAsks.filter((a) => a.tag === 'none')[0] || null;
+    ok('收窄：codeEffort=none 只关**题解角色**的思考，暴力解（尺子）照旧带思考'
+      + '（2026-10-10 实测踩到过"连尺子一起关"的三变量混淆）',
+      !!bruteOn && !bruteOn.effort, { bruteOn, bruteAsks });
+  }
+
   /* ---------------- 交付前性能闸：算法对但最大规模超时的题，不许说"已验证" ----------------
    * 真实丢分（两机消融 + 14 题对照）：2247D2 与 oracle 逐 token 相同但最大档 7.33× 于 oracle、
    * 2250C 交付的代码连样例都超时；我们的链只在小规模对拍，从不按题面真实上限计时。

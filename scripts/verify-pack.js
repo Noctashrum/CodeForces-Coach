@@ -67,6 +67,8 @@ check('多解 checker：接进 harness 的多解题站点',
 // 默认路径必须在包里：同语言优化提问 + 四步验收 + 成功/失败两种轨迹 + 默认关的语言闸。
 check('同语言性能优化：接在性能闸里的默认路径',
   'lib/harness.js', ['perfRepairConfig', 'langSwitchEnabled', 'tryPerfRepair', 'perf-repair-ok', 'perf-repair-reject', '语言不许换']);
+check('题解关思考：截断家族的实验旋钮（默认关）',
+  'lib/harness.js', ['codeEffortNone', 'o.codeEffort', 'probe-sol-arms']);
 
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
