@@ -810,9 +810,18 @@ async function runRuler(opts) {
     const solRun = await arena.run('sol', gBig.input, limits.timeLimitMs);
     const maxScale = Object.assign({}, bigScale, {
       oracleMs: oracleRun.timeMs,
+      timeLimitMs: limits.timeLimitMs,
+      // 尺子的自觉：oracle 自己在**这一档**就超了题面时限时，这份数据比官方最坏输入还狠
+      // （官方最坏输入上标准答案至少得跑得完），据此判出来的 TLE/slow 存疑 —— 别让候选为尺子的过重数据背锅，
+      // 也别为它花钱做性能优化。2026-10-10 现场：机器2 的 2247D2，oracle 4.8s vs 时限 2000ms。
+      oracleOverTl: Number(oracleRun.timeMs || 0) > Number(limits.timeLimitMs || 0),
       measuredMs: solRun.timedOut ? limits.timeLimitMs : solRun.timeMs
     });
     const same = !solRun.timedOut && solRun.ok && runner.compareOutputs(oracleRun.output, solRun.output).ok;
+    const overTlNote = maxScale.oracleOverTl
+      ? '⚠️ 尺子自证不了这一档比官方最坏输入更轻：oracle 自己就跑了 ' + oracleRun.timeMs + 'ms（> 时限 '
+        + limits.timeLimitMs + 'ms）⇒ 这个判定存疑，别据此断定候选过不了 CF，也别为它做性能优化'
+      : '';
 
     let verdict;
     if (solRun.timedOut) {
@@ -829,7 +838,7 @@ async function runRuler(opts) {
       maxScale.same = same;
       maxScale.ratioToOracle = maxScale.measuredMs && oracleRun.timeMs
         ? Number((maxScale.measuredMs / Math.max(1, oracleRun.timeMs)).toFixed(2)) : null;
-      return Object.assign(base, { cfac: false, verdict, samples, diffs, maxScale });
+      return Object.assign(base, { cfac: false, verdict, samples, diffs, maxScale, detail: overTlNote });
     }
     if (!solRun.ok) {
       return Object.assign(base, {
@@ -874,7 +883,7 @@ async function runRuler(opts) {
     }
     // 跑得动、答案对、且在真实时限内
     if (solRun.timeMs > limits.timeLimitMs) {
-      return Object.assign(base, { cfac: false, verdict: 'slow', samples, diffs, maxScale });
+      return Object.assign(base, { cfac: false, verdict: 'slow', samples, diffs, maxScale, detail: overTlNote });
     }
     return Object.assign(base, { cfac: true, verdict: 'AC', samples, diffs, maxScale });
   } finally {
@@ -890,7 +899,7 @@ async function runRuler(opts) {
       groups[lvl] = {
         total: 0, cfac: 0, sampleAC: 0, diffAC: 0,
         noCode: 0, noOracle: 0, noGen: 0, genWeak: 0,
-        tle: 0, slow: 0, wa: 0, re: 0, other: 0, oracleBroken: 0, costTotal: 0, specialJudge: 0
+        tle: 0, slow: 0, wa: 0, re: 0, other: 0, oracleBroken: 0, oracleOverTl: 0, costTotal: 0, specialJudge: 0
       };
     }
     const g = groups[lvl];
@@ -912,6 +921,8 @@ async function runRuler(opts) {
     else if (verdict === 'RE') g.re++;
     else if (/oracle-error/.test(verdict)) g.oracleBroken++;
     else if (verdict !== 'AC') g.other++;
+    // "存疑 TLE/slow"：尺子的最大档数据比官方最坏输入还狠（oracle 自己就超了时限）⇒ 这条 TLE/slow 不可信
+    if ((verdict === 'TLE' || verdict === 'slow') && v.maxScale && v.maxScale.oracleOverTl) g.oracleOverTl++;
   }
   return groups;
 }

@@ -185,7 +185,8 @@ async function main() {
       + '  差分AC ' + String(g.diffAC).padStart(2)
       + '  | no-code ' + g.noCode + '  gen-weak ' + g.genWeak + '  no-gen ' + g.noGen
       + '  TLE ' + g.tle + '  slow ' + g.slow + '  WA ' + g.wa
-      + '  RE ' + g.re + '  oracle坏 ' + g.oracleBroken);
+      + '  RE ' + g.re + '  oracle坏 ' + (g.oracleBroken || 0)
+      + '  ⚠️存疑TLE/slow ' + (g.oracleOverTl || 0) + '（尺子的最大档比官方最坏输入还狠：oracle 自己就超了时限）');
   }
 
   // 花费与 ¥/CF-AC
