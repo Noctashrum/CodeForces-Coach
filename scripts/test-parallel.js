@@ -1132,6 +1132,12 @@ const callAgent = async (opts) => {
         && /A\/B 指定的最大档/.test(String(vSlow.scopeNote || ''))
         && !/按题面解析出的上限/.test(String(vSlow.scopeNote || '')),
         { gate: vSlow.perfGate, note: String(vSlow.scopeNote || '').slice(0, 220) });
+      /* 多档抽取（§6.9）：第一份就超时 ⇒ 停手（那已经是判据），不再白抽后面两份。
+       * 反过来也说明"抽得多"不会把失败的格子拖成 3 倍时长。 */
+      ok('多档抽取：第一份就超时 ⇒ 只抽了 1 份（早停，别白烧时间）',
+        !!(vSlow.perfGate && vSlow.perfGate.cases === 1 && vSlow.perfGate.msEach.length === 1
+          && vSlow.perfGate.timedOut === true),
+        vSlow.perfGate);
 
       const resFast = await runGate('perfgate-pass', SOL);
       const trajFast = (resFast.trajectory || []).map((t) => t.kind).join(',');
@@ -1144,6 +1150,16 @@ const callAgent = async (opts) => {
         vFast.perfGate && vFast.perfGate.source === 'override' && vFast.perfGate.n === 200
         && vFast.perfGate.maxV === 1000000000,
         vFast.perfGate);
+      /* 多档抽取（§6.9）：一份随机数据只是一次抽样 ⇒ 不超时的格子必须**抽满** N 份取最慢，
+       * 而且这件事要写在覆盖范围里（"实测 200ms"是"最慢那一份 200ms"，不是"这一份 200ms"）。 */
+      ok('多档抽取：不超时的格子抽满 3 份最大档数据取最慢，并逐份记账',
+        !!(vFast.perfGate && vFast.perfGate.cases === 3 && Array.isArray(vFast.perfGate.msEach)
+          && vFast.perfGate.msEach.length === 3
+          && vFast.perfGate.ms === Math.max.apply(null, vFast.perfGate.msEach)),
+        vFast.perfGate);
+      ok('多档抽取：覆盖范围写明"抽了 3 份数据取最慢：…"，不把一次抽样说成结论',
+        /抽了 3 份数据取最慢：\d+\/\d+\/\d+ms/.test(String(vFast.scopeNote || '')),
+        String(vFast.scopeNote || '').slice(0, 260));
 
       /* 第三种：**实测已经超过题面时限、但还在 2× 容差内**通过。
        * 这就是 2250C 的现役现场：闸实测 2072ms / 时限 2000ms ⇒ 记 ok=true，而 CF-AC 尺子判 slow。

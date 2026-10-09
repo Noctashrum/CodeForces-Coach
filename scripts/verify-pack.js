@@ -79,6 +79,11 @@ check('性能闸口径：闸按题面解析出的上限计时（env 是显式覆
 // 容差内已超时限也必须说出来（2250C 复跑：闸 2072ms / 时限 2000ms，尺子判 slow）
 check('性能闸口径：容差内已超题面时限要如实告知', 'lib/harness.js', ['overTl', '已经超过题面时限']);
 
+// 批次④-第二刀（2026-10-10）：最大档要抽**几份**数据取最慢 —— 一份随机数据只是一次抽样，
+// 只抽一份就写"已验证"等于把结论押在运气上（§6.7 的 2250C 假"已验证"就是这么漏过去的）。
+check('多档抽取：最大档抽 N 份取最慢（闸/同语言优化/换语言三处同口径）',
+  'lib/harness.js', ['perfGateCases', 'measureWorstOnMaxScale', 'perf-gate-fewer-cases', '抽了 ']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
