@@ -85,12 +85,17 @@ function openRun(outDir) {
   ensureDir(path.join(outDir, 'sandbox'));
   const recordsFile = path.join(outDir, 'records.jsonl');
   const records = [];
+  // 这个 store 里**以前批次**的行（本批次 add() 会往后面追加，收尾时要把它们原样留在前面）
+  const priorLines = fs.existsSync(recordsFile)
+    ? fs.readFileSync(recordsFile, 'utf8').split('\n').filter(Boolean)
+    : [];
   const id = runId();
   return {
     id,
     outDir,
     recordsFile,
     records,
+    priorLines,
     answerPath(name) { return path.join(outDir, 'answers', name + '.md'); },
     transcriptPath(name) { return path.join(outDir, 'transcript', name + '.jsonl'); },
     sandboxDir(name) { return ensureDir(path.join(outDir, 'sandbox', name)); },
@@ -108,6 +113,33 @@ function openRun(outDir) {
       records.push(rec);
       fs.appendFileSync(recordsFile, JSON.stringify(rec) + '\n', 'utf8');
       return rec;
+    },
+    /**
+     * 收尾：把内存里补全后的记录（带 cost / requestFingerprint）写回 records.jsonl。
+     *
+     * **同一个 store 是"一批题在同一把尺子下的全部证据"**，跨批次累积才读得出"这道题一共花了多少钱"。
+     * 所以这里必须把以前批次的行留在前面 —— 曾经是 `writeFileSync(recordsFile, records.map(...))`
+     * 直接覆盖，对同一个 store 跑第二批就把第一批整批抹掉（2026-10-10 实测：recheck2-m1 先后三次
+     * 调用只剩最后 1 条，2101E/2247D2/2247F/2250F/2241D/2267F2 六格的记录全丢，花掉的钱却已经花了）。
+     * @returns {number} 写回后文件里的总行数
+     */
+    finalize() {
+      const all = priorLines.concat(records.map((r) => JSON.stringify(r)));
+      fs.writeFileSync(recordsFile, all.join('\n') + (all.length ? '\n' : ''), 'utf8');
+      return all.length;
+    },
+    /**
+     * 整体重写，**不拼 priorLines**：调用方自己就是全部历史的持有者。
+     *
+     * 工作台（`ablation/serve.js`）在 `openRun` 之后会 `store.records().forEach((r) => run.records.push(r))`
+     * —— 它把 store 里已有的行装进了 `records`，所以收尾只能按 `records` 整体重写：
+     * 再用 `finalize()` 就会把历史写两遍（2026-10-10 实测：工作台 e2e 四格的行数直接翻倍，11 → 22）。
+     * @returns {number} 写回后文件里的总行数
+     */
+    rewriteAll() {
+      const all = records.map((r) => JSON.stringify(r));
+      fs.writeFileSync(recordsFile, all.join('\n') + (all.length ? '\n' : ''), 'utf8');
+      return all.length;
     },
     writeSummary(extra) {
       const byLevel = {};

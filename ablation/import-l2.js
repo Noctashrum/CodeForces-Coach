@@ -137,7 +137,8 @@ function main() {
     run.add(rec);
     n++;
   }
-  fs.writeFileSync(run.recordsFile, run.records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  // 保留同一个 store 里以前批次的行（见 lib/record.js 的 finalize 注释）
+  run.finalize();
   console.log('导入 L2 记录 ' + n + ' 条 → ' + run.recordsFile);
   console.log('题号：' + (problemId || '(未知，请用 --problem 指定)') + '｜代码来源：' + (code ? code.source : '逐条从回答/文档里抽'));
   console.log('提示：判分前确认 problems.json 里这题有 samples 与 oracle——判分口径对三档必须完全一样。');

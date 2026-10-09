@@ -225,7 +225,9 @@ function fitRec(rec, target, problem, t0) {
 }
 
 function rewriteRecords(run) {
-  fs.writeFileSync(run.recordsFile, run.records.map((r) => JSON.stringify(r)).join('\n') + (run.records.length ? '\n' : ''), 'utf8');
+  // 工作台的 run.records 里已经装了 store 的全部历史（下面 `store.records().forEach(...)` 那段），
+  // 所以只能整体重写；用 finalize() 会把历史写两遍（见 lib/record.js 的 rewriteAll 注释）
+  run.rewriteAll();
 }
 
 function clampInt(v, lo, hi, dflt) {

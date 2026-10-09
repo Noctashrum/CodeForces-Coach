@@ -1332,6 +1332,21 @@ async function main() {
     const r0 = JSON.parse(lines[0]);
     check('记录里有题面 sha（三档同题面可审计）', !!r0.statementSha, String(r0.statementSha));
     check('两档题面 sha 相同（信息预算对齐）', r0.statementSha === JSON.parse(lines[1]).statementSha);
+
+    // finalize 的追加语义：同一个 store 跑第二批，不能把第一批的记录抹掉
+    // （一个 store 是"一批题在同一把尺子下的全部证据"，跨批次才读得出这道题一共花了多少钱）
+    check('finalize 之后本批 6 行仍在（不过滤、不丢行）',
+      fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean).length === 6,
+      'lines=' + fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean).length);
+    const run2 = record.openRun(run.outDir);
+    run2.add({ level: 'L0', problem: r0.problem, ok: false, usage: {}, statementSha: 'selftest-2nd' });
+    run2.finalize();
+    const lines2 = fs.readFileSync(run.recordsFile, 'utf8').split('\n').filter(Boolean);
+    check('同一 store 跑第二批：第一批 6 行留着（6 + 1 = 7 行）', lines2.length === 7, 'lines=' + lines2.length);
+    const first2 = JSON.parse(lines2[0]);
+    check('第二批之后第一批首行原样还在（题号与题面 sha 都不变）',
+      first2.problem === r0.problem && first2.statementSha === r0.statementSha,
+      'problem=' + first2.problem + ' sha=' + first2.statementSha);
   } finally {
     await mock.close();
     console.log('（自测临时目录：' + tmp + '，可删）');
