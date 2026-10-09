@@ -1678,12 +1678,15 @@ const callAgent = async (opts) => {
       + '## 代码\n```python\n' + code + '\n```\n## 讲解\nx\n## 易错点\nx\n'
       + '<viz-callout type="danger" title="易错">x</viz-callout>\n## 验证\n官方样例通过。';
     /**
-     * 假 agent：**题解角色**要分两类提问 —— 第一次是"解题"，之后那次是"把这份代码改快"。
-     * 判据用 user 提示词里的"改快"（perfRepairUser 的抬头），system 两边都是【题解 Agent】。
+     * 假 agent：**题解角色**要分三类提问 —— 第一次是"解题"，第二次是"把这份代码改快"
+     * （判据用 user 提示词里的"改快"，perfRepairUser 的抬头），之后可能是"优化版没过官方样例、
+     * 带着失败样例再修一次"（`repairAgainstSamples`，2026-10-10 晚新增的反馈回路）。
+     * system 三类都是【题解 Agent】，所以只能靠 user 提示词区分。
      */
-    const mkRepairAgent = (repairCode, onPrompt) => {
+    const mkRepairAgent = (repairCode, onPrompt, fixCode) => {
       let repairCalls = 0;
       let solCalls = 0;
+      let fixCalls = 0;
       const delay = (ms) => new Promise((r) => setTimeout(r, ms));
       const f = async (opts) => {
         const sys = String(opts.system || '');
@@ -1696,9 +1699,14 @@ const callAgent = async (opts) => {
             await delay(10);
             return '```python\n' + repairCode + '\n```';
           }
-          solCalls++;
+          if (solCalls === 0) {
+            solCalls++;
+            await delay(10);
+            return '```python\n' + SOL_SLOW2 + '\n```';
+          }
+          fixCalls++;
           await delay(10);
-          return '```python\n' + SOL_SLOW2 + '\n```';
+          return '```python\n' + (fixCode || SOL_SLOW2) + '\n```';
         }
         if (sys.indexOf('【暴力 Agent】') >= 0) { await delay(10); return '```python\n' + BRUTE + '\n```'; }
         if (sys.indexOf('【数据生成 Agent】') >= 0) { await delay(10); return '```python\n' + GEN_FULL2 + '\n```'; }
@@ -1706,6 +1714,7 @@ const callAgent = async (opts) => {
       };
       f.repairCalls = () => repairCalls;
       f.solCalls = () => solCalls;
+      f.fixCalls = () => fixCalls;
       return f;
     };
     const runRepair = (agent, key) => harness.runPipeline({
@@ -1733,6 +1742,16 @@ const callAgent = async (opts) => {
       && aOk.repairCalls() === 1 && aOk.solCalls() === 1,
       { prompts: seenPrompt.length, repair: aOk.repairCalls(), sol: aOk.solCalls(),
         head: String(seenPrompt[0] || '').slice(0, 100) });
+    /* 2026-10-10 实测 2257F1：交了 sqrt 分解、优化只快 16% —— 旧提问通篇常数清单，等于在暗示"别换算法"。
+     * 现在提问第一步就要它估上界、上界不够就换数据结构，并带上题面上限/时限/实测三件证据。 */
+    ok('同语言优化：提问先要它判断"上界够不够"，不够就换数据结构（不是继续调常数）',
+      /第一步/.test(seenPrompt[0]) && /渐进复杂度/.test(seenPrompt[0])
+      && /换掉数据结构或算法/.test(seenPrompt[0]) && /分块（sqrt 分解）/.test(seenPrompt[0])
+      && /如果上界够/.test(seenPrompt[0]),
+      String(seenPrompt[0] || '').slice(0, 220));
+    ok('同语言优化：提问把题面上限 / 时限 / 实测耗时三件证据都给了（它得靠这个估上界）',
+      /题面上限/.test(seenPrompt[0]) && /时限 200ms/.test(seenPrompt[0]) && /实测 \*\*\d+ms\*\*/.test(seenPrompt[0]),
+      String(seenPrompt[0] || '').slice(0, 220));
     ok('同语言优化：优化版重新对拍 + 重新计时都过 → 仍算"完整验证"（claimVerified=true）',
       !!(rOk.verification && rOk.verification.status === 'ok' && rOk.verification.claimVerified === true
         && rOk.verification.perfGate && rOk.verification.perfGate.ok === true
@@ -1754,6 +1773,10 @@ const callAgent = async (opts) => {
     ok('同语言优化回退：拒绝理由是"重新计时仍然超时"（不是逐字相同那条轻量守卫）',
       (rSlow.trajectory || []).some((t) => t.kind === 'perf-repair-reject' && /仍然超时/.test(String(t.note || ''))),
       (rSlow.trajectory || []).filter((t) => t.kind === 'perf-repair-reject').map((t) => t.note));
+    ok('同语言优化回退：拒绝理由如实说"上界可能不够，得换数据结构"（别让人以为再调参数就行）',
+      (rSlow.trajectory || []).some((t) => t.kind === 'perf-repair-reject'
+        && /算法上界很可能就不够/.test(String(t.note || '')) && /换数据结构\/换算法/.test(String(t.note || ''))),
+      (rSlow.trajectory || []).filter((t) => t.kind === 'perf-repair-reject').map((t) => t.note));
     ok('同语言优化回退：交付的还是原版 Python（被拒的"优化版"不许进交付物）',
       rSlow.solLang === 'python' && /time\.sleep\(0\.8\)/.test(String(rSlow.solCode || ''))
       && String(rSlow.solCode || '').indexOf('优化了个寂寞') < 0,
@@ -1766,19 +1789,41 @@ const callAgent = async (opts) => {
       kSlow.filter((k) => /lang-switch/.test(k)).length === 0,
       kSlow.filter((k) => /lang-switch/.test(k)));
 
-    console.log('parallel: 同语言优化 —— 快了但答案错了 → 用官方样例打回');
-    const aWrong = mkRepairAgent(SOL_WRONG_FAST);
+    console.log('parallel: 同语言优化 —— 快了但答案错了 → 先带着失败样例修一次，修不回来才打回');
+    // 优化版快而错 ⇒ 新回路会**先把优化版落到盘上**、带着失败样例修一次（共用整轮 sampleFix 额度）；
+    // 这里让"修"也只交回同一份错代码 ⇒ 修不回来，必须回退原版、不许把错代码留在交付物里。
+    const aWrong = mkRepairAgent(SOL_WRONG_FAST, null, SOL_WRONG_FAST);
     const rWrong = await runRepair(aWrong, 'perf-repair-wrong');
     const kWrong = (rWrong.trajectory || []).map((t) => t.kind);
     ok('同语言优化：快而错不算优化（perf-repair-reject 的理由是"没通过官方样例"）',
       (rWrong.trajectory || []).some((t) => t.kind === 'perf-repair-reject' && /官方样例/.test(String(t.note || ''))),
       (rWrong.trajectory || []).filter((t) => t.kind === 'perf-repair-reject').map((t) => t.note));
+    ok('同语言优化：优化版没过样例时，先走"带着失败样例定向修复"（不是一句话打回）',
+      kWrong.indexOf('sol-sample-fix-fail') >= 0 && aWrong.fixCalls() >= 1,
+      { kinds: kWrong.filter((k) => /perf|lang|sample-fix/.test(k)), fix: aWrong.fixCalls() });
     ok('同语言优化：交付物没被那次"快而错"污染（还是原版 + 仍然 perf-gate-slow + 不许声称已验证）',
       rWrong.solLang === 'python' && /time\.sleep\(0\.8\)/.test(String(rWrong.solCode || ''))
       && kWrong.indexOf('perf-gate-slow') >= 0 && kWrong.indexOf('perf-gate-pass') < 0
       && !!(rWrong.verification && rWrong.verification.claimVerified === false),
       { solLang: rWrong.solLang, kinds: kWrong.filter((k) => /perf|lang/.test(k)),
         claim: rWrong.verification && rWrong.verification.claimVerified });
+
+    console.log('parallel: 同语言优化 —— 优化版样例挂了，但带着失败样例修一次就修好了 → 优化成立');
+    // 这正是 2026-10-10 dsfix-ui/2257F1 的现场：它被新提问赶去换数据结构、交回一份大重写，
+    // 但样例 RE；旧代码直接丢弃（模型从没被告知哪条样例崩了）。新回路：修一次 → 通过 → 继续走对拍与重新计时。
+    const aFixOk = mkRepairAgent(SOL_WRONG_FAST, null, SOL);
+    const rFixOk = await runRepair(aFixOk, 'perf-repair-samplefix-ok');
+    const kFixOk = (rFixOk.trajectory || []).map((t) => t.kind);
+    ok('同语言优化+样例反馈：修好后照常走对拍与重新计时 → perf-repair-ok + perf-gate-pass + claimVerified=true',
+      kFixOk.indexOf('sol-sample-fix-ok') >= 0 && kFixOk.indexOf('perf-repair-ok') >= 0
+      && kFixOk.indexOf('perf-gate-pass') >= 0 && kFixOk.indexOf('perf-gate-slow') < 0
+      && !!(rFixOk.verification && rFixOk.verification.claimVerified === true),
+      { kinds: kFixOk.filter((k) => /perf|lang|sample-fix/.test(k)),
+        claim: rFixOk.verification && rFixOk.verification.claimVerified });
+    ok('同语言优化+样例反馈：交付物是"修好的那版"（不再含 sleep 慢代码、仍是 Python）',
+      rFixOk.solLang === 'python' && /heapq/.test(String(rFixOk.solCode || ''))
+      && !/time\.sleep\(0\.8\)/.test(String(rFixOk.solCode || '')),
+      { solLang: rFixOk.solLang, head: String(rFixOk.solCode || '').slice(0, 70) });
 
     console.log('parallel: 同语言优化 —— 关掉开关（CFCOACH_PERF_REPAIR=0）时连试都不试');
     process.env.CFCOACH_PERF_REPAIR = '0';
