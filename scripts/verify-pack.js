@@ -97,6 +97,20 @@ check('系统实测附录：反例与验证范围由验证链写入交付物',
 check('系统实测附录：harness 两条交付路径都注入并留轨迹',
   'lib/harness.js', ['explain-appendix', 'richWithAppendix', 'withAppendix', 'explain-appendix-fail']);
 
+// 批次④-第四刀（2026-10-10 深夜）：同语言优化提问必须**先估上界**——上界不够就换数据结构/算法，
+// 只调常数救不回来（2257F1 实测：sqrt 分解只能把 6.3s 压到 5.3s，16%）。旧提问通篇常数清单，
+// 等于在暗示"别换算法"，所以这条指令要留在提问里，别在重构时被删掉。
+check('同语言优化提问：先判断上界够不够，不够就换数据结构而不是调常数',
+  'lib/harness.js', ['渐进复杂度', '换掉数据结构或算法', '如果上界够', '算法上界很可能就不够']);
+
+// 批次④-第四刀（续）：优化版**没过官方样例**时不许一句话打回——把优化版落到盘上、带着失败样例
+// 走现成的 `repairAgainstSamples`，修好才继续对拍/计时；额度默认只喂 1 次（实测 2257F1 放宽到 3 次
+// 全失败还多花 ≈¥0.6）⇒ `CFCOACH_PERF_REPAIR_FIX`。修好之后必须把修好的代码写回 `out.code`，
+// 否则后面 `solCode = out.code` 会把没过样例的那一版又写回盘上（真会犯的坑）。
+check('同语言优化：样例不过时带着失败样例定向修复，默认只喂 1 次，且修好的是交付的那一版',
+  'lib/harness.js', ['repairAgainstSamples(\'同语言性能优化（\' + L + \'）\', cfg.fix)',
+    'CFCOACH_PERF_REPAIR_FIX', 'Object.assign({}, out, { code: solCode })']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
