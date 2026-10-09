@@ -84,6 +84,12 @@ check('性能闸口径：容差内已超题面时限要如实告知', 'lib/harne
 check('多档抽取：最大档抽 N 份取最慢（闸/同语言优化/换语言三处同口径）',
   'lib/harness.js', ['perfGateCases', 'measureWorstOnMaxScale', 'perf-gate-fewer-cases', '抽了 ']);
 
+// 批次④-第三刀（2026-10-10 深夜）：讲解验收线的诚实口径要按**就近语境**判，并且要和"完整验证"的唯一字段
+// （claimVerified）对齐 —— 旧规则整篇 search 那几个词，把 3/7 份诚实讲解误判成假声称，每份买一次
+// ¥0.043 的"修讲解结构"整篇重出（§6.12）。
+check('讲解验收线：诚实口径按就近语境判定，并与 claimVerified 对齐',
+  'lib/explaindoc.js', ['claimWordHits', 'HONEST_CUE', 'CLAIM_LOOK_BEHIND', 'claimVerified', '验证没到']);
+
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');
 checks.push(['打包器：GUI 子系统（不弹终端）', has(packSrc, 'Console: false'), has(packSrc, 'Console: false') ? 'ok' : '缺少 win32metadata.Console=false']);
