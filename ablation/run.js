@@ -158,7 +158,8 @@ async function main() {
       leakMarkupInAnswer: !!rec.leakMarkup
     };
     if (agentloop.hasLeakMarkup(rec.code || '')) rec.codeLeakMarkup = true;
-    // records.jsonl 已经写过一行（run.add），这里补写"带成本/指纹"的最终版本：直接重写整个文件更简单
+    // records.jsonl 已经写过一行（run.add）；收尾时用"补全后的记录"整体写回，
+    // 但同一个 store 里以前批次的行要留着（见 lib/record.js 的 finalize 注释）
     done++;
     const tag = rec.ok ? '✓' : '✗';
     console.log('[' + done + '/' + jobsList.length + '] ' + tag + ' ' + name + '  ' + Math.round((Date.now() - t0) / 1000) + 's  '
@@ -167,8 +168,8 @@ async function main() {
     return rec;
   });
 
-  // run.add 里已经逐行写过初版记录；这里用补全后的记录整体覆盖，保证 JSONL 与内存一致
-  fs.writeFileSync(run.recordsFile, run.records.map((r) => JSON.stringify(r)).join('\n') + (run.records.length ? '\n' : ''), 'utf8');
+  // run.add 里已经逐行写过初版记录；这里用补全后的记录整体写回（保留以前批次的行）
+  run.finalize();
   const summary = run.writeSummary({ problems: lc.problems.map((p) => p.id), levels: levelList, targets: targets.map((t) => t.providerId + '::' + t.model), params });
   console.log('\n=== 汇总 ===');
   for (const [lv, g] of Object.entries(summary.byLevel)) {
