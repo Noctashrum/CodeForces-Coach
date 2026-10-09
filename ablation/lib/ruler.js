@@ -119,6 +119,11 @@ const NUM_TOKEN = '(\\d+(?:\\s*\\*\\s*10\\s*\\^\\s*\\{?\\d+\\}?)?(?:\\s*\\^\\s*\
 /**
  * 从题面文本里尽力解析"最大规模"与"值域上限"。
  * 只做**保守**估计：解析不到就返回 null，交给覆盖表/默认值（宁可用少了，也别用多了判错）。
+ *
+ * ⚠️ 产品侧的性能闸有一份**同规则**的实现（`lib/limits.js` 的 `scanStatement`）：
+ *    交付侧说"按题面上限计时"、尺子在同一个上限上判分，两边必须是同一个最坏输入，
+ *    否则"已验证"与判词必然打架。改动这里之后请跑
+ *    `node .probe/probe-limits-vs-ruler.js`（现状：73 道入库题目两侧 maxN/maxV **全一致**）。
  */
 function scanStatement(statement) {
   const text = flattenStatement(statement);

@@ -1121,9 +1121,17 @@ const callAgent = async (opts) => {
         /perf-gate-slow/.test(trajSlow) && vSlow.status === 'ok'
         && vSlow.claimVerified === false && vSlow.scopeComplete === false,
         { traj: trajSlow, status: vSlow.status, claim: vSlow.claimVerified, scope: vSlow.scopeComplete });
-      ok('性能闸：覆盖范围如实写明"最大规模计时没过"（讲解据此降级）',
-        /最大规模/.test(String(vSlow.scopeNote || '')) && /超过|超时/.test(String(vSlow.scopeNote || '')),
+      ok('性能闸：覆盖范围如实写明"最大档计时没过"（讲解据此降级）',
+        /最大档计时没过/.test(String(vSlow.scopeNote || '')) && /超过|超时/.test(String(vSlow.scopeNote || '')),
         String(vSlow.scopeNote || '').slice(0, 200));
+      // 口径来源必须记账：题面是中文全角括号（解析不出），env 又是显式覆盖 ⇒ 只能说是"A/B 指定的档"，
+      // 绝不许写成"按题面上限计时"（那正是 2250C 假已验证的病根）。
+      ok('性能闸：env 显式覆盖时，记录与文案都说清是"A/B 指定的最大档"（不冒充题面上限）',
+        vSlow.perfGate && vSlow.perfGate.source === 'override' && vSlow.perfGate.n === 200
+        && vSlow.perfGate.maxV === 1000000000
+        && /A\/B 指定的最大档/.test(String(vSlow.scopeNote || ''))
+        && !/按题面解析出的上限/.test(String(vSlow.scopeNote || '')),
+        { gate: vSlow.perfGate, note: String(vSlow.scopeNote || '').slice(0, 220) });
 
       const resFast = await runGate('perfgate-pass', SOL);
       const trajFast = (resFast.trajectory || []).map((t) => t.kind).join(',');
@@ -1132,11 +1140,140 @@ const callAgent = async (opts) => {
         /perf-gate-pass/.test(trajFast) && vFast.status === 'ok'
         && vFast.claimVerified === true && vFast.scopeComplete === true,
         { traj: trajFast, status: vFast.status, claim: vFast.claimVerified, scope: vFast.scopeComplete });
+      ok('性能闸：通过的格子也把口径来源记进 perfGate（source/n/maxV）',
+        vFast.perfGate && vFast.perfGate.source === 'override' && vFast.perfGate.n === 200
+        && vFast.perfGate.maxV === 1000000000,
+        vFast.perfGate);
+
+      /* 第三种：**实测已经超过题面时限、但还在 2× 容差内**通过。
+       * 这就是 2250C 的现役现场：闸实测 2072ms / 时限 2000ms ⇒ 记 ok=true，而 CF-AC 尺子判 slow。
+       * 容差是给机器快慢留的，这种格子不算失败，但**不许只写"已验证"了事**，必须把实测超时限说出来。 */
+      const GATE_EDGE_SOL = SOL
+        .replace('import sys, heapq', 'import sys, heapq, time')
+        .replace('    n = int(d[p]); p += 1', '    n = int(d[p]); p += 1\n    if n > 50: time.sleep(1.2)');
+      const resEdge = await runGate('perfgate-overtl', GATE_EDGE_SOL);
+      const trajEdge = (resEdge.trajectory || []).map((t) => t.kind).join(',');
+      const vEdge = resEdge.verification || {};
+      ok('性能闸：实测已超题面时限但在容差内 → 仍算通过，但必须留下 overTl 证据',
+        /perf-gate-pass/.test(trajEdge) && vEdge.claimVerified === true
+        && !!(vEdge.perfGate && vEdge.perfGate.ok === true && vEdge.perfGate.overTl === true
+          && vEdge.perfGate.ms > vEdge.perfGate.tlMs),
+        { traj: trajEdge, gate: vEdge.perfGate });
+      ok('性能闸：容差内超时限时，覆盖范围与讲解备注都照实说"已经超过题面时限"',
+        /已经超过题面时限/.test(String(vEdge.scopeNote || ''))
+        && /已经超过题面时限/.test((resEdge.notes || []).join('\n')),
+        { note: String(vEdge.scopeNote || '').slice(0, 240), notes: (resEdge.notes || []).length });
     } finally {
       if (oldGateMaxN === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN;
       else process.env.CFCOACH_PERF_GATE_MAXN = oldGateMaxN;
       if (oldGateFactor === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR;
       else process.env.CFCOACH_PERF_GATE_FACTOR = oldGateFactor;
+    }
+  }
+
+  /* ---------------- 性能闸的口径：必须按**题面解析出的上限**计时 ------------------
+   * 病根（2026-10-10 真实 A/B 撞出来的活例子，docs/why-we-lag-2026-10-09.md §6.7）：
+   *   2250C 题面是 n ≤ 5000、a_i ≤ 1e9，可闸拿自造的 n=200000 + valueCapFor=200 跑出 134ms
+   *   就写了 claimVerified（文案还写"按题面上限计时"）；CF-AC 尺子在真实上限上是 3.8s > TL2000。
+   * 这里用**英文题面**（正则要 ASCII 括号）走通两条：
+   *   ① 解析得出 n 与值域 → perfGate 记 source=parsed/n=5000/maxV=1e9，文案敢说"题面解析出的上限"；
+   *   ② 只解析得出 n → source=partial（值域兜底 1e9），文案必须自己写明"兜底"。 */
+  console.log('\nparallel: 性能闸按题面解析出的上限计时（口径不许自造）');
+  {
+    const oldMaxN = process.env.CFCOACH_PERF_GATE_MAXN;
+    const oldMaxV = process.env.CFCOACH_PERF_GATE_MAXV;
+    const oldFactor2 = process.env.CFCOACH_PERF_GATE_FACTOR;
+    delete process.env.CFCOACH_PERF_GATE_MAXN;   // 不覆盖 ⇒ 题面解析说了算（生产路径就是这个形状）
+    delete process.env.CFCOACH_PERF_GATE_MAXV;
+    process.env.CFCOACH_PERF_GATE_FACTOR = '2';
+    try {
+      const EN_PARSED = [
+        'You are given n cards, each with a non-negative integer.',
+        'When you meet a 0, you may take the largest positive card you have not taken yet; maximize the total you take.',
+        '',
+        'Input',
+        'The first line contains t (1 <= t <= 10).',
+        'Each test case starts with n (1 <= n <= 5000), then n integers a_i (1 <= a_i <= 10^9).',
+        '',
+        'Output',
+        'For each test case print one integer.',
+        '',
+        'time limit per test: 2 seconds',
+        'memory limit per test: 256 megabytes'
+      ].join('\n');
+      const EN_PARTIAL = [
+        'You are given n cards, each with a non-negative integer.',
+        '',
+        'Input',
+        'The first line is t (1 <= t <= 10). Each test case: n (1 <= n <= 100) then n integers.',
+        '',
+        'Output',
+        'One integer per test case.',
+        '',
+        'time limit per test: 2 seconds'
+      ].join('\n');
+      const EN_GEN = [
+        'import random, sys',
+        'm = int(sys.argv[1]) if len(sys.argv) > 1 else 8',
+        'n = m if m > 8 else random.randint(1, max(1, m))',
+        'print(1)',
+        'print(n)',
+        'print(*[random.randint(0, 6) for _ in range(n)])'
+      ].join('\n');
+      const EN_SLOW_SOL = SOL
+        .replace('import sys, heapq', 'import sys, heapq, time')
+        .replace('    n = int(d[p]); p += 1', '    n = int(d[p]); p += 1\n    if n > 50: time.sleep(6)');
+      const mkEnAgent = async (opts) => {
+        const sys = String(opts.system || '');
+        if (sys.indexOf('【题解 Agent】') >= 0) return '```python\n' + EN_SLOW_SOL + '\n```';
+        if (sys.indexOf('【暴力 Agent】') >= 0) return '```python\n' + BRUTE + '\n```';
+        if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + EN_GEN + '\n```';
+        return callAgent(opts);
+      };
+      const runEnGate = (wsKey, statement) => harness.runPipeline({
+        conv: { id: wsKey, title: '性能闸口径' },
+        lang: 'python', intent: 'full', statement,
+        samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+        workspace, wsKey,
+        callAgent: mkEnAgent, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+        emit: () => {}, log: () => {}
+      });
+
+      const rEn = await runEnGate('perfgate-parsed', EN_PARSED);
+      const vEn = rEn.verification || {};
+      const noteEn = String(vEn.scopeNote || '');
+      const trajEn = (rEn.trajectory || []).map((t) => t.kind).join(',');
+      ok('性能闸口径：题面解析出的上限被真的用上（perfGate source=parsed、n=5000、maxV=1e9）',
+        !!(vEn.perfGate && vEn.perfGate.source === 'parsed' && vEn.perfGate.n === 5000
+          && vEn.perfGate.maxV === 1000000000),
+        vEn.perfGate);
+      ok('性能闸口径：覆盖范围敢写"按题面解析出的上限"（含 n≈5000、值≤1e9）',
+        /按题面解析出的上限/.test(noteEn) && /n≈5000/.test(noteEn) && /值≤1e9/.test(noteEn),
+        noteEn.slice(0, 220));
+      ok('性能闸口径：真实上限上超时 → perf-gate-slow（不再被自造的小档放过），claimVerified=false',
+        /perf-gate-slow/.test(trajEn) && vEn.claimVerified === false && vEn.scopeComplete === false,
+        { traj: trajEn, claim: vEn.claimVerified });
+      ok('性能闸口径：题面解析出的上限也进了证据字段（scaleNotes 有解析痕迹）',
+        !!(vEn.perfGate && Array.isArray(vEn.perfGate.scaleNotes)),
+        vEn.perfGate && vEn.perfGate.scaleNotes);
+
+      const rPa = await runEnGate('perfgate-partial', EN_PARTIAL);
+      const vPa = rPa.verification || {};
+      const notePa = String(vPa.scopeNote || '');
+      ok('性能闸口径：只解析得出 n → source=partial、n=100、值域兜底 1e9',
+        !!(vPa.perfGate && vPa.perfGate.source === 'partial' && vPa.perfGate.n === 100
+          && vPa.perfGate.maxV === 1000000000),
+        vPa.perfGate);
+      ok('性能闸口径：部分解析时文案写明"兜底"（不把兜底的值域说成题面给的）',
+        /兜底/.test(notePa) && !/按题面解析出的上限/.test(notePa),
+        notePa.slice(0, 220));
+    } finally {
+      if (oldMaxN === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN;
+      else process.env.CFCOACH_PERF_GATE_MAXN = oldMaxN;
+      if (oldMaxV === undefined) delete process.env.CFCOACH_PERF_GATE_MAXV;
+      else process.env.CFCOACH_PERF_GATE_MAXV = oldMaxV;
+      if (oldFactor2 === undefined) delete process.env.CFCOACH_PERF_GATE_FACTOR;
+      else process.env.CFCOACH_PERF_GATE_FACTOR = oldFactor2;
     }
   }
 
