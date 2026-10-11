@@ -1098,6 +1098,7 @@
     }
     view.innerHTML = html;
     bindRichDocs(view);
+    syncIdeReport();   // 正停在 IDE 页时，右侧讲解跟着最新消息走（不额外调用模型）
   }
 
   function renderWelcome(view) {
@@ -1392,6 +1393,7 @@
          * 文档的宿主节点 `.rich-host` 是渲染消息时创建的，只更新文字不会把它加进去。
          */
         renderMessages();
+        syncIdeReport();   // IDE 页开着的话，文档一到右侧讲解栏就同步（同一份，不重复调模型）
       }
       return;
     }
@@ -2039,13 +2041,45 @@
   /* ---------------- ⌨️ IDE 页（跟随当前题） ---------------- */
 
   /**
+   * 右侧「讲题报告」要显示的内容：当前会话里**最后一份**讲解。
+   * 优先图文文档（richDoc），其次文字讲解的正文 —— 只读会话里已经有的东西，不额外调用模型
+   * （IDE 的模型调用只发生在学员按「补全 / 提示」时）。
+   */
+  function ideReportOf() {
+    const msgs = (state.conv && state.conv.messages) || [];
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m && m.role !== 'user' && m.richDoc) return { id: m.id || '', html: m.richDoc, title: '图文讲解' };
+    }
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m && m.role !== 'user' && m.content && String(m.content).trim()) {
+        return { id: m.id || '', text: String(m.content), title: '文字讲解' };
+      }
+    }
+    return null;
+  }
+
+  /** 讲解就绪 / 换题 / 换会话时，把最新一份同步到 IDE 的右侧栏（不在 IDE 页就不打扰） */
+  function syncIdeReport() {
+    if (state.view !== 'ide' || !window.CFIde || typeof window.CFIde.setReport !== 'function') return;
+    window.CFIde.setReport(ideReportOf());
+  }
+
+  /**
    * 打开 IDE 页：把当前会话交给 CFIde，由它自己拉题面/代码/语言。
    * IDE 只在用户按按钮时才调用模型（见 lib/ide.js 的提示词与 AGENTS.md 的纪律），
    * 且只看「题面 + 你自己写的代码」——不读教练工作区里已验证的题解。
+   * 右侧再挂一份当前题的讲题报告，让学员写代码时一直看得见讲解。
    */
   function openIdePage() {
     if (!window.CFIde) return;
-    window.CFIde.open({ convId: (state.conv && state.conv.id) || '', api: api, toast: toast });
+    window.CFIde.open({
+      convId: (state.conv && state.conv.id) || '',
+      api: api,
+      toast: toast,
+      report: ideReportOf()
+    });
   }
 
   /** 会话/题目变了：如果正停在 IDE 页，让它换到新题（不在 IDE 页就不打扰） */

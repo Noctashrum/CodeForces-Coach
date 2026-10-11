@@ -25,11 +25,16 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  /**
+   * IDE 只有两种语言：C++23 与 Python 3。
+   * 为什么没有 JavaScript：这是**竞赛**编辑器，补全的提示词、围栏语言、注释符号都按竞赛语言写；
+   * 多挂一种语言只会在"模型按别的语言给写法"时添乱。老状态里存过的 'js' 会回落到默认的 C++。
+   */
   var LANGS = [
     { v: 'cpp', label: 'C++23' },
-    { v: 'python', label: 'Python 3' },
-    { v: 'js', label: 'JavaScript' }
+    { v: 'python', label: 'Python 3' }
   ];
+  var REPORT_LS_KEY = 'cfide.report';    // 右侧讲解栏是否收起（记住学员的选择）
   var OUTPUT_CAP = 8000;      // 界面里最多显示多少字符的输出（再长就截断并提示）
   var SAVE_DEBOUNCE_MS = 900;
   var HIGHLIGHT_DEBOUNCE_MS = 30;
@@ -44,13 +49,11 @@
 
   function langOf(lang) {
     var s = String(lang == null ? '' : lang).toLowerCase();
-    if (s === 'python' || s === 'py') return 'python';
-    if (s === 'js' || s === 'javascript' || s === 'node') return 'js';
-    return 'cpp';
+    if (s === 'python' || s === 'py' || s === 'python3' || s === 'pypy') return 'python';
+    return 'cpp';   // 只认 C++ 与 Python（js/javascript/node 也回落到 C++）
   }
   function hljsName(lang) {
-    var l = langOf(lang);
-    return l === 'python' ? 'python' : (l === 'js' ? 'javascript' : 'cpp');
+    return langOf(lang) === 'python' ? 'python' : 'cpp';
   }
   function langLabel(lang) {
     var l = langOf(lang);
@@ -128,6 +131,14 @@
   var el = null;               // { page, ta, hl, gutter, ... }
   var mounted = false;
   var curConvId = null;
+
+  function lsGet(k) {
+    try { return (typeof localStorage !== 'undefined') ? localStorage.getItem(k) : null; } catch (e) { return null; }
+  }
+  function lsSet(k, v) {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(k, v); } catch (e) { /* 存不了就算了 */ }
+  }
+
   var st = {
     lang: 'cpp',
     configured: false,
@@ -139,7 +150,14 @@
     dirty: false,
     saveTimer: null,
     hlTimer: null,
-    lastSaved: 0
+    lastSaved: 0,
+    /**
+     * 右侧「讲题报告」：跟着当前会话最新一份讲解走（图文文档优先，否则用文字讲解的正文）。
+     * 它**只展示**教练已经讲过的东西，不额外调用模型（IDE 只有在按补全/提示时才花钱）。
+     */
+    report: null,         // { id, html } 或 { id, text }
+    reportKey: '',
+    reportCollapsed: lsGet(REPORT_LS_KEY) === '1'
   };
 
   function q(sel) { return document.querySelector(sel); }
@@ -155,7 +173,7 @@
   function buildDom(page) {
     var opts = LANGS.map(function (l) { return '<option value="' + l.v + '">' + l.label + '</option>'; }).join('');
     page.innerHTML = ''
-      + '<div class="ide-wrap">'
+      + '<div class="ide-wrap" data-ide-wrap>'
       + '  <div class="ide-head">'
       + '    <div class="ide-title"><span class="ide-problem" data-ide-problem>未关联题目</span>'
       + '      <span class="ide-sub" data-ide-sub></span></div>'
@@ -164,35 +182,49 @@
       + '      <button class="ide-btn primary" data-ide-complete title="让模型接着你的光标往下写一小段（Tab 接受 / Esc 丢弃）">✨ 补全</button>'
       + '      <button class="ide-btn" data-ide-hint title="只要思路点拨，不写代码">💡 提示</button>'
       + '      <button class="ide-btn" data-ide-accept hidden title="把提示落进代码">接受</button>'
+      + '      <button class="ide-btn" data-ide-report-toggle title="展开 / 收起右边的讲题报告（写代码时也能看着它）">📄 讲解</button>'
       + '      <span class="ide-status" data-ide-status></span>'
       + '    </div>'
       + '  </div>'
-      + '  <div class="ide-main">'
-      + '    <div class="ide-gutter" data-ide-gutter></div>'
-      + '    <div class="ide-editor">'
-      + '      <pre class="ide-hl ide-layer hljs" data-ide-hl aria-hidden="true"><code></code></pre>'
-      + '      <textarea class="ide-input ide-layer" data-ide-input spellcheck="false" wrap="off"'
-      + '        placeholder="在这里写你的代码…（写到一半卡住了就按上面的「✨ 补全」，模型会在光标处给一段半透明的提示）"></textarea>'
-      + '      <div class="ide-ghost-hint" data-ide-ghost-hint hidden>Tab 接受 · Esc 丢弃</div>'
-      + '    </div>'
-      + '  </div>'
-      + '  <div class="ide-foot">'
-      + '    <div class="ide-foot-left">'
-      + '      <div class="ide-foot-label">测试输入（stdin）<span class="ide-foot-note">自己造数据调试，不比对答案</span></div>'
-      + '      <textarea class="ide-stdin" data-ide-stdin spellcheck="false" placeholder="例如：&#10;3&#10;1 2 3"></textarea>'
-      + '    </div>'
-      + '    <div class="ide-foot-right">'
-      + '      <div class="ide-foot-label">运行结果'
-      + '        <button class="ide-btn" data-ide-run title="用上面的输入跑一次你的代码">▶ 运行</button>'
-      + '        <span class="ide-verdict" data-ide-verdict></span>'
+      + '  <div class="ide-cols">'
+      + '    <div class="ide-col-edit">'
+      + '      <div class="ide-main">'
+      + '        <div class="ide-gutter" data-ide-gutter></div>'
+      + '        <div class="ide-editor">'
+      + '          <pre class="ide-hl ide-layer hljs" data-ide-hl aria-hidden="true"><code></code></pre>'
+      + '          <textarea class="ide-input ide-layer" data-ide-input spellcheck="false" wrap="off"'
+      + '            placeholder="在这里写你的代码…（写到一半卡住了就按上面的「✨ 补全」，模型会在光标处给一段半透明的提示）"></textarea>'
+      + '          <div class="ide-ghost-hint" data-ide-ghost-hint hidden>Tab 接受 · Esc 丢弃</div>'
+      + '        </div>'
       + '      </div>'
-      + '      <pre class="ide-output" data-ide-output></pre>'
+      + '      <div class="ide-foot">'
+      + '        <div class="ide-foot-left">'
+      + '          <div class="ide-foot-label">测试输入（stdin）<span class="ide-foot-note">自己造数据调试，不比对答案</span></div>'
+      + '          <textarea class="ide-stdin" data-ide-stdin spellcheck="false" placeholder="例如：&#10;3&#10;1 2 3"></textarea>'
+      + '        </div>'
+      + '        <div class="ide-foot-right">'
+      + '          <div class="ide-foot-label">运行结果'
+      + '            <button class="ide-btn" data-ide-run title="用上面的输入跑一次你的代码">▶ 运行</button>'
+      + '            <span class="ide-verdict" data-ide-verdict></span>'
+      + '          </div>'
+      + '          <pre class="ide-output" data-ide-output></pre>'
+      + '        </div>'
+      + '      </div>'
       + '    </div>'
+      + '    <aside class="ide-report" data-ide-report>'
+      + '      <div class="ide-report-head">'
+      + '        <span class="ide-report-title">讲题报告</span>'
+      + '        <span class="ide-report-badge" data-ide-report-badge></span>'
+      + '        <button class="ide-report-close" data-ide-report-close title="收起讲解（编辑器会更宽）">✕</button>'
+      + '      </div>'
+      + '      <div class="ide-report-body" data-ide-report-body></div>'
+      + '    </aside>'
       + '  </div>'
       + '</div>';
 
     el = {
       page: page,
+      wrap: q('[data-ide-wrap]'),
       problem: q('[data-ide-problem]'),
       sub: q('[data-ide-sub]'),
       lang: q('[data-ide-lang]'),
@@ -200,6 +232,11 @@
       btnHint: q('[data-ide-hint]'),
       btnAccept: q('[data-ide-accept]'),
       btnRun: q('[data-ide-run]'),
+      btnReport: q('[data-ide-report-toggle]'),
+      btnReportClose: q('[data-ide-report-close]'),
+      report: q('[data-ide-report]'),
+      reportBody: q('[data-ide-report-body]'),
+      reportBadge: q('[data-ide-report-badge]'),
       status: q('[data-ide-status]'),
       gutter: q('[data-ide-gutter]'),
       hl: q('[data-ide-hl]'),
@@ -239,6 +276,8 @@
     el.btnHint.addEventListener('click', function () { complete('hint'); });
     el.btnAccept.addEventListener('click', acceptGhost);
     el.btnRun.addEventListener('click', runCode);
+    if (el.btnReport) el.btnReport.addEventListener('click', function () { toggleReport(); });
+    if (el.btnReportClose) el.btnReportClose.addEventListener('click', function () { toggleReport(true); });
     if (typeof window !== 'undefined') window.addEventListener('beforeunload', flushSave);
   }
 
@@ -318,6 +357,71 @@
     paint();
     scheduleSave();
     setStatus('已插入提示（记得自己检查一遍）');
+  }
+
+  /* ---------------- 右侧「讲题报告」（写代码时也能看着讲解） ---------------- */
+
+  /** FNV-1a：只用来判断"还是不是同一份报告"（内容变了才重建 iframe，不然每次重画都闪一下） */
+  function hashString(s) {
+    var str = String(s == null ? '' : s);
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h.toString(36);
+  }
+
+  function reportKeyOf(rep) {
+    if (!rep) return '';
+    var body = rep.html ? rep.html : rep.text;
+    return String(rep.id || '') + '|' + (rep.html ? 'doc' : 'text') + '|' + hashString(body);
+  }
+
+  function renderReport() {
+    if (!el || !el.reportBody) return;
+    var rep = st.report;
+    if (el.wrap) el.wrap.classList.toggle('report-collapsed', !!st.reportCollapsed);
+    if (el.report) el.report.hidden = !!st.reportCollapsed;
+    if (el.btnReport) el.btnReport.textContent = st.reportCollapsed ? '📄 讲解' : '📄 收起';
+    if (el.reportBadge) el.reportBadge.textContent = rep ? (rep.html ? '图文文档' : '文字讲解') : '暂无';
+    var host = el.reportBody;
+    if (!rep) {
+      host.innerHTML = '<div class="ide-report-empty">这道题还没有讲解。<br>'
+        + '回到对话页让教练讲一遍，最新一份会同步显示在这里（写代码时一直看得见）。</div>';
+      return;
+    }
+    if (rep.html) {
+      // 与对话页同一套隔离：sandbox iframe + srcdoc（允许脚本，但没有同源权限、不能做顶层跳转）
+      host.innerHTML = '';
+      var iframe = document.createElement('iframe');
+      iframe.className = 'ide-report-frame';
+      iframe.setAttribute('sandbox', 'allow-scripts');
+      iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.srcdoc = rep.html;
+      host.appendChild(iframe);
+      return;
+    }
+    var md = (typeof window !== 'undefined' && window.MD && typeof window.MD.renderMarkdown === 'function')
+      ? window.MD.renderMarkdown(String(rep.text || ''))
+      : '<pre class="ide-report-pre">' + escapeHtml(String(rep.text || '')) + '</pre>';
+    host.innerHTML = '<div class="ide-report-md">' + md + '</div>';
+  }
+
+  /** app.js 在会话/讲解变化时调用（内容没变就直接返回，避免重建 iframe） */
+  function setReport(rep) {
+    var next = rep || null;
+    var key = reportKeyOf(next);
+    if (key === st.reportKey && mounted) return;
+    st.reportKey = key;
+    st.report = next;
+    if (mounted) renderReport();
+  }
+
+  function toggleReport(forceCollapse) {
+    st.reportCollapsed = forceCollapse === true ? true : !st.reportCollapsed;
+    lsSet(REPORT_LS_KEY, st.reportCollapsed ? '1' : '0');
+    renderReport();
   }
 
   /* ---------------- 与服务器交互 ---------------- */
@@ -451,6 +555,7 @@
         el.verdict.textContent = '';
         applyProblem(r);
         paint();
+        renderReport();     // 右侧讲解：open() 里 setReport 存下的那份（可能是已讲过的图文文档）
         setStatus(r.configured ? ('模型：' + st.model) : '还没有配置模型服务（补全不可用，但可以自己写、自己跑）');
       })
       .catch(function (e) {
@@ -468,6 +573,8 @@
     var page = document.getElementById('page-ide');
     if (!page || typeof deps.api !== 'function') return;
     var convId = o.convId || '';
+    // 讲解永远跟着当前会话走：同一道题再进来也要把最新一份同步过来（可能刚从对话页拿到图文文档）
+    if (o.report !== undefined) setReport(o.report);
     if (mounted && convId === curConvId) { paint(); return; }
     if (mounted) flushSave();      // 切到另一题之前，先把上一题的代码存了
     curConvId = convId;
@@ -482,8 +589,10 @@
   return {
     open: open,
     close: close,
+    setReport: setReport,       // app.js 把最新的讲解（图文文档 / 文字版）推过来
     LANGS: LANGS,
     OUTPUT_CAP: OUTPUT_CAP,
+    REPORT_LS_KEY: REPORT_LS_KEY,
     // 纯函数（单测用）
     escapeHtml: escapeHtml,
     langOf: langOf,
@@ -494,6 +603,8 @@
     acceptSuggestion: acceptSuggestion,
     capOutput: capOutput,
     verdictText: verdictText,
-    renderLayerHtml: renderLayerHtml
+    renderLayerHtml: renderLayerHtml,
+    hashString: hashString,
+    reportKeyOf: reportKeyOf
   };
 });
