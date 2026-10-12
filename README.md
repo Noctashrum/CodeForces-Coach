@@ -350,7 +350,7 @@ every workspace's verification verdict, the tail of the last few conversations, 
 including the **per-step tool trace** of each run. API keys, cookies, e-mails and OS usernames are masked, and
 no full statement or full solution text is included, so the file can be sent as-is. If the UI will not even
 start, the same file comes from the command line: `node scripts/diag.js --out diag.txt`
-(full details: [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md)).
+(full details: the diagnostics guide, kept with the development notes).
 
 ### Fetching from Codeforces
 
@@ -455,8 +455,8 @@ node scripts/probe-review-bundle.js  <handle> <contestId>   # live: the bundle t
 node scripts/probe-source-live.js    <contestId> <submissionId…>   # live: submission source fetching
 ```
 
-Pushing and releasing (three commands, a pre-push checklist, common errors): see [docs/PUSHING.md](docs/PUSHING.md).
-Debugging a machine you cannot reach (how to package the whole crime scene into one masked text file): see [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md).
+Pushing and releasing (three commands, a pre-push checklist, common errors): `git add -A` → `git commit` → `git push`.
+Debugging a machine you cannot reach (how to package the whole crime scene into one masked text file): `node scripts/diag.js --out diag.txt` writes it.
 
 **Ablation study (AC or nothing)**: `ablation/` runs the same problems through five arms — L0 (bare model, one call,
 no tools), L0C (L0 plus "output one code block and nothing else"), L0+ (L0 **plus the exact prompt discipline and
@@ -536,7 +536,7 @@ both switches (`CFCOACH_SALVAGE_MAX_TOKENS` / `CFCOACH_SALVAGE_NO_TAIL`) stay. A
 cap and returned nothing at all** — 21 of those 26 are the solve agent's first answer and its immediate retry; the
 teaching line is 24.6% (that one *is* the deliverable). That is what the next step, a **stop-loss budget** that stops on
 "no new information" rather than on a time cap, is for. Method, numbers and limits:
-[docs/cf-ac-ruler-2026-10.md](docs/cf-ac-ruler-2026-10.md) §3.6 / §7.
+the CF-AC ruler spec §3.6 / §7 (kept with the development notes).
 
 `npm run ablation:serve` opens a one-page workbench for the manual pass: type a problem id and hit "fetch from CF" (it reuses the app's own fetch channel, so the statement,
 samples, title and rating come in automatically) — **you only paste your own accepted solution as the oracle** — then
