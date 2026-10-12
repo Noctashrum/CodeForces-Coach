@@ -128,14 +128,20 @@ const callAgent = async (opts) => {
 
   // 串行 = 2.7s（0.9+1.08+0.45）；并发应当明显小于它
   // 判据不看整条流水线的墙钟（里面还有编译/对拍/讲解等固定开销），而是看**三个调用的时间窗是否重叠**
-  const three = (res.trace || []).filter((t) => ['solution', 'brute', 'gen'].indexOf(t.role) >= 0 && t.ok);
+  const codeCalls = (res.trace || []).filter((t) => ['solution', 'brute', 'gen'].indexOf(t.role) >= 0 && t.ok);
+  /* 只取**每个角色的第一次调用**：并发跑完之后，体检仍可能因为硬缺陷把生成器打回重写
+     （轨迹里于是出现第二次 gen）—— 那是并发之后的事，不该让"并发真的生效"这条断言失败
+     （2026-10-11 的假失败就是这么来的：`three.length === 3` 把重写调用也数了进去）。 */
+  const firstOf = {};
+  codeCalls.forEach((t) => { if (!firstOf[t.role]) firstOf[t.role] = t; });
+  const three = ['solution', 'brute', 'gen'].map((r) => firstOf[r]).filter(Boolean);
   const starts = three.map((t) => t.at);
   const ends = three.map((t) => t.at + t.ms);
   const latestStart = Math.max.apply(null, starts);
   const earliestEnd = Math.min.apply(null, ends);
   ok('三个 Agent 的调用时间窗互相重叠（并发真的生效，不是串行）',
     three.length === 3 && latestStart < earliestEnd,
-    { calls: three.map((t) => ({ role: t.role, at: t.at, ms: t.ms })), latestStart, earliestEnd });
+    { calls: codeCalls.map((t) => ({ role: t.role, at: t.at, ms: t.ms })), firstOfThree: three.map((t) => t.role), latestStart, earliestEnd });
   ok('并发下总耗时明显小于"三路之和"', (earliestEnd - Math.min.apply(null, starts)) < SLOW_MS * (1 + 1.2 + 0.5) * 0.8,
     { windowMs: earliestEnd - Math.min.apply(null, starts), serialMs: Math.round(SLOW_MS * 2.7) });
 
@@ -554,6 +560,18 @@ const callAgent = async (opts) => {
       { notes: (resCkOk.notes || []).join(' | ').slice(0, 200) });
     ok('多解+checker：checker 源码落在 <工作区>/checker/checker.py（下一轮直接复用、不用再花调用）',
       fs.existsSync(path.join(workspace.convDir(key), 'checker', 'checker.py')), workspace.convDir(key));
+    // F1 的反例（2026-10-10）：**多解题不跳过讲解** —— 多解的分歧不等于错（2257C 就是 CF-AC 的例），
+    // 交付物是可信的，讲解口径按"不能声称已验证"如实写就行。
+    ok('多解+checker：仍然写讲解（不因为"没有 claimVerified"就跳过讲解线）',
+      /多解题：1\.\.n 的任意排列都合法/.test(String(resCkOk.explainerText || '')),
+      { len: String(resCkOk.explainerText || '').length, head: String(resCkOk.explainerText || '').slice(0, 60) });
+    /* G1（2026-10-10）：采信一份 checker 之后，用它**回头判一遍官方样例**。
+     * ① 这一格的 checker 接受任意排列 ⇒ 题解在官方样例上的输出（3 2 1）是合法答案 ⇒ 不该产生反例。 */
+    ok('多解+checker：可信 checker 回判官方样例——判"合法"就不该留下反例（solCheckerSample 为空）',
+      tCkOk.indexOf('sol-samples-checker-fail') < 0
+      && resCkOk.verification.solCheckerSample == null
+      && String(resCkOk.verification.scopeNote || '').indexOf('官方样例第') < 0,
+      { traj: tCkOk.join(','), s: resCkOk.verification.solCheckerSample });
   }
 
   // ② checker 判"题解输出**不合法**" → 有背书的真反例：带 checker 判词走修题解（**不给**"暴力解期望"）
@@ -597,6 +615,47 @@ const callAgent = async (opts) => {
       resCkWa.verification.multiAnswer === true && resCkWa.verification.claimVerified === false,
       { multi: resCkWa.verification && resCkWa.verification.multiAnswer,
         claim: resCkWa.verification && resCkWa.verification.claimVerified });
+    /* G1（2026-10-10）：这里的 checker 很苛刻（要求恰好 1 2 3），题解第一版输出 3 2 1 ——
+     * 采信 checker 之后回判官方样例，**第一版确实被判非法**（有背书的真反例，轨迹留痕）；
+     * 但它随后被真的改掉了（MA_BRUTE 与样例逐字一致）⇒ 反例必须作废，讲解照常写（F1 不触发）。 */
+    ok('多解+checker：回判官方样例抓到第一版的不合法输出（轨迹 sol-samples-checker-fail 留痕）',
+      tCkWa.indexOf('sol-samples-checker-fail') >= 0, tCkWa.join(','));
+    ok('多解+checker：旧反例不该否定已修好的交付物（改写版过了样例 ⇒ solCheckerSample 清空、讲解照写）',
+      resCkWa.verification.solCheckerSample == null
+      && tCkWa.indexOf('explain-skip-unsolved') < 0
+      && /按 checker 的判词改/.test(String(resCkWa.explainerText || '')),
+      { s: resCkWa.verification.solCheckerSample, traj: tCkWa.join(','),
+        explainerLen: String(resCkWa.explainerText || '').length });
+  }
+
+  /* ④ G1 的价值兑现（2026-10-10）：checker 判"官方样例上的输出**不合法**"，而且这一版**修不掉**
+   * （题解 Agent 每次都交回同一份逆序输出）⇒ 这次交付按"没解出来"处理：跳过富讲解线，
+   * 只给机械说明 + 暴力解。这正是 2250F 那一格（原来是 12 格里讲解线最贵的一格 ¥0.5912）。 */
+  {
+    const key = 'multi-answer-ck-nofix';
+    let nfExplain = 0;
+    const agentNf = async (opts) => {
+      const sys = String(opts.system || '');
+      const label = String(opts.label || '');
+      if (sys.indexOf('【checker Agent】') >= 0) return '```python\n' + CK_ORDER_PY + '\n```';
+      if (sys.indexOf('【题解 Agent】') >= 0) return '思路：逆序也是合法答案。\n\n```python\n' + MA_SOL + '\n```';
+      if (sys.indexOf('【暴力 Agent】') >= 0) return '暴力。\n\n```python\n' + MA_BRUTE + '\n```';
+      if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + MA_GEN + '\n```';
+      if (sys.indexOf('错因仲裁') >= 0 || label.indexOf('仲裁') >= 0) return '{"wrong":"sol","reason":"输出与样例不同"}';
+      if (sys.indexOf('【讲解 Agent】') >= 0) { nfExplain++; return '## 题面拆解\n不该出现的富讲解。\n## 验证\nx'; }
+      return '{}';
+    };
+    const resNf = await runMA(agentNf, key);
+    const tNf = (resNf.trajectory || []).map((t) => t.kind);
+    ok('G1：checker 回判官方样例抓到不合法输出（轨迹留痕）',
+      tNf.indexOf('sol-samples-checker-fail') >= 0, tNf.join(','));
+    ok('G1：修不掉就按"没解出来"处理 —— 跳过富讲解线，讲解 Agent 一次都不叫',
+      tNf.indexOf('explain-skip-unsolved') >= 0 && nfExplain === 0,
+      { traj: tNf.join(','), explainCalls: nfExplain });
+    ok('G1：反例进证据（solCheckerSample 非空 + scopeNote 写明是哪一组样例）',
+      resNf.verification.solCheckerSample != null
+      && String(resNf.verification.scopeNote || '').indexOf('官方样例第 1 组') >= 0,
+      { s: resNf.verification.solCheckerSample, scope: String(resNf.verification.scopeNote || '').slice(0, 160) });
   }
 
   // ③ checker 自己不可信（自检不过）→ 必须回落到改造前行为：停下、如实说"本地判不了"
@@ -1752,6 +1811,18 @@ const callAgent = async (opts) => {
     ok('同语言优化：提问把题面上限 / 时限 / 实测耗时三件证据都给了（它得靠这个估上界）',
       /题面上限/.test(seenPrompt[0]) && /时限 200ms/.test(seenPrompt[0]) && /实测 \*\*\d+ms\*\*/.test(seenPrompt[0]),
       String(seenPrompt[0] || '').slice(0, 220));
+    /* 2026-10-10 凌晨的三题归因：2247F/2247D2 是"上界够、纯 Python 常数"，该做的是删死代码/预计算/内联；
+     * 2101E 是"算法类别错"（差 126×）。所以提问不能只给一张算法清单，也不能只给一张常数清单 ——
+     * 先要它用实测比值与每秒操作数量级**自证**属于哪一类，再给对应清单。 */
+    ok('同语言优化：提问要它用数字自证"上界不够"还是"常数太大"（比值 + 每秒操作数量级）',
+      /实测 ÷ 阈值 = \*\*[\d.]+×\*\*/.test(seenPrompt[0]) && /要压到 \d+ms 以内/.test(seenPrompt[0])
+      && /2e7 次简单操作\/秒/.test(seenPrompt[0]) && /5e8/.test(seenPrompt[0]),
+      String(seenPrompt[0] || '').slice(0, 260));
+    ok('同语言优化：常数清单按实测命中率排序（删死代码 / 预计算 / 内联 / 扁平化），并明令"不许交只快一点点的版本"',
+      /删死代码/.test(seenPrompt[0]) && /预计算/.test(seenPrompt[0]) && /内联/.test(seenPrompt[0])
+      && /扁平化容器/.test(seenPrompt[0]) && /只快了一点点/.test(seenPrompt[0])
+      && /2257F1 的 sqrt 分解只把 6\.3s 压到 5\.3s/.test(seenPrompt[0]),
+      String(seenPrompt[0] || '').slice(0, 260));
     ok('同语言优化：优化版重新对拍 + 重新计时都过 → 仍算"完整验证"（claimVerified=true）',
       !!(rOk.verification && rOk.verification.status === 'ok' && rOk.verification.claimVerified === true
         && rOk.verification.perfGate && rOk.verification.perfGate.ok === true
@@ -1840,6 +1911,100 @@ const callAgent = async (opts) => {
     if (envSaved2.maxn === undefined) delete process.env.CFCOACH_PERF_GATE_MAXN; else process.env.CFCOACH_PERF_GATE_MAXN = envSaved2.maxn;
     if (envSaved2.sw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = envSaved2.sw;
     if (envSaved2.repair === undefined) delete process.env.CFCOACH_PERF_REPAIR; else process.env.CFCOACH_PERF_REPAIR = envSaved2.repair;
+  }
+
+  /* ========== 没解出来就不写讲解（F1，2026-10-10 凌晨） ==========
+   * 用户口径（m25200）："如果不管是没做出来还是只会暴力都完全没有拆思路的必要，毕竟答案都没过那你
+   * 的思路大概率只能是误导……这种情况直接说我不会反而感觉可以省下很多钱。"
+   * 实测依据（docs/why-we-lag-2026-10-09.md §6.16）：没解出来的五格里，讲解线（提纲 + 讲解 + 修结构）
+   * 占该格花费 **30%–55%**，而且那笔钱几乎全花在**思考**上（4.5 万–5.7 万 out tokens 只换来
+   * 1.6 万–1.9 万字符正文）—— 这是"思考占大头"的直接证据。
+   * 默认 short：只给零 token 的机械说明 + 暴力解；`explainUnsolved:'rich'` / `CFCOACH_EXPLAIN_UNSOLVED=rich`
+   * 恢复旧行为（A/B 对照用）。多解题**不**在此列：分歧不等于错（2257C 就是 CF-AC 的例）。 */
+  {
+    console.log('parallel: 没解出来 → 不写讲解（默认），只给机械说明 + 暴力解');
+    const envSaved3 = process.env.CFCOACH_EXPLAIN_UNSOLVED;
+    delete process.env.CFCOACH_EXPLAIN_UNSOLVED;
+
+    // 题解**官方样例就过不了**（恒输出 0，样例期望 3 / 5）；暴力解是对的 ⇒ 交付物不可信。
+    const WRONG_SOL3 = [
+      'import sys',
+      'd = sys.stdin.read().split()',
+      'print(0)'
+    ].join('\n');
+    const LECTURE3 = '## 题面拆解\nx\n## 关键观察\nx\n## 为什么\nx\n## 手算演示\n拿 n=2 举例\n'
+      + '<viz-steps title="t"><viz-step title="第 1 步">a</viz-step></viz-steps>\n## 算法\nx\n'
+      + '## 复杂度分析\n$O(n\\log n)$\n## 代码\n```python\n' + SOL + '\n```\n## 讲解\nx\n## 易错点\nx\n'
+      + '## 验证\n官方样例通过。';
+    const mkAgent3 = () => {
+      const seen = [];
+      let explainer = 0;
+      const f = async (opts) => {
+        const sys = String(opts.system || '');
+        const usr = String(opts.user || '');
+        seen.push({ sys: sys.slice(0, 40), label: String(opts.label || '') });
+        if (sys.indexOf('【题解 Agent】') >= 0) {
+          // 第一次解题给错的；之后每轮"按官方样例定向修复"也给同一份错的 ⇒ 额度耗尽 → 降级交付暴力解
+          return '```python\n' + WRONG_SOL3 + '\n```';
+        }
+        if (sys.indexOf('【暴力 Agent】') >= 0) return '```python\n' + BRUTE + '\n```';
+        if (sys.indexOf('【数据生成 Agent】') >= 0) return '```python\n' + GEN + '\n```';
+        if (sys.indexOf('【讲解 Agent】') >= 0) { explainer++; return LECTURE3; }
+        return '{}';
+      };
+      f.seen = seen;
+      f.explainerCalls = () => explainer;
+      return f;
+    };
+    const runU = (key, agent, extra) => harness.runPipeline(Object.assign({
+      conv: { id: key, title: '没解出来' },
+      lang: 'python', intent: 'full', statement: STATEMENT,
+      samples: [{ input: '2\n3\n3 3 0\n2\n5 0', output: '3\n5' }],
+      workspace, wsKey: key,
+      callAgent: agent, tiers: [4, 6], perTier: 2, bruteTimeoutMs: 5000,
+      emit: () => {}, log: () => {}
+    }, extra || {}));
+
+    const ag3 = mkAgent3();
+    const rU = await runU('explain-unsolved-short', ag3);
+    const kU = (rU.trajectory || []).map((t) => t.kind);
+    const lectureCalls3 = ag3.seen.filter((s) => /讲解/.test(s.sys) || /讲解/.test(s.label));
+    ok('没解出来（默认）：**一个讲解类调用都不发**（提纲 / 讲解正文都不发）',
+      ag3.explainerCalls() === 0 && lectureCalls3.length === 0,
+      { explainer: ag3.explainerCalls(), lecture: lectureCalls3.map((s) => s.sys).slice(0, 3) });
+    ok('没解出来（默认）：交付物确实不可信（status≠ok，且题解在官方样例上就挂了）',
+      !!(rU.verification && rU.verification.status !== 'ok')
+      && kU.some((k) => /^sol-samples-fail$|^sol-sample-fix-(fail|exhausted|cap)$/.test(k)),
+      { status: rU.verification && rU.verification.status, kinds: kU.filter((k) => /sample/.test(k)) });
+    ok('没解出来（默认）：轨迹记 explain-skip-unsolved，提醒里写明怎么恢复旧行为',
+      kU.indexOf('explain-skip-unsolved') >= 0
+      && (rU.notes || []).join('').indexOf('CFCOACH_EXPLAIN_UNSOLVED=rich') >= 0,
+      { kinds: kU.filter((k) => /explain/.test(k)), notes: (rU.notes || []).join(' | ').slice(0, 200) });
+    ok('没解出来（默认）：消息是机械说明 —— 如实说"我没解出来、不写详细讲解"',
+      typeof rU.explainerText === 'string' && rU.explainerText.length > 80
+      && /这题我没解出来/.test(rU.explainerText) && /不写详细讲解/.test(rU.explainerText)
+      && /没有通过验证/.test(rU.explainerText) && /卡在哪/.test(rU.explainerText),
+      { len: String(rU.explainerText || '').length, head: String(rU.explainerText || '').slice(0, 80) });
+    ok('没解出来（默认）：机械说明里附上**暴力解代码**（那才是唯一值得信的东西）',
+      /permutations/.test(String(rU.explainerText || '')),
+      String(rU.explainerText || '').slice(-200));
+    ok('没解出来（默认）：说明里标注"没有额外调用模型"（省下的钱要能自证）',
+      /没有额外调用模型/.test(String(rU.explainerText || ''))
+      && !/## 题面拆解/.test(String(rU.explainerText || '')),
+      String(rU.explainerText || '').slice(0, 120));
+
+    // 旧行为（rich）：同样的现场，讲解线照旧跑 —— 两跑对比证明"省下的是真调用"，不是文案变化
+    const ag3r = mkAgent3();
+    const rUr = await runU('explain-unsolved-rich', ag3r, { explainUnsolved: 'rich' });
+    ok('没解出来（rich 对照）：讲解 Agent 被叫到、交付物是旧的长讲解',
+      ag3r.explainerCalls() >= 1 && /## 题面拆解/.test(String(rUr.explainerText || ''))
+      && !/这题我没解出来/.test(String(rUr.explainerText || '')),
+      { calls: ag3r.explainerCalls(), len: String(rUr.explainerText || '').length });
+    ok('没解出来：默认口径**真的少调了模型**（调用次数严格少于 rich 对照）',
+      ag3.seen.length < ag3r.seen.length,
+      { short: ag3.seen.length, rich: ag3r.seen.length });
+
+    if (envSaved3 === undefined) delete process.env.CFCOACH_EXPLAIN_UNSOLVED; else process.env.CFCOACH_EXPLAIN_UNSOLVED = envSaved3;
   }
 
   console.log('\nparallel: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));

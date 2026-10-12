@@ -45,6 +45,101 @@ async function main() {
     check('多个代码块取最大', multi.code.indexOf('int n') >= 0, multi.code.slice(0, 40));
     check('没有代码时返回空', harness.extractCode('只有文字说明').code === '');
 
+    // 未闭合围栏（模型忘闭合 / 被截断）：不能把那行 ``` 当代码交付
+    const unclosed = harness.extractCode('```cpp\n#include <bits/stdc++.h>\nint main(){return 0;}');
+    check('未闭合围栏：摘掉围栏行', unclosed.code.indexOf('```') < 0 && unclosed.code.indexOf('#include') >= 0, unclosed.code.slice(0, 40));
+    check('未闭合围栏：仍标记来自围栏', unclosed.fromFence === true);
+    const trailing = harness.extractCode('先讲思路：\n```cpp\nint main(){return 0;}\n```');
+    check('围栏在中间 + 结尾半截围栏：都摘掉', trailing.code.indexOf('```') < 0 && trailing.code.indexOf('int main') >= 0, trailing.code.slice(0, 40));
+    const bare = harness.extractCode('#include <bits/stdc++.h>\nint main(){return 0;}');
+    check('完全没围栏的裸代码照旧可用', bare.code.indexOf('#include') >= 0 && bare.fromFence === false, bare.code.slice(0, 40));
+    check('判不出代码时 rest 保留原文（含围栏）', harness.extractCode('```cpp\n（还没想好）').rest.indexOf('```') >= 0);
+
+    // 作用域坑（2026-10-10 真实事故，2247C 崩在这）：`finalStatus`/`finalReason` 是 runPipeline 里
+    // **4 空格嵌套块内**的 let，而 `rollbackIfInconclusive` 声明在块外（缩进 2）——它看不见这两个名字，
+    // 直接引用会抛 `ReferenceError: finalReason is not defined`，且只在"被改写 + 未收敛"的格子上才触发
+    // （67 题主跑恰好 0 格满足 ⇒ 潜伏了整轮）。用源码文本把纪律钉住：块外函数必须**收参数**、调用点必须**传参数**。
+    const harnessSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'harness.js'), 'utf8');
+    check('rollbackIfInconclusive 声明为收参数（块外函数看不见嵌套块里的 let）',
+      /function rollbackIfInconclusive\(finalStatus, finalReason\) \{/.test(harnessSrc));
+    check('rollbackIfInconclusive 调用点传参数（否则真的回退时 ReferenceError）',
+      /if \(finalStatus !== 'ok'\) rollbackIfInconclusive\(finalStatus, finalReason\);/.test(harnessSrc));
+    check('rollbackIfInconclusive 把文案交给纯函数（自己不再拼"链条未收敛"）',
+      /const plan = planRollback\(\{/.test(harnessSrc)
+      && /trajectory\.push\(\{ kind: 'sol-rollback', note: plan\.note \}\)/.test(harnessSrc));
+
+    // 生成器"规模自证"（2026-10-10 重判的物证：2241C / 2257C / 1977C 的 gen-weak 都源于"生成器长不大"）：
+    // 契约只写"≤ maxN"是不够的 —— 体检阶段必须**在最大档上真的量一下产出**（只在小档看有没有随机性抓不到），
+    // 量不够就按硬缺陷打回重写；但探针档位必须**按题面真实上限收敛**（题面 n ≤ 100 的题不该被要求 2000 档），
+    // 且只对**本来就有批量结构**的输入提这个要求（只有一个整数 n 的题在最大档也只有几个字节，那是合规的）。
+    check('体检阶段做生成器规模自证（探针档位按题面真实上限收敛，且只对批量输入提要求）',
+      /anticheat\.checkGenScale\(big\.input, probeTier\)/.test(harnessSrc)
+      && /anticheat\.hasBulkInput\(contract\)/.test(harnessSrc)
+      && /Math\.min\(topTier, Number\(sanScale\.maxN\) > 0 \? Number\(sanScale\.maxN\) : topTier\)/.test(harnessSrc));
+    // 2026-10-11：规模自证曾经只抽一次 ⇒ 随机生成器抽到小数据就被判"长不大"（假硬缺陷 → 白重写一次生成器）。
+    // 判据必须与尺子一致：多次抽样取最好的一次（尺子的 diffTries 也是 best-of-N）。
+    check('生成器规模自证连抽 GEN_SCALE_TRIES 次、按最好的一次裁决（单次抽样不当证据）',
+      /const GEN_SCALE_TRIES = \d+;/.test(harnessSrc)
+      && /anticheat\.judgeGenScaleProbe\(\{ readings: readings, tier: probeTier \}\)/.test(harnessSrc)
+      && /for \(let i = 0; i < GEN_SCALE_TRIES; i\+\+\)/.test(harnessSrc));
+    check('生成器"长不大"是硬缺陷（打回重写），但重写失败时保留原生成器（小档对拍仍有效）',
+      /kind: 'gen-too-small', hard: true/.test(harnessSrc)
+      && /else if \(genFlag\.kind === 'gen-too-small'\)/.test(harnessSrc)
+      && /genCode = prevGenCode;/.test(harnessSrc));
+
+    // 动态：planRollback 的四个早退分支 + 真回退。纯函数 = 事故那条路（真回退）能真的被跑一遍，
+    // 而不是只靠上面两条源码级断言。
+    const rbBase = {
+      solCodeFirstSet: true, solCode: 'B', solCodeFirst: 'A', originalProvenWrong: false,
+      solSamplesPass: true, finalStatus: 'unverified',
+      finalReason: '题解重写 3 次仍不收敛：继续改大概率无效（可能是标尺错）'
+    };
+    check('回退判定：题解没被改过 ⇒ 不回退', harness.planRollback(Object.assign({}, rbBase, { solCode: 'A' })) === null);
+    check('回退判定：没记下第一版 ⇒ 不回退', harness.planRollback(Object.assign({}, rbBase, { solCodeFirstSet: false })) === null);
+    check('回退判定：第一版被可信证据判过错 ⇒ 不回退（改过的版本更可信）',
+      harness.planRollback(Object.assign({}, rbBase, { originalProvenWrong: true })) === null);
+    check('回退判定：第一版自己过不了官方样例 ⇒ 不回退',
+      harness.planRollback(Object.assign({}, rbBase, { solSamplesPass: false })) === null);
+    check('回退判定：没有状态输入 ⇒ 不回退（不抛异常）', harness.planRollback(null) === null && harness.planRollback(undefined) === null);
+    const rbPlan = harness.planRollback(rbBase);
+    check('回退判定：四条件齐 ⇒ 回退，且文案写明未收敛的真实原因（2247C 崩的就是这一行）',
+      !!rbPlan && rbPlan.note.indexOf('链条未收敛（题解重写 3 次仍不收敛') >= 0
+      && rbPlan.note.indexOf('模型第一版题解') >= 0, rbPlan && rbPlan.note.slice(0, 70));
+    check('回退判定：没有 finalReason 时回落到 finalStatus',
+      /链条未收敛（unverified）/.test(String((harness.planRollback(Object.assign({}, rbBase, { finalReason: null })) || {}).note || '')));
+    check('回退判定：给用户/讲解的提醒明说"没被验证通过"，且不许拿中途反例解释这版代码',
+      !!rbPlan && /\*\*没有\*\*被验证通过/.test(rbPlan.warning) && /不要\*\*拿链条中途的反例/.test(rbPlan.warning),
+      rbPlan && rbPlan.warning.slice(0, 70));
+
+    // 多解题的官方样例不是判据（2026-10-10 消融取证：20 格 sol-rewrite-sample-fail 里多解题本该放行）。
+    // 源码级：多解题识别必须只有一处声明、且在函数作用域顶部（allowSolRewrite 在外层要读它）。
+    const maDecl = harnessSrc.indexOf('const multiAnswer = statementLib.looksSpecialJudge(o.statement);');
+    check('多解题识别：只有一处声明，且在函数作用域（solCheckerSampleFail 之前）',
+      maDecl > 0 && maDecl === harnessSrc.lastIndexOf('const multiAnswer = statementLib.looksSpecialJudge(o.statement);')
+      && maDecl < harnessSrc.indexOf('let solCheckerSampleFail = null;'), maDecl);
+    check('重写放行判定：acceptSolRewrite 走纯函数 planSampleRewrite，且非多解题仍然回退上一版',
+      /const plan = planSampleRewrite\(\{ allPass: !!rs\.allPass, multiAnswer \}\);/.test(harnessSrc)
+      && /solCode = prevCode;\r?\n    writeSol\(\);/.test(harnessSrc));
+    check('重写放行判定：多解题那一条要留痕（sol-rewrite-sample-ignore-multi + scope 提示）',
+      /kind: 'sol-rewrite-sample-ignore-multi'/.test(harnessSrc)
+      && /sol-rewrite-sample-ignore-multi'\)\) \{\r?\n      scopeBits\.push/.test(harnessSrc));
+    check('性能优化站点：多解题不再走"带着失败样例定向修复"',
+      /if \(multiAnswer\) \{\r?\n          \/\* 多解题：优化版与官方样例文本不同/.test(harnessSrc)
+      && /else \{\r?\n          const fixed = await repairAgainstSamples\('同语言性能优化/.test(harnessSrc));
+    // 动态：planSampleRewrite 三态 + 空输入。
+    const psr1 = harness.planSampleRewrite({ allPass: true, multiAnswer: false });
+    check('样例判定：过样例 ⇒ 收，且不标"忽略"', psr1.accept === true && psr1.kind === 'sol-rewrite-sample-ok');
+    const psr2 = harness.planSampleRewrite({ allPass: false, multiAnswer: true });
+    check('样例判定：多解题样例文本对不上 ⇒ **不拦**（不回退），文案写明样例不是判据',
+      psr2.accept === true && psr2.kind === 'sol-rewrite-sample-ignore-multi'
+      && psr2.note.indexOf('多解题') >= 0 && psr2.note.indexOf('不作判据') >= 0, psr2.note);
+    const psr3 = harness.planSampleRewrite({ allPass: false, multiAnswer: false });
+    check('样例判定：非多解题样例不过 ⇒ 拦（P0 纪律不变）',
+      psr3.accept === false && psr3.kind === 'sol-rewrite-sample-fail'
+      && psr3.note.indexOf('没有通过官方样例') >= 0, psr3.note);
+    check('样例判定：空输入不抛异常（默认放行，保持旧行为）',
+      harness.planSampleRewrite(null).accept === true && harness.planSampleRewrite(undefined).kind === 'sol-rewrite-sample-skip');
+
     const userMsg = '【Codeforces 1800C】C. Powering the Hero\n难度：1500 分 · 标签：greedy\n\n牌堆问题……\n\n```python\nimport sys\nprint(0)\n```';
     const code = harness.extractUserCode(userMsg);
     const stmt = harness.cleanUserStatement(userMsg);
@@ -396,6 +491,12 @@ async function main() {
     check('生成器提示词带上数值上限约定，并警告"字符串字段别当数字改"（真实事故：00100010 → 16）',
       harness.genSystem().indexOf('sys.argv[2]') >= 0 && harness.genSystem().indexOf('原样输出字符串') >= 0,
       harness.genSystem().slice(0, 200));
+    // 契约的第二个坑（2026-10-10 的 73 题跑分物证）：只说"≤ maxN"，模型就会写出**合规但长不大**的生成器
+    // （2257C 把 total_n 写死 ≤6；1977C 用 randint(1, cap) 抽奖）⇒ 对拍只在小规模上"通过"、最大档只剩"判不了"。
+    check('生成器提示词要求"把 maxN 用起来"，并明令禁止自加规模上限（真实事故：2257C / 1977C）',
+      harness.genSystem().indexOf('把 maxN 用起来') >= 0
+      && harness.genSystem().indexOf('规模必须跟着长起来') >= 0
+      && harness.genSystem().indexOf('禁止自己给规模设死上限') >= 0, harness.genSystem().slice(0, 300));
     // 校准失败后的重写才会给样例——并且明令只许改逻辑
     const bruteRetry = harness.buildBruteUser({
       statement: pastedStatement,
@@ -696,6 +797,25 @@ async function main() {
     if (oldRepairMax === undefined) delete process.env.CFCOACH_PERF_REPAIR_MAX; else process.env.CFCOACH_PERF_REPAIR_MAX = oldRepairMax;
     if (oldRepairFix === undefined) delete process.env.CFCOACH_PERF_REPAIR_FIX; else process.env.CFCOACH_PERF_REPAIR_FIX = oldRepairFix;
     if (oldSw === undefined) delete process.env.CFCOACH_LANG_SWITCH; else process.env.CFCOACH_LANG_SWITCH = oldSw;
+
+    // 2b-1) 没解出来就不写讲解（F1，2026-10-10 凌晨，**默认 short**）。
+    //       依据（docs/why-we-lag-2026-10-09.md §6.16）：没解出来的五格里讲解线占 30%–55% 花费，
+    //       而那笔钱几乎全花在**思考**上（4.5–5.7 万 out tokens 只换来 1.6–1.9 万字符正文）。
+    //       用户口径（m25200）："答案都没过那你的思路大概率只能是误导" ⇒ 别拆错思路，直接说不会。
+    const oldUnsolved = process.env.CFCOACH_EXPLAIN_UNSOLVED;
+    delete process.env.CFCOACH_EXPLAIN_UNSOLVED;
+    check('没解出来：默认 short（不写讲解，只给机械说明 + 暴力解）',
+      harness.explainUnsolvedConfig() === 'short' && harness.explainUnsolvedConfig({}) === 'short');
+    check('没解出来：选项 explainUnsolved:"rich" 能回旧行为（A/B 用）',
+      harness.explainUnsolvedConfig({ explainUnsolved: 'rich' }) === 'rich');
+    process.env.CFCOACH_EXPLAIN_UNSOLVED = 'rich';
+    check('没解出来：CFCOACH_EXPLAIN_UNSOLVED=rich 也能回旧行为（环境变量优先于"没传选项"）',
+      harness.explainUnsolvedConfig() === 'rich');
+    delete process.env.CFCOACH_EXPLAIN_UNSOLVED;
+    check('没解出来：选项优先于环境变量（消融实验一条命令切换单格行为）',
+      harness.explainUnsolvedConfig({ explainUnsolved: 'rich' }) === 'rich'
+      && harness.explainUnsolvedConfig({ explainUnsolved: 'short' }) === 'short');
+    if (oldUnsolved === undefined) delete process.env.CFCOACH_EXPLAIN_UNSOLVED; else process.env.CFCOACH_EXPLAIN_UNSOLVED = oldUnsolved;
 
     // 2b-2) 最大档抽多份取最慢（worst-of-N）：生成器随机的题里，**一份**随机数据只是一次抽样，
     //       只测一份就写"已验证"等于把结论押在运气上（2250C 的假"已验证"就是这么漏过去的）。

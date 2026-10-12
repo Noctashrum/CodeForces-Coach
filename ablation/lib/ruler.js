@@ -26,6 +26,7 @@ const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const runner = require('../../lib/runner');
 const statementLib = require('../../lib/statement');
+const verdictsLib = require('./verdicts');
 
 const DEFAULT_TIME_LIMIT_MS = 2000;
 const DEFAULT_MAX_SCALE = 200000;
@@ -540,6 +541,23 @@ function sampleFull(r, which) {
 }
 
 /** checker 自检：官方样例答案当选手输出必须 AC；样例全过才算可信 */
+/**
+ * 负向探针（2026-10-10 补）：把官方答案**故意弄坏**，checker 必须拒绝。
+ *
+ * 为什么必须有：只做正向自检（"官方答案必须被判 AC"）的话，一份 `return 0` 的橡皮图章
+ * 同样能通过自检、被采信，然后把这把尺子量出来的每一个候选都判成 AC —— 尺子自己成了假阳性来源。
+ * 产品侧 `lib/checker.js` 同步加了同一套探针（那边是 2250F 那一格放行的机制）。
+ * 纪律与产品侧一致：只有"明确判 AC"才算印章；崩溃/超时/FAIL(3) 一律算"没给出结论"（宁可漏报）。
+ */
+function negativeProbes(s) {
+  const toks = String((s && s.output) || '').split(/\s+/).filter(Boolean);
+  const probes = [];
+  if (!toks.length) return probes;
+  probes.push({ why: '空输出', participant: '' });
+  if (toks.length >= 2) probes.push({ why: '截断的输出（少了最后一个 token）', participant: toks.slice(0, -1).join(' ') + '\n' });
+  return probes;
+}
+
 function checkerSelfTest(built, samples) {
   const list = (samples || []).filter((s) => s && s.input != null && s.output != null);
   if (!list.length) return { trusted: true, tested: 0, note: '没有官方样例可自检：按可信处理，但无法自证' };
@@ -554,7 +572,29 @@ function checkerSelfTest(built, samples) {
     }
   }
   if (failures.length) return { trusted: false, tested: list.length, failures, note: 'checker 与官方答案矛盾 → 本次忽略它，回落到 special-judge（不可判）' };
-  return { trusted: true, tested: list.length };
+  // 正向全过 → 再做负向探针（最多前 3 组样例，成本可控）
+  let probes = 0;
+  let undecided = 0;
+  const stamps = [];
+  for (const s of list.slice(0, 3)) {
+    for (const p of negativeProbes(s)) {
+      probes++;
+      const r = runCheckerOnce(built, s.input, p.participant, s.output, 15000);
+      if (r.ok && r.ac) {
+        stamps.push({ input: String(s.input).replace(/\s+/g, ' ').slice(0, 80), why: p.why });
+      } else if (!r.ok) {
+        undecided++;
+      }
+    }
+  }
+  if (stamps.length) {
+    return {
+      trusted: false, tested: list.length, probes, stamps,
+      note: 'checker 是"橡皮图章"：把官方答案弄坏（' + stamps.map((s) => s.why).join(' / ')
+        + '）它也判 AC → 没有判据能力，本次忽略它，回落到 special-judge（不可判）'
+    };
+  }
+  return { trusted: true, tested: list.length, probes, undecided };
 }
 
 /* ------------------------------------------------------------------ 主流程 */
@@ -568,6 +608,36 @@ function readPart(part) {
 }
 
 /**
+ * R1：决定正确性对拍用**哪些规模档**（纯函数，便于自测）。
+ *
+ * 老口径把 30/200/2000 写死 ⇒ 题面写 `n ≤ 100` 的题（2241C）也被要求造 2000 档数据，而生成器忠实
+ * 服从题面（`maxN = min(maxN, 100)`）⇒ 2000 档必然过不了规模校验 ⇒ 判 `diff-gen-weak`（判不了）。
+ * 实测 67 题里 11 题的真实上限低于 2000（其中 3 题连 30 都不到）⇒ 这些格子在旧尺子下永远拿不到结论。
+ *
+ * 规则：
+ *   · 显式传 `tiers`（自测、手工复核）一律照用 —— 连空数组也照用（照用 = 跳过差分对拍）。
+ *   · 题面真实上限 `source` 是 `parsed`/`override` 且 `maxN` 是个正数时：档位截到 `maxN` 以内，
+ *     并且**只有** `maxN` 低于最大对拍档（2000）时才把它自己补成一档 —— 题目自己的最大规模就是
+ *     最该测的那一档；上限更大的题（1935C 是 4e6）不在这里拉大，那是第 ③ 关（最大规模 + 真实时限）
+ *     的活，重复烧没有意义。
+ *   · `source` 是 `default`（题面没扫出 n 上界）⇒ 不动。
+ *
+ * @param {{tiers?: number[], maxN?: number, source?: string}} s
+ * @returns {number[]}
+ */
+function planDiffTiers(s) {
+  const o = s || {};
+  if (Array.isArray(o.tiers)) return o.tiers.slice();
+  const capTier = (o.source === 'parsed' || o.source === 'override') && Number(o.maxN) > 0
+    ? Number(o.maxN) : null;
+  const topDiff = DIFF_TIERS[DIFF_TIERS.length - 1];
+  const tiers = capTier ? DIFF_TIERS.filter((t) => t <= capTier) : DIFF_TIERS.slice();
+  if (capTier && capTier < topDiff && tiers.indexOf(capTier) < 0) tiers.push(capTier);
+  tiers.sort((a, b) => a - b);
+  return tiers;
+}
+
+/**
  * 对一条提交跑完整的 CF-AC 判定。
  *
  * @param {object} opts
@@ -575,7 +645,7 @@ function readPart(part) {
  *   - problem    题目对象（problems.json 里那条）
  *   - code/codeLang  被判定者的代码
  *   - cacheDir   应用题面缓存目录（读 timeLimit）
- *   - tiers      正确性对拍的规模档（默认 [30,200,2000]）
+ *   - tiers      正确性对拍的规模档（默认 [30,200,2000]；R1 起会按题面真实上限收敛，见下方注释）
  *   - generousMs 最大规模超时后的宽松上限（默认 20000）
  *   - genTimeoutMs 生成器超时（默认 30000）
  * @returns {Promise<object>} verdict（含 cfac 布尔与全部依据）
@@ -626,6 +696,10 @@ async function runRuler(opts) {
           trusted: !!st.trusted, selfTested: st.tested || 0, note: st.note || null
         };
         if (st.failures) base.checker.selfTestFailures = st.failures;
+        /* 负向探针条数（2026-10-10 补）：>0 说明这份 checker 是被"官方答案 + 弄坏的答案"双向考过的，
+         * 而不是只证明过"它认官方答案"。存进 verdict 里是为了让复核命令重跑后能自证这一点。 */
+        if (st.probes) base.checker.negativeProbes = st.probes;
+        if (st.undecided) base.checker.probesUndecided = st.undecided;
         if (st.trusted) checkerUsable = built;
       }
     }
@@ -647,7 +721,20 @@ async function runRuler(opts) {
     },
     { bruteTimeoutMs: o.bruteTimeoutMs || 30000 }
   );
-  if (!arena.ok) return Object.assign(base, { cfac: false, verdict: 'arena-error', detail: arena.error });
+  if (!arena.ok) {
+    // R5（2026-10-10）：把"编译失败"从笼统的 `arena-error` 里拆出来 —— **谁的文件**编译不过，账完全不同：
+    //   · sol（候选自己写的代码）编译不过 = 候选错 ⇒ 判错
+    //   · brute（外部 AC 提交）/ gen（数据生成器）编译不过 = 尺子自己的文件坏了 ⇒ 判不了
+    // 老口径一律 `arena-error`，报告只能靠正则去 detail 里猜（实测 L2 的 7 格 arena-error 全是编译失败：
+    // 5 格是候选代码、2 格是尺子自己的文件）⇒ 不拆开的话三段口径（★AC/判错/判不了）根本算不准。
+    const who = String(arena.error || '').match(/^\s*(sol|brute|gen)\s*[：:]\s*编译失败/);
+    return Object.assign(base, {
+      cfac: false,
+      verdict: who ? verdictsLib.compileVerdict(who[1]) : 'arena-error',
+      compileWho: who ? who[1] : null,
+      detail: arena.error
+    });
+  }
 
   try {
     // ① 官方样例
@@ -689,7 +776,7 @@ async function runRuler(opts) {
     // ② 多档规模随机对拍（与外部 AC 提交比）
     // 每一档抽**若干份**随机数据：一份数据只是一次抽样，同一格两次重判可能一次 mismatch 一次 same
     // （2026-10-10 实测 2257F1 的 200 档，两次重判结论不同）⇒ 一档多抽几份，判据取"全一致"。
-    const tiers = (o.tiers || DIFF_TIERS).slice();
+    const tiers = planDiffTiers({ tiers: o.tiers, maxN: scale.maxN, source: scale.source });
     const diffs = [];
     let diffVerdict = 'AC';
     const diffCases = Math.max(1, Math.min(MAX_DIFF_CASES, Number(o.diffCases) || DEFAULT_DIFF_CASES));
@@ -699,7 +786,11 @@ async function runRuler(opts) {
       for (let k = 1; k <= diffCases && !bad; k++) {
         const picked = await genCaseBig(arena, tier, scale.maxV, {
           genTimeoutMs: o.genTimeoutMs,
-          tries: k === 1 ? (o.diffTries || 3) : 1
+          // R2（2026-10-10）：**每一档的每一份**都重抽到底（老口径只有第一份重抽 3 次，k≥2 只抽一次）。
+          // 生成器是随机的：1977C 的生成器 `total = random.randint(1, min(maxN, 2000))` —— 第一份抽到
+          // 大数、第二份抽到 1，旧尺子就会拿第二份（玩具规模）的数据判 `gen-weak`（判不了）。
+          // 统一成 best-of-`o.diffTries`：生成器比候选/标尺便宜得多，换来的是"判不了"不再由一次坏抽样决定。
+          tries: o.diffTries || 3
         });
         if (!picked.g) {
           diffVerdict = 'run-error';
@@ -709,7 +800,14 @@ async function runRuler(opts) {
         }
         if (!picked.sc.ok) {
           diffVerdict = 'gen-weak';
-          row = { tier, cases: k, status: 'gen-weak', scale: picked.sc, tries: picked.tries };
+          row = {
+            tier, cases: k, status: 'gen-weak', scale: picked.sc, tries: picked.tries,
+            // R3（2026-10-10）：判不了也要留下证据 —— 只写一句 `gen-weak`，读判词的人无从判断
+            // 这是"生成器长不大"还是"档位要得离谱"（R1 修的正是后者）。
+            detail: '这一档（' + tier + '）重抽 ' + picked.tries + ' 次，最大的数据只有 ' + picked.sc.tokens
+              + ' 个数字 / ' + picked.sc.bytes + ' 字节；规模校验要 ' + picked.sc.want + ' 个数字（或 '
+              + (picked.sc.want * 2) + ' 字节）⇒ 生成器长不大，这一档判不了（不是候选的错）'
+          };
           bad = true;
           break;
         }
@@ -785,9 +883,15 @@ async function runRuler(opts) {
       const out = {
         cfac: false,
         verdict: named ? diffVerdict : 'diff-' + diffVerdict,
-        samples, diffs
+        samples, diffs,
+        // R3：这一格的判词是在**哪些规模档**上得出的（R1 之后顶档可能是题面真实上限，而不是 2000）
+        tiersUsed: tiers.slice()
       };
-      if (diffVerdict === 'special-judge') {
+      if (diffVerdict === 'gen-weak') {
+        const weak = diffs.filter((d) => d.status === 'gen-weak')[0];
+        out.detail = (weak && weak.detail)
+          || '对拍档位上的数据规模不够（生成器长不大）→ 这一格判不了，不是候选的错';
+      } else if (diffVerdict === 'special-judge') {
         out.diffUnreliable = true;
         // 文案必须区分"没有 checker"和"有 checker 但它自己没给出结论"：
         // 后者是我们标尺侧的问题（例如 jury 输出被截断 / checker 认为 jury 不是最优），
@@ -991,7 +1095,7 @@ async function runRuler(opts) {
     if (maxScale.measuredMs > limits.timeLimitMs) {
       return Object.assign(base, { cfac: false, verdict: 'slow', samples, diffs, maxScale, detail: rejectNote });
     }
-    return Object.assign(base, { cfac: true, verdict: 'AC', samples, diffs, maxScale });
+    return Object.assign(base, { cfac: true, verdict: 'AC', samples, diffs, maxScale, tiersUsed: tiers.slice() });
   } finally {
     arena.close();
   }
@@ -1005,7 +1109,9 @@ async function runRuler(opts) {
       groups[lvl] = {
         total: 0, cfac: 0, sampleAC: 0, diffAC: 0,
         noCode: 0, noOracle: 0, noGen: 0, genWeak: 0,
-        tle: 0, slow: 0, wa: 0, re: 0, other: 0, oracleBroken: 0, oracleOverTl: 0, costTotal: 0, specialJudge: 0
+        tle: 0, slow: 0, wa: 0, re: 0, other: 0, oracleBroken: 0, oracleOverTl: 0, costTotal: 0, specialJudge: 0,
+        // R5：编译失败分两侧记账（候选的 sol ⇒ 判错；尺子的 brute/gen ⇒ 判不了），别再落进 other
+        solCompileError: 0, rulerCompileError: 0
       };
     }
     const g = groups[lvl];
@@ -1027,6 +1133,8 @@ async function runRuler(opts) {
     else if (verdict === 'RE') g.re++;
     else if (verdict === 'oracle-over-tl-at-max') g.oracleOverTl++;
     else if (/oracle-error/.test(verdict)) g.oracleBroken++;
+    else if (verdict === 'sol-compile-error') g.solCompileError++;
+    else if (/^(brute|gen)-compile-error$/.test(verdict)) g.rulerCompileError++;
     else if (verdict !== 'AC') g.other++;
     // 老口径（10-10 之前）：尺子只抽一份数据，oracle 自己就超了时限时仅标"存疑"但照样判 TLE/slow。
     // 现在这种抽样会被直接剔掉（oracle-over-tl-at-max），这里保留是为了读旧 store 的判定文件。
@@ -1057,6 +1165,7 @@ module.exports = {
   buildChecker,
   runCheckerOnce,
   checkerSelfTest,
+  negativeProbes,
   resolveLimits,
   resolveScale,
   resolveGen,
@@ -1065,6 +1174,7 @@ module.exports = {
   checkScale,
   genCaseBig,
   MAX_SCALE_TRIES,
+  planDiffTiers,
   runRuler,
   summarizeCfac
 };

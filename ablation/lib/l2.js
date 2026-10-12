@@ -47,6 +47,35 @@ function roleOf(system) {
   return 'other';
 }
 
+/**
+ * 解题臂（用户口径 m25200，2026-10-10 凌晨）：**只有题解 Agent 与暴力解 Agent 是"真正解题"的**，
+ * 所以 ¥/AC 只该记这两个角色的钱。讲解提纲 / 讲解正文 / 手算锚点 / 数据生成器 / 错因仲裁 / checker
+ * 买的是**别的交付物**（讲解、尺子、验证），把它们均摊进 ¥/AC 等于让"讲解贵"去顶替"解题贵" ——
+ * 而实测差距恰恰在解题上（没解出来的五格里，讲解线占 30%–55% 花费）。
+ * 记录里同时留 total（全链）与 cost（解题臂），口径写在数据里而不是写在文档里。
+ */
+const SOLVE_ROLES = ['solution', 'brute'];
+
+function solveArmCost(costByRole) {
+  const cbr = costByRole || {};
+  const roles = SOLVE_ROLES.filter((r) => typeof cbr[r] === 'number');
+  let cost = 0;
+  roles.forEach((r) => { cost += cbr[r]; });
+  let total = 0;
+  Object.keys(cbr).forEach((r) => { if (typeof cbr[r] === 'number') total += cbr[r]; });
+  return { cost, roles, total, share: total > 0 ? cost / total : null };
+}
+
+/** 逐角色算钱（同一张价目表）→ `{costByRole, solveArm}`；单价未知的角色记 null，宁可在表里写 n/a 也不编数字 */
+function priceRoles(cfg, target, tokByRole) {
+  const costByRole = {};
+  Object.keys(tokByRole || {}).forEach((r) => {
+    const c = record.costOf(cfg, target.providerId, target.model, tokByRole[r]);
+    costByRole[r] = c && typeof c.amount === 'number' ? c.amount : null;
+  });
+  return { costByRole, solveArm: solveArmCost(costByRole) };
+}
+
 let wsRoot = null;
 
 /**
@@ -154,6 +183,7 @@ async function runL2(ctx) {
   const lang = ctx.lang === 'cpp' ? 'cpp' : 'python';
   const usage = { promptTokens: 0, completionTokens: 0, calls: 0 };
   const byRole = {};
+  const tokByRole = {};   // 逐角色 token：让"钱花在哪个 Agent 上"可自证（¥/AC 只记解题臂，见 solveArmCost）
   const events = [];
   // 官方时限：解析得到才交给 harness（性能闸/语言闸的判据），解析不到就 0 = 不做性能闸。
   const tl = resolveTimeLimit(problem, run.outDir);
@@ -169,6 +199,7 @@ async function runL2(ctx) {
       perTier: ctx.iterations || 30, maxStressMs: ctx.maxStressMs || 90000, depth: ctx.depth || 'L3',
       docEffort: ctx.docEffort || '',   // '' = 默认（讲解带思考）；'none' = 实验臂"关思考写文档"
       codeEffort: ctx.codeEffort || '',  // '' = 默认（代码角色带思考）；'none' = 实验臂"关思考直接出码"
+      explainUnsolved: ctx.explainUnsolved || '',  // '' / 'short' = 没解出来就**不写讲解**（默认口径）；'rich' = 旧行为（照写，A/B 用）
       timeLimitMs: tl.timeLimitMs || 0,  // 0 = 没有官方时限（性能闸会跳过，不编时限）
       timeLimitSource: tl.source          // override / problem / cache / none —— 记录里要能自证
     }
@@ -200,6 +231,9 @@ async function runL2(ctx) {
         onUsage: (u) => {
           if (u && u.promptTokens != null) { usage.promptTokens += u.promptTokens; usage.calls++; }
           if (u && u.completionTokens != null) usage.completionTokens += u.completionTokens;
+          const tr = tokByRole[role] || (tokByRole[role] = { promptTokens: 0, completionTokens: 0, calls: 0 });
+          if (u && u.promptTokens != null) { tr.promptTokens += u.promptTokens; tr.calls++; }
+          if (u && u.completionTokens != null) tr.completionTokens += u.completionTokens;
           if (typeof o.onUsage === 'function') o.onUsage(u);
         },
         onMeta: typeof o.onMeta === 'function' ? o.onMeta : undefined
@@ -228,8 +262,13 @@ async function runL2(ctx) {
       richTheme: 'dark',
       docEffort: ctx.docEffort === 'none' ? 'none' : '',
       codeEffort: ctx.codeEffort === 'none' ? 'none' : '',
+      explainUnsolved: ctx.explainUnsolved || '',
       perTier: ctx.iterations || 30,
       maxStressMs: ctx.maxStressMs || 90000,
+      // 复用已有一版题解（`{sol, brute, gen}`）：GUI 的"重新对拍"走的就是这条快通道。
+      // 实验台也用它做**受控实验**：同一份慢代码喂进去，只让"性能优化提问"这一个变量变化
+      // （.probe/probe-perf-reuse.js 的 F3' 取证）。不传 = 与从前逐字相同。
+      reuse: ctx.reuse || undefined,
       // 性能闸（=批次③语言闸）的判据：0 会被 harness 当成"没有官方时限"，闸门照旧跳过。
       timeLimitMs: tl.timeLimitMs || 0,
       log: () => {},
@@ -270,6 +309,11 @@ async function runL2(ctx) {
     rec.calls = usage.calls;
     rec.steps = usage.calls;
     rec.roles = byRole;
+    rec.usageByRole = tokByRole;
+    // 逐角色算钱（同一张价目表）⇒ ¥/AC 可以只按"解题臂"记账（用户口径 m25200）
+    const priced = priceRoles(ctx.cfg, target, tokByRole);
+    rec.costByRole = priced.costByRole;
+    rec.solveArm = priced.solveArm;
     rec.toolsUsed = Object.keys(byRole);
     rec.verification = v;
     rec.verificationStatus = v ? v.status : null;
@@ -278,7 +322,11 @@ async function runL2(ctx) {
     //   （2241B/2247B/1978D/1978E/2252F）。现在优先读 harness 新给的 claimVerified；
     //   老记录（没有该字段）回落到 status==='ok'，保持历史可比。
     rec.assertedVerified = v ? (v.claimVerified != null ? v.claimVerified === true : v.status === 'ok') : false;
-    rec.scopeComplete = v ? (v.scopeComplete !== false) : false;
+    // 同一条纪律用在"验证范围"上：**harness 没报 scopeComplete 时不许当作 true**。
+    // 原写法是 `v.scopeComplete !== false` —— 缺字段就成了 true（2026-10-10 实测：2247F 因反打表
+    // 在早期出口返回，verification 里根本没有 scopeComplete，记录却写着 scope=Y，
+    // 而那一格的真实结局是"题解被拒、一个字符都没交付"）。缺字段时与 assertedVerified 同口径回落。
+    rec.scopeComplete = v ? (v.scopeComplete != null ? v.scopeComplete === true : v.status === 'ok') : false;
     rec.delivered = v ? (v.delivered || null) : null;
     rec.solRollback = v ? !!v.solRollback : false;
     rec.stressTruncated = v ? (v.stressTruncated || '') : '';
@@ -310,6 +358,10 @@ async function runL2(ctx) {
     rec.usage = { promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, calls: usage.calls, estimated: false };
     rec.calls = usage.calls;
     rec.roles = byRole;
+    rec.usageByRole = tokByRole;
+    const pricedW = priceRoles(ctx.cfg, target, tokByRole);   // 半路失败也留账：钱已经花掉了
+    rec.costByRole = pricedW.costByRole;
+    rec.solveArm = pricedW.solveArm;
     rec.toolsUsed = Object.keys(byRole);
     rec.ms = Date.now() - t0;
     rec.transcriptFile = run.saveTranscript(name, events);
@@ -317,4 +369,4 @@ async function runL2(ctx) {
   }
 }
 
-module.exports = { runL2, prepareWorkspace, convFor, roleOf, resolveTimeLimit, pickCacheDir };
+module.exports = { runL2, prepareWorkspace, convFor, roleOf, resolveTimeLimit, pickCacheDir, solveArmCost, SOLVE_ROLES };

@@ -58,6 +58,11 @@ function usage() {
     '                       .probe/probe-sol-arms.js 实测同一问法关思考出码只要 1/2-1/3 的价格且判分不更差，',
     '                       默认关；暴力解与数据生成器**照旧带思考**——它们是尺子，不是交付物，',
     '                       一起关掉会让 A/B 变成三个变量的对照。记录里写进 request.codeEffort）',
+    '  --explain-unsolved rich|short',
+    '                       L2 交付物**没通过验证**时，还要不要写提纲+讲解+修结构（默认 short = 不写，',
+    '                       只给机械说明 + 暴力解）。实测（docs/why-we-lag-2026-10-09.md §6.16）那几格的',
+    '                       讲解线占 30-55% 花费，且拆解的是一份错/超时的思路 —— 那是误导不是教学。',
+    '                       写进 request.explainUnsolved；rich = 旧的"照写"行为，做 A/B 用）',
     '  --out DIR            输出目录（默认 ablation/out/<时间戳>）',
     '  --dry-run            只打印计划，不调模型'
   ].join('\n'));
@@ -130,11 +135,13 @@ async function main() {
 
   let done = 0;
   const l2opts = {
+    cfg,   // 逐角色算钱要用同一张价目表（¥/AC 只记解题臂：l2.js 的 solveArmCost）
     lang: args.lang === 'cpp' ? 'cpp' : 'python',
     rich: env.bool(args.rich, false),
     depth: args.depth ? String(args.depth).toUpperCase() : 'L3',
     docEffort: args.docEffort ? String(args.docEffort).toLowerCase() : '',
     codeEffort: args.codeEffort ? String(args.codeEffort).toLowerCase() : '',
+    explainUnsolved: args.explainUnsolved ? String(args.explainUnsolved).toLowerCase() : '',
     maxStressMs: env.num(args.maxStressMs, 90000)
   };
   await pool(jobsList, jobs, async (j) => {

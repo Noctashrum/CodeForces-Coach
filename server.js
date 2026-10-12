@@ -27,6 +27,7 @@ const toolsLib = require('./lib/tools');
 const agentloop = require('./lib/agentloop');
 const cfreview = require('./lib/cfreview');
 const diagbundle = require('./lib/diagbundle');
+const ideLib = require('./lib/ide');
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -64,6 +65,7 @@ function ensureDir(dir) {
 ensureDir(DATA_DIR); ensureDir(CONV_DIR); ensureDir(ARCH_DIR);
 cf.setCacheDir(DATA_DIR);   // 题目总表落盘缓存（data/cache/problemset.json），断网也能查 rating/tags
 workspace.setRoot(DATA_DIR); // 每题工作区（data/workspace/<会话id>/）：题解 / 暴力 / 生成器缓冲区
+ideLib.setRoot(DATA_DIR);    // 内嵌 IDE 的代码状态（data/ide/<题号>.json）：一题一份，跨会话复用
 cfreview.setCacheDir(DATA_DIR); // 题解缓存（data/cache/editorials/<题号>.json）：同一道题只抓一次
 
 class HttpError extends Error {
@@ -1104,7 +1106,8 @@ function resolveAgentTarget(cfg, provider, model, role) {
  */
 async function callAgentLLM(o) {
   const cu = coachUpstream(o.provider, o.model, o.messages, o.system, { maxTokens: o.maxTokens || 0 });
-  const bodyObj = Object.assign({}, cu.base, { temperature: 0.2 });
+  // temperature 默认 0.2；IDE 补全要更"稳"（同一份代码重复按按钮不该给出完全不同的走向）会显式传 0.1
+  const bodyObj = Object.assign({}, cu.base, { temperature: (typeof o.temperature === 'number' ? o.temperature : 0.2) });
   // 关思考（'none'）：harness 的"落码抢救"用。推理模型被长度上限截断时正文 0 字符、预算全在思考上，
   // 唯一有效的解药是"把上一轮思考喂回去 + 关掉思考让它只落码"（见 lib/harness.js 的注释与
   // .probe/probe-sol-unblock.js）：`thinking:{type:'disabled'}` / `enable_thinking:false` / `minimal`
@@ -2739,6 +2742,133 @@ const server = http.createServer(async (req, res) => {
       const key = workspace.keyFor(conv);
       const removed = workspace.removeWorkspace(key);
       sendJSON(res, 200, { ok: true, key, removed });
+      return;
+    }
+
+    /* ---- 内嵌 IDE（写代码 / 按按钮补全 / 自己填 stdin 跑一次） ---- */
+    /**
+     * IDE 的补全走哪个角色：'solution'（题解 Agent 的模型）。理由：补全是**要写对的代码**，
+     * 学员配的题解模型就是他为"写对代码"选的那个；不新开一个角色，避免设置页多一项没人配的模型。
+     */
+    const IDE_ROLE = 'solution';
+    const IDE_MAX_TOKENS = 700;   // 补全是一小段代码（提示词里限了 14 行），700 足够，也防手滑烧钱
+
+    if (method === 'GET' && p === '/api/ide') {
+      const convId = url.searchParams.get('convId') || '';
+      const conv = convId ? loadConv(convId) : null;
+      if (convId && !conv) throw new HttpError(404, '会话不存在');
+      const key = ideLib.stateKeyOf(conv);
+      const st = ideLib.loadState(key);
+      const problem = ideLib.problemContextOf(conv);
+      const cfg0 = loadConfig();
+      const provider = cfg0.providers.find((x) => x.id === (conv ? conv.providerId : cfg0.defaultProviderId))
+        || cfg0.providers.find((x) => x.id === cfg0.defaultProviderId) || cfg0.providers[0] || null;
+      const model = (conv && conv.model) || cfg0.defaultModel || (provider && provider.models && provider.models[0]) || '';
+      sendJSON(res, 200, {
+        key,
+        lang: st.lang,
+        code: st.code,
+        updatedAt: st.updatedAt,
+        problem,
+        hasProblem: ideLib.hasProblemContext(problem),
+        langLabel: ideLib.langLabel(st.lang),
+        maxLines: ideLib.MAX_SUGGESTION_LINES,
+        model: provider ? ((provider.name || provider.id) + ' · ' + model) : '',
+        configured: !!(provider && model)
+      });
+      return;
+    }
+
+    /** 保存学员写的代码（一题一份：键由会话推出，前端不能自选键 → 没有路径穿越的口子） */
+    if (method === 'POST' && p === '/api/ide/save') {
+      const body = await readBody(req);
+      const conv = body.convId ? loadConv(body.convId) : null;
+      if (body.convId && !conv) throw new HttpError(404, '会话不存在');
+      const key = ideLib.stateKeyOf(conv);
+      const r = ideLib.saveState(key, { lang: body.lang, code: body.code });
+      if (!r.ok) throw new HttpError(400, r.error);
+      sendJSON(res, 200, { ok: true, key, updatedAt: r.state.updatedAt });
+      return;
+    }
+
+    /**
+     * 按按钮补全：把「题面 + 学员自己写的代码」交给模型，返回一段可直接插进光标处的片段。
+     * 注意这里**只读会话的本地字段**（题面/元数据/样例），绝不读 workspace 里教练已验证的题解 ——
+     * 那等于一键抄答案，纪律写在 lib/ide.js 头部与 AGENTS.md。
+     */
+    if (method === 'POST' && p === '/api/ide/complete') {
+      const body = await readBody(req);
+      const conv = body.convId ? loadConv(body.convId) : null;
+      if (body.convId && !conv) throw new HttpError(404, '会话不存在');
+      const cfg0 = loadConfig();
+      const provider = cfg0.providers.find((x) => x.id === (conv ? conv.providerId : cfg0.defaultProviderId))
+        || cfg0.providers.find((x) => x.id === cfg0.defaultProviderId) || cfg0.providers[0];
+      if (!provider) throw new HttpError(400, '尚未配置模型服务');
+      const model0 = (conv && conv.model) || cfg0.defaultModel || (provider.models && provider.models[0]) || '';
+      if (!model0) throw new HttpError(400, '未选择模型');
+      const tuned = resolveAgentTarget(cfg0, provider, model0, IDE_ROLE);
+      const mode = body.mode === 'hint' ? 'hint' : 'continue';
+      const lang = ideLib.langOf(body.lang);
+      const code = String(body.code == null ? '' : body.code);
+      const caret = Number(body.caret);
+      const built = ideLib.buildMessages({ mode, lang, code, caret, problem: ideLib.problemContextOf(conv) });
+      // 学员按下另一个按钮/关掉页面时立刻掐掉这次调用（省下的 token 是真金白银）
+      const ac = new AbortController();
+      const onClose = () => { try { ac.abort(); } catch (e) { /* ignore */ } };
+      req.on('close', onClose);
+      const t0 = Date.now();
+      let text = '';
+      let usage = null;
+      try {
+        text = await callAgentLLM({
+          provider: tuned.provider,
+          model: tuned.model,
+          system: built.system,
+          messages: built.messages,
+          maxTokens: Math.min(2000, Math.max(120, Number(body.maxTokens) || IDE_MAX_TOKENS)),
+          temperature: 0.1,          // 同一份代码重复按按钮不该给出完全不同的走向
+          reasoningEffort: 'none',   // 补一小段代码不需要长思考（服务商不认这个字段会自动去掉重试）
+          signal: ac.signal,
+          onUsage: (u) => { usage = u; }
+        });
+      } finally {
+        req.removeListener('close', onClose);
+      }
+      const cleaned = ideLib.cleanSuggestion(text, { mode, lang, code, caret });
+      const cost = usage ? estimateCost(cfg0, tuned.provider.id, tuned.model, usage) : null;
+      const ms = Date.now() - t0;
+      console.log('[ide] ' + mode + ' ' + lang + '：代码 ' + code.length + ' 字符 → 补全 '
+        + cleaned.text.length + ' 字符 · ' + ms + 'ms'
+        + (usage ? ' · ' + (usage.promptTokens || 0) + '/' + (usage.completionTokens || 0) + ' tokens' : '')
+        + (cost ? ' · 约 ¥' + cost.amount.toFixed(4) : ''));
+      sendJSON(res, 200, {
+        ok: !!cleaned.text,
+        mode,
+        text: cleaned.text,
+        note: cleaned.note,
+        capped: cleaned.capped,
+        clipped: built.clipped,
+        empty: !cleaned.text,
+        error: cleaned.text ? null : '模型没有给出可用的补全（原话：' + String(text || '').slice(0, 200) + '）',
+        model: (tuned.provider.name || tuned.provider.id) + ' · ' + tuned.model,
+        ms,
+        usage: usage || null,
+        cost: cost || null
+      });
+      return;
+    }
+
+    /** 用学员自己填的 stdin 跑一次代码（走 lib/runner.js：沙箱 + 超时 + windowsHide 的统一出口） */
+    if (method === 'POST' && p === '/api/ide/run') {
+      const body = await readBody(req);
+      const lang = ideLib.langOf(body.lang);
+      const code = String(body.code == null ? '' : body.code);
+      if (!code.trim()) throw new HttpError(400, '代码为空');
+      const input = body.input == null ? '' : String(body.input);
+      const r = await runner.runOnce({ lang, code, input, timeLimitMs: body.timeLimitMs });
+      console.log('[ide] 运行 ' + lang + '：' + r.verdict + ' · ' + r.timeMs + 'ms · 输入 '
+        + input.length + ' 字符 · 输出 ' + String(r.stdout || '').length + ' 字符');
+      sendJSON(res, 200, r);
       return;
     }
 

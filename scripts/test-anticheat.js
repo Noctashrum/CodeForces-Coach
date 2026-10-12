@@ -112,6 +112,57 @@ ok('样例答案被当数字常量硬编码（≥6 位）也会被抓', () => {
   assert.strictEqual(r.blocked, true);
 });
 
+console.log('anticheat: 注释不是打表证据（2026-10-10 2247F 误报事故）');
+/* 事故现场：模型把推演写成注释，注释里出现的 301989883 正好是样例答案，一份实现被打回两次 */
+const SAMPLE_301989883 = [{ output: '301989883\n' }];
+const TRAILING_THOUGHTS = [
+  '# Idea: sample 1x32 gives 301989883, which is large.',
+  '# 2^? mod 998244353? 301989883 is specific.',
+  'import sys',
+  'def main():',
+  '    print(compute())',
+  'main()'
+].join('\n');
+ok('样例答案只出现在 Python 注释里 → **不拦截**', () => {
+  const r = ac.scanHardcoding({ code: TRAILING_THOUGHTS, lang: 'python', samples: SAMPLE_301989883 });
+  assert.strictEqual(r.blocked, false, '误报：' + r.reason);
+  assert.strictEqual(r.hits.length, 0);
+});
+ok('样例答案只出现在 C++ 行注释里 → 不拦截', () => {
+  const code = 'int main() {\n  // 1x32 的答案是 301989883\n  cout << solve() << "\\n";\n}';
+  const r = ac.scanHardcoding({ code, lang: 'cpp', samples: SAMPLE_301989883 });
+  assert.strictEqual(r.blocked, false, '误报：' + r.reason);
+});
+ok('样例答案只出现在 C++ 块注释里 → 不拦截', () => {
+  const code = 'int main() {\n  /* sample: 301989883 */\n  cout << solve() << "\\n";\n}';
+  const r = ac.scanHardcoding({ code, lang: 'cpp', samples: SAMPLE_301989883 });
+  assert.strictEqual(r.blocked, false, '误报：' + r.reason);
+});
+ok('字符串里的样例答案照样拦截（去掉注释 ≠ 放走真打表）', () => {
+  const code = 'int main() { cout << "301989883" << "\\n"; }  // 只是个样例';
+  const r = ac.scanHardcoding({ code, lang: 'cpp', samples: SAMPLE_301989883 });
+  assert.strictEqual(r.blocked, true, '漏报：字符串里的字面量必须仍然被抓');
+  assert.ok(r.hits.some((h) => h.literal === '301989883'));
+});
+ok('注释里的小尺寸特判链不算证据（只算真代码里的）', () => {
+  const code = [
+    '// if (n == 1) ... if (n == 2) ... if (n == 3) ... if (n == 4) ...',
+    'if (a > b) cout << "Alice"; else cout << "Bob";'
+  ].join('\n');
+  const r = ac.scanHardcoding({ code, lang: 'cpp', samples: [{ output: 'Alice\nBob\n' }] });
+  assert.strictEqual(r.blocked, false, '注释里的 == 不该被算成特判链：' + JSON.stringify(r.signals));
+  assert.strictEqual(r.signals.sampleSizeChain, 0);
+});
+ok('stripComments 保留字符串与预处理指令，只吃掉注释', () => {
+  const out = ac.stripComments('#include <bits/stdc++.h>\nint main() { /* 301989883 */ return 0; } // x', 'cpp');
+  assert.ok(out.indexOf('#include') === 0, 'C++ 的 #include 不能被当成注释删掉');
+  assert.ok(out.indexOf('301989883') < 0, '块注释应被删掉');
+  assert.ok(out.indexOf('//') < 0, '行注释应被删掉');
+  const py = ac.stripComments('x = "# not a comment"\n# 301989883\n', 'python');
+  assert.ok(py.indexOf('# not a comment') > 0, '字符串里的井号必须保留');
+  assert.ok(py.indexOf('301989883') < 0);
+});
+
 console.log('anticheat: 退化输出（打表指纹）');
 ok('全 0 输出判为退化', () => assert.strictEqual(ac.degenerateOutput('0000000'), true));
 ok('空输出判为退化', () => assert.strictEqual(ac.degenerateOutput('  \n '), true));
@@ -203,6 +254,93 @@ ok('字符串题（没有数值约束）不算跨变量', () => {
 });
 ok('空契约不算跨变量（不误伤）', () => {
   assert.strictEqual(ac.hasCrossVarConstraint({}), false);
+});
+
+console.log('\nanticheat: 生成器规模自证（2026-10-10 重判物证：2241C / 2257C / 1977C）');
+// 契约只写"所有参数 ≤ maxN"时模型会写出**合规但长不大**的生成器，对拍于是只在小规模上"通过"、
+// 最大档只剩 gen-weak（判不了）。判据必须与尺子一致：want = max(8, floor(tier/8))，token 数或字节数达标。
+ok('规模档 2000：产出 5 个 token / 55 字节 → 判"长不大"（2241C 的真实物证）', () => {
+  const r = ac.checkGenScale('100\n0 0 0\n' + '0'.repeat(45), 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.tokens, 5);
+  assert.ok(r.want === 250 && r.detail.indexOf('长起来') >= 0);
+});
+ok('规模档 200：产出 17 字节 → 判"长不大"（2257C 的真实物证）', () => {
+  const r = ac.checkGenScale('3\n1 2 3\n1 5 6\n', 200);
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.factor < 0.1);
+});
+ok('规模档 1000：真的产出了 1000 个数 → 通过', () => {
+  const big = '1000\n' + Array.from({ length: 1000 }, (_, i) => i % 7).join(' ');
+  assert.strictEqual(ac.checkGenScale(big, 1000).ok, true);
+});
+ok('数字量不够但字节数够（长串 0 / 长字符串）→ 也通过（"0"*n 只算一个 token，靠字节兜底）', () => {
+  assert.strictEqual(ac.checkGenScale('4000\n' + '0'.repeat(4000), 4000).ok, true);
+});
+ok('档位不明（0/负数/undefined）→ 判不了就**不当证据**', () => {
+  assert.strictEqual(ac.checkGenScale('1000\n1 2 3', 0).ok, false);
+  assert.strictEqual(ac.checkGenScale('1000\n1 2 3', undefined).want, 8);
+});
+ok('空产出 → 判"长不大"（并给出可读证据）', () => {
+  const r = ac.checkGenScale('', 2000);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.bytes, 0);
+});
+
+console.log('\nanticheat: 规模自证的裁决（best-of-N —— 单次抽样不当证据）');
+// 2026-10-11 的假失败：生成器写成 `n = randint(1, cap)`，单次抽样 5/6 概率抽到小数据 ⇒
+// 一份**合规**的生成器被判"长不大"打回重写（白花一次模型调用）。判据必须取多次抽样里最好的一次。
+const GS_SMALL = '1\n3\n3 3 0\n';          // 档位 6 时要求 ≥8 token 或 ≥16 字节 ⇒ 不够
+const GS_BIG = '1\n6\n1 2 3 4 5 6\n';      // 13 token / 14 字节 … 14 < 16，但 token 13 ≥ 8 ⇒ 够
+ok('连抽 3 次里有一次够大 → **不**打回重写（这就是那次假失败的正解）', () => {
+  const v = ac.judgeGenScaleProbe({ tier: 6, readings: [
+    { ran: true, input: GS_SMALL }, { ran: true, input: GS_BIG }, { ran: true, input: GS_SMALL }
+  ] });
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.tries, 3);
+});
+ok('连抽 3 次都小 → 才判 gen-too-small（且 detail 写明抽了几次）', () => {
+  const v = ac.judgeGenScaleProbe({ tier: 6, readings: [
+    { ran: true, input: GS_SMALL }, { ran: true, input: GS_SMALL }, { ran: true, input: GS_SMALL }
+  ] });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.kind, 'gen-too-small');
+  assert.ok(v.detail.indexOf('连抽 3 次') >= 0 && v.detail.indexOf('长起来') >= 0);
+});
+ok('连抽 3 次都跑不出数据 → gen-max-fail（超时/运行失败如实写进 detail）', () => {
+  const v = ac.judgeGenScaleProbe({ tier: 6, readings: [
+    { ran: false, timedOut: true }, { ran: false, timedOut: true }, { ran: false, timedOut: false, err: 'SyntaxError' }
+  ] });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.kind, 'gen-max-fail');
+  assert.ok(v.detail.indexOf('超时') >= 0 && v.detail.indexOf('规模档 6') >= 0);
+});
+ok('跑不动 + 跑得动但小 → 判 gen-too-small（跑得动就该按规模说话）；空读数不崩', () => {
+  const v = ac.judgeGenScaleProbe({ tier: 6, readings: [
+    { ran: false, timedOut: true }, { ran: true, input: GS_SMALL }
+  ] });
+  assert.strictEqual(v.kind, 'gen-too-small');
+  assert.strictEqual(ac.judgeGenScaleProbe({ tier: 6, readings: [] }).kind, 'gen-max-fail');
+  assert.strictEqual(ac.judgeGenScaleProbe({}).tries, 0);
+});
+
+console.log('\nanticheat: "会随 maxN 长大的批量结构"识别（避免对单整数输入的题误报）');
+ok('"n 个整数"契约 → 有批量结构', () => {
+  assert.strictEqual(ac.hasBulkInput({ inputSpec: '第一行 n，第二行 n 个整数 a_i', guarantees: [], text: '' }), true);
+});
+ok('"每行两个整数"契约 → 有批量结构', () => {
+  assert.strictEqual(ac.hasBulkInput('接下来 m 行，每行两个整数 u v'), true);
+});
+ok('"一行一个整数 n"契约 → 没有批量结构（不能要求它随 maxN 长大）', () => {
+  assert.strictEqual(ac.hasBulkInput({ inputSpec: '一行，一个整数 n（1 ≤ n ≤ 10^9）', guarantees: [], text: '' }), false);
+});
+ok('"第一行一个整数 T，接下来 T 行"契约 → 有批量结构（多测也是批量）', () => {
+  assert.strictEqual(ac.hasBulkInput({ inputSpec: '第一行一个整数 T。接下来 T 行，每行一个整数 x', guarantees: [], text: '' }), true);
+});
+ok('空契约 → 不误报', () => {
+  assert.strictEqual(ac.hasBulkInput({}), false);
+  assert.strictEqual(ac.hasBulkInput(''), false);
+  assert.strictEqual(ac.hasBulkInput(null), false);
 });
 
 console.log('\nanticheat: ' + pass + ' 项通过' + (process.exitCode ? '（有失败）' : ''));

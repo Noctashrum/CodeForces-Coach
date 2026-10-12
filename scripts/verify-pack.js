@@ -102,6 +102,14 @@ check('系统实测附录：harness 两条交付路径都注入并留轨迹',
 // 等于在暗示"别换算法"，所以这条指令要留在提问里，别在重构时被删掉。
 check('同语言优化提问：先判断上界够不够，不够就换数据结构而不是调常数',
   'lib/harness.js', ['渐进复杂度', '换掉数据结构或算法', '如果上界够', '算法上界很可能就不够']);
+// 2026-10-10 凌晨（三题归因 2247F/2247D2/2101E）：只有先自证"上界不够"还是"常数太大"，清单才不会给错 ——
+// 2247F/2247D2 要的是删死代码/预计算/内联，2101E 要的是换算法，两类都在提问里，且常数清单按实测命中率排序。
+check('同语言优化提问：用数字自证是哪一类，常数清单按命中率排序，且不许交"只快了一点点"的版本',
+  'lib/harness.js', ['实测 ÷ 阈值', '删死代码', '预计算', '扁平化容器', '只快了一点点', '2e7 次简单操作/秒']);
+// ¥/AC 只按"解题臂"（题解+暴力）记账：口径要写进记录，不能只写在文档里（用户口径 m25200）。
+// 这条**不能**放这里：`ablation/` 是实验台，不进打包产物（dist/…/resources/app 里没有它），
+// 所以 verify-pack 读不到 ablation/lib/l2.js（2026-10-10 实测三个 ✗ 里的一个）。
+// 该口径的断言在 `ablation/selftest.js`（逐角色 token / costByRole / solveArmCost / 未知单价不编数字）。
 
 // 批次④-第四刀（续）：优化版**没过官方样例**时不许一句话打回——把优化版落到盘上、带着失败样例
 // 走现成的 `repairAgainstSamples`，修好才继续对拍/计时；额度默认只喂 1 次（实测 2257F1 放宽到 3 次
@@ -110,6 +118,41 @@ check('同语言优化提问：先判断上界够不够，不够就换数据结�
 check('同语言优化：样例不过时带着失败样例定向修复，默认只喂 1 次，且修好的是交付的那一版',
   'lib/harness.js', ['repairAgainstSamples(\'同语言性能优化（\' + L + \'）\', cfg.fix)',
     'CFCOACH_PERF_REPAIR_FIX', 'Object.assign({}, out, { code: solCode })']);
+
+// F1（2026-10-10 凌晨）：**没解出来就不写讲解**（默认 short）——讲解线占没解出来那几格花费的 30%–55%，
+// 且那笔钱几乎全花在思考上；更要紧的是口径：拆一份错/超时的思路是误导，不是教学。
+// 交付物换成零 token 的机械说明 + 暴力解；`CFCOACH_EXPLAIN_UNSOLVED=rich` 回旧行为（A/B）。
+// 多解题不算"没解出来"（分歧不等于错；2257C 就是 CF-AC 的例）——这条判据别在重构时丢掉。
+check('没解出来：默认跳过讲解线，只给机械说明 + 暴力解（可用 CFCOACH_EXPLAIN_UNSOLVED=rich 回旧行为）',
+  'lib/harness.js', ['explainUnsolvedConfig', 'explain-skip-unsolved', 'CFCOACH_EXPLAIN_UNSOLVED',
+    '这题我没解出来', 'vPack.multiAnswer']);
+
+// 反打表误报（2026-10-10 凌晨的真事故）：2247F 的 L2 因为**注释里**写了样例答案 `301989883`
+// 被判"硬编码样例答案"→ 拒绝交付 → 整格 ¥0.5552 全花在重写一份本来正确的代码上（四臂里唯一 no-code）。
+// 修法 = 扫描前剥掉注释但**保留字符串字面量**（`cout << "301989883"` 才是真打表）；
+// 同时 `rejectSol` 的注释头要跟随语言（往 rejected-sol.py 里写 `//` 等于写了个语法错）。
+check('反打表扫描先剥注释（字符串里的样例答案照样拦），拒绝产物按语言写注释头',
+  'lib/anticheat.js', ['function stripComments(code, lang)', 'const code = stripComments(raw, opt.lang)',
+    '宁可漏报，不可误报', 'stripComments,']);
+check('拒绝交付的代码里，注释头跟随 solLang（python 用 #，别往 .py 里写 //）',
+  'lib/harness.js', ['const cmt = solLang === \'python\' ? \'#\' : \'//\';']);
+
+// 内嵌 IDE（2026-10-11，用户要求）：一题一份代码 + 按按钮给半透明补全 + 自己填 stdin 跑一次。
+// 三段都要在包里：补全侧库、前端页、以及"运行走统一运行器"（否则用户装到机器上点不动）。
+check('内嵌 IDE：补全侧库（题面上下文 / 提示词 / 清洗 / 状态）',
+  'lib/ide.js', ['CURSOR_MARK', 'problemContextOf', 'buildMessages', 'cleanSuggestion', 'saveState']);
+check('内嵌 IDE：前端（幽灵文字 + 只按按钮才调用）',
+  'public/js/ide.js', ['ide-ghost', 'renderLayerHtml', 'acceptSuggestion', '/api/ide/complete', '/api/ide/run']);
+check('内嵌 IDE：三条路由 + 运行走统一运行器',
+  'server.js', ['/api/ide/save', '/api/ide/complete', '/api/ide/run', 'runner.runOnce(']);
+check('内嵌 IDE：运行器出口（windowsHide + 输出上限）',
+  'lib/runner.js', ['runOnce', 'IDE_OUTPUT_CAP']);
+check('内嵌 IDE：页面与脚本进包（点侧边栏能打开）',
+  'public/index.html', ['id="page-ide"', '/js/ide.js']);
+check('内嵌 IDE：右边并排一栏讲题报告（图文文档走 sandbox iframe）',
+  'public/js/ide.js', ['aside class="ide-report"', 'ide-report-frame', 'iframe.srcdoc', 'setReport']);
+check('内嵌 IDE：讲解只用已有的（不额外调用模型）',
+  'public/js/app.js', ['ideReportOf', 'syncIdeReport']);
 
 // 打包器必须把 exe 标成 GUI 子系统（不弹终端）
 const packSrc = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'pack.js'), 'utf8');

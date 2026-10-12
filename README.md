@@ -48,6 +48,15 @@ contract → solution ∥ brute force ∥ generator (three isolated agents, in p
 - **Conversations stay organised** — folders (create / rename / delete; deleting a folder never deletes
   conversations — its members return to Unsorted), pinning, and multi-select batch actions (select all visible,
   archive / unarchive, delete, move to a folder, pin / unpin).
+- **A built-in IDE that only helps when you ask** — a sidebar page with one code file per problem
+  (C++23 / Python 3, syntax highlighted). Stuck halfway through? Press **✨ Complete** and a
+  *semi-transparent* ghost suggestion appears right at your caret — **Tab** accepts it, **Esc** (or just typing)
+  discards it; **💡 Hint** asks for a nudge in comments instead of code. The completion sees **only the statement
+  plus the code you wrote** — never the coach's already-verified solution sitting in the workspace — and it never
+  fires while you type (every call is a real, paid request). Below the editor you can paste your own stdin and
+  press **▶ Run** to execute your code through the same local runner the harness uses. Next to the editor sits a
+  **report pane**: the coach's explanation for this problem stays on screen while you write (the rich HTML document
+  when there is one, otherwise the latest text explanation), so you never have to switch pages to reread it.
 - **Local-first** — portable folder, local files, no telemetry, no accounts, no uploads other than your model API.
 
 ---

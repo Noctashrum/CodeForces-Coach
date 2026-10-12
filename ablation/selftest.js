@@ -24,6 +24,7 @@ const record = require('./lib/record');
 const levels = require('./lib/levels');
 const l2 = require('./lib/l2');
 const compareLib = require('./lib/compare');
+const verdictsLib = require('./lib/verdicts');
 const cffetch = require('./lib/cffetch');
 const mkgen = require('./lib/mkgen');
 const uistore = require('./lib/uistore');
@@ -83,7 +84,7 @@ async function main() {
       mkgen.looksSpecialJudge(inlineLoaded.all[0].statement) === true
       && mkgen.looksSpecialJudge('Print the maximum possible score.') === false);
     // P0 回归①b（2026-10-07 另一台机器的 ui.zip）：题库里 oracle/gen/题面存的是**别人机器上的绝对路径**
-    //   （C:\Users\tester\...），换机器解压后 211 条记录全部静默判成 no-oracle（"用时 0.0 分钟"、零报错）。
+    //   （C:\Users\<用户名>\...），换机器解压后 211 条记录全部静默判成 no-oracle（"用时 0.0 分钟"、零报错）。
     //   resolveFile 的"末两段兜底" + rejudge 的 resolveEntryAssets 必须把路径救回来，否则跨机跑分等于没跑。
     const foreignBase = path.join(tmp, 'foreign-pool');
     fs.mkdirSync(path.join(foreignBase, 'oracle'), { recursive: true });
@@ -193,6 +194,23 @@ async function main() {
     check('L2 验证报告带覆盖范围（可自证边界）', !!rec2.scopeNote && rec2.scopeComplete === true, rec2.scopeNote || '');
     const v2 = await judge.judgeRecord(rec2, problem, { iterations: 20, maxTotalMs: 60000 });
     check('判分：L2 正解 → 样例+差分 AC', v2.sampleVerdict === 'AC' && v2.diffVerdict === 'AC', JSON.stringify([v2.sampleVerdict, v2.diffVerdict, v2.detail]));
+
+    // ⑤b ¥/AC 只按"解题臂"记账（用户口径 m25200）：只有题解与暴力解是真正解题的 Agent，
+    //     讲解线 / 数据生成器 / 仲裁拿钱买的是**别的交付物** —— 它们不能均摊进 ¥/AC。
+    //     口径必须写在记录里（costByRole + solveArm），否则文档里的数字无法自证。
+    check('L2 逐角色 token：钱花在哪个 Agent 上可自证',
+      !!rec2.usageByRole && ['solution', 'brute', 'gen'].every((r) => rec2.usageByRole[r] && rec2.usageByRole[r].completionTokens > 0),
+      JSON.stringify(rec2.usageByRole));
+    check('L2 逐角色花费 + 解题臂口径（题解+暴力，不含讲解/生成器）',
+      !!rec2.costByRole && !!rec2.solveArm && rec2.solveArm.roles.join(',') === 'solution,brute'
+      && rec2.solveArm.cost > 0 && rec2.solveArm.cost < rec2.solveArm.total,
+      JSON.stringify(rec2.solveArm));
+    const arm = l2.solveArmCost({ solution: 1, brute: 1, explainer: 8, gen: 2 });
+    check('解题臂口径：讲解/生成器的钱不算进 ¥/AC',
+      arm.cost === 2 && arm.total === 12 && Math.abs(arm.share - 1 / 6) < 1e-9, JSON.stringify(arm));
+    const armNull = l2.solveArmCost({ solution: null, brute: null, explainer: 5 });
+    check('解题臂口径：单价未知时如实报 0，不编数字（roles 为空）',
+      armNull.cost === 0 && armNull.roles.length === 0 && armNull.total === 5, JSON.stringify(armNull));
 
     // ⑥ P0 闸门：题解本身是错的（题面里埋「错解」让假模型吐错代码）
     //    期望：链**不许**声称已验证；重写版没过官方样例 → 被拒并保留原版；判分判它 WA。
@@ -1094,6 +1112,24 @@ async function main() {
         && Array.isArray(vUntrust.checker.selfTestFailures) && vUntrust.checker.selfTestFailures.length === 1,
         JSON.stringify([vUntrust.verdict, vUntrust.checker]));
 
+      // 橡皮图章（2026-10-10 补）：正向自检能过（官方答案判 AC），但把官方答案弄坏它也判 AC
+      //   → 这把尺子会把任何候选都量成 AC（假阳性来源），必须不采信。产品侧 lib/checker.js 同一套探针。
+      const stampChecker = path.join(ckRoot, 'checker', ckId + '.stamp.cpp');
+      fs.writeFileSync(stampChecker, '#include <cstdio>\nint main(){printf("OK\\n");return 0;}\n', 'utf8');
+      const builtStamp = ruler.buildChecker({ file: stampChecker, lang: 'cpp', source: 'override' }, { buildDir: path.join(ckRoot, '.build') });
+      const stStamp = ruler.checkerSelfTest({ exe: builtStamp.exe }, ckSamples);
+      check('checker 橡皮图章（对弄坏的官方答案也判 AC）→ trusted=false，并指出它把哪种坏输出判成了合法',
+        stStamp.trusted === false && Array.isArray(stStamp.stamps) && stStamp.stamps.length >= 1
+        && stStamp.probes >= 1 && /橡皮图章/.test(String(stStamp.note)),
+        JSON.stringify(stStamp));
+      // 好 checker 反面：负向探针全被拒 → 仍可信，并把探针条数写进证据
+      const rcGood = ruler.resolveChecker(ckRoot, ckProblem, {});
+      const builtGood = ruler.buildChecker(rcGood, { buildDir: path.join(ckRoot, '.build') });
+      const stGood = ruler.checkerSelfTest({ exe: builtGood.exe }, ckSamples);
+      check('好 checker：负向探针（空输出 / 截断）全被拒 → 仍可信，且报告探针条数',
+        stGood.trusted === true && stGood.probes === 2 && stGood.undecided === 0,
+        JSON.stringify(stGood));
+
       // checker 自己返回 FAIL(3)（例如"jury 不是最优"）→ 那是标尺的锅，不能算候选 WA
       const failChecker = path.join(ckRoot, 'checker', ckId + '.fail3.cpp');
       fs.writeFileSync(failChecker, '#include <cstdio>\nint main(){printf("FAIL: jury answer is not optimal\\n");return 3;}\n', 'utf8');
@@ -1323,6 +1359,101 @@ async function main() {
       } finally {
         if (oldDataDir === undefined) delete process.env.CHATBOX_DATA_DIR; else process.env.CHATBOX_DATA_DIR = oldDataDir;
       }
+    }
+
+    // ⑫ 判词词表 vs 尺子源码（2026-10-10 通宵）：三段口径（★AC / 判错 / **判不了**）是报告、
+    //    稳定性翻转表、配对文档三处共用的分类，词表在 `ablation/lib/verdicts.js`。
+    //    这里对着 `ablation/lib/ruler.js` 的源码把每个判词字面量核一遍 —— 漏登记一个的后果是
+    //    它静默落进"其它"：真实事故是 L1 的 `oracle-error-at-max` 没在词表里，
+    //    报告里它既不算判错也不算判不了，只让"其它"从 0 悄悄变成 1，三段账当场算错。
+    console.log('\n⑫ 判词词表 vs 尺子源码（三段口径不许有漏网判词）');
+    {
+      const vsrc = fs.readFileSync(path.join(__dirname, 'lib', 'ruler.js'), 'utf8');
+      const known = [].concat(verdictsLib.AC_VERDICTS, verdictsLib.WRONG_VERDICTS,
+        verdictsLib.UNKNOWN_VERDICTS, verdictsLib.NORUN_VERDICTS, verdictsLib.SAMPLE_VERDICTS);
+      // 尺子源码里判词字面量的三种落点：
+      //   · `verdict: 'x'` 直接当成判词（`sample-` + … 这种拼前缀的只取固定部分，跳过结尾是 `-` 的）
+      //   · `diffVerdict = 'x'` 之后可能落成 `diff-x`（:825 的 named 那几个用原样，AC 直接返回）
+      //     ⇒ 两边**任一**在词表里就算登记过；两边都不在才是真漏网（这才是要抓的）
+      const picked = [];
+      (vsrc.match(/verdict:\s*'([^']+)'/g) || []).forEach((s) => {
+        const v = s.replace(/^verdict:\s*'|'$/g, '');
+        if (!/-$/.test(v)) picked.push(v);
+      });
+      (vsrc.match(/diffVerdict\s*=\s*'([^']+)'/g) || []).forEach((s) => {
+        const v = s.replace(/^diffVerdict\s*=\s*'|'$/g, '');
+        if (v === 'AC') return;
+        picked.push(known.indexOf(v) >= 0 ? v : 'diff-' + v);
+      });
+      const uniq = Array.from(new Set(picked)).sort();
+      const missing = uniq.filter((v) => known.indexOf(v) < 0);
+      check('ruler.js 里的判词字面量全在词表里（缺一个就会静默落进"其它"）',
+        missing.length === 0, '缺：' + missing.join(' ') + ' | 源码里共 ' + uniq.length + ' 个：' + uniq.join(' '));
+      check('词表内部没有重复项（同一个判词不许既算判错又算判不了）',
+        known.length === new Set(known).size, 'known=' + known.length + ' uniq=' + new Set(known).size);
+      check('三段口径分桶：AC→过、diff-WA/编译失败(sol)→判错、gen-weak/尺子编译失败→判不了、no-problem→没跑、未知串→其它',
+        verdictsLib.bucketOf('AC', true) === 'ac' && verdictsLib.bucketOf('★AC') === 'ac'
+        && verdictsLib.bucketOf('diff-WA') === 'wrong' && verdictsLib.bucketOf('sol-compile-error') === 'wrong'
+        && verdictsLib.bucketOf('diff-gen-weak') === 'unknown' && verdictsLib.bucketOf('arena-error') === 'unknown'
+        && verdictsLib.bucketOf('brute-compile-error') === 'unknown'
+        && verdictsLib.bucketOf('no-problem') === 'norun' && verdictsLib.bucketOf('这是什么判词') === 'other',
+        JSON.stringify([verdictsLib.bucketOf('diff-WA'), verdictsLib.bucketOf('arena-error'), verdictsLib.bucketOf('啥')]));
+      const ac = verdictsLib.classifyArena([
+        { problem: 'a', verdict: 'arena-error', detail: 'sol：编译失败（退出码 1） x' },
+        { problem: 'b', verdict: 'gen-compile-error' },
+        { problem: 'c', verdict: 'arena-error', detail: '跑不起来' }
+      ]);
+      check('编译失败归因：老 arena-error 看 detail、R5 新判词看名字、其余算工程问题',
+        ac.sol.join() === 'a' && ac.gen.join() === 'b' && ac.other.join() === 'c', JSON.stringify(ac));
+    }
+
+    // ⑬ 尺子基础设施修复（2026-10-10 通宵的 R1/R2/R3/R5）：档位按题面真实上限收敛、每一份对拍数据
+    //    重抽到底、判不了要留证据、编译失败按"谁的文件"落判词。这里只测纯函数与源码级事实，
+    //    端到端重判由 `ablation/rejudge.js` 跑（结果写 verdicts-cfac-r1r5.jsonl）。
+    console.log('\n⑬ 尺子基础设施（R1 档位收敛 / R2 每档重抽 / R3 留证据 / R5 编译失败归因）');
+    {
+      const eqj = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      check('R1 真实上限低于最大对拍档时收敛，并把它自己补成一档（2241C 题面 n≤100 ⇒ [30,100]）',
+        eqj(ruler.planDiffTiers({ maxN: 100, source: 'parsed' }), [30, 100]),
+        JSON.stringify(ruler.planDiffTiers({ maxN: 100, source: 'parsed' })));
+      check('R1 上限还不到最小档时只留它自己（1956D n≤18 ⇒ [18]；2089D n≤1 ⇒ [1]）',
+        eqj(ruler.planDiffTiers({ maxN: 18, source: 'parsed' }), [18])
+        && eqj(ruler.planDiffTiers({ maxN: 1, source: 'parsed' }), [1]),
+        JSON.stringify([ruler.planDiffTiers({ maxN: 18, source: 'parsed' }),
+          ruler.planDiffTiers({ maxN: 1, source: 'parsed' })]));
+      check('R1 上限高于最大对拍档时档位不动（1935C 4e6 / 题面无上界 ⇒ [30,200,2000]，不把差分对拍拉大）',
+        eqj(ruler.planDiffTiers({ maxN: 4000000, source: 'parsed' }), [30, 200, 2000])
+        && eqj(ruler.planDiffTiers({ maxN: 200000, source: 'default' }), [30, 200, 2000]),
+        JSON.stringify([ruler.planDiffTiers({ maxN: 4000000, source: 'parsed' }),
+          ruler.planDiffTiers({ maxN: 200000, source: 'default' })]));
+      check('R1 override 与 parsed 同等收敛；显式传 tiers 一律照用（连空数组也照用 = 跳过差分对拍）',
+        eqj(ruler.planDiffTiers({ maxN: 500, source: 'override' }), [30, 200, 500])
+        && eqj(ruler.planDiffTiers({ tiers: [8], maxN: 100, source: 'parsed' }), [8])
+        && eqj(ruler.planDiffTiers({ tiers: [] }), []),
+        JSON.stringify([ruler.planDiffTiers({ maxN: 500, source: 'override' }),
+          ruler.planDiffTiers({ tiers: [8], maxN: 100, source: 'parsed' }), ruler.planDiffTiers({ tiers: [] })]));
+      const rsrc = fs.readFileSync(path.join(__dirname, 'lib', 'ruler.js'), 'utf8');
+      check('R2 每一份对拍数据都重抽到底（不许再有 `tries: k === 1 ? … : 1`）',
+        /tries: o\.diffTries \|\| 3/.test(rsrc) && !/k === 1 \? \(o\.diffTries/.test(rsrc));
+      check('R3 gen-weak 判不了要留证据（档位/重抽次数/实产 tokens+bytes/判据 want），并记下 tiersUsed',
+        /status: 'gen-weak'[\s\S]{0,300}?detail:/.test(rsrc)
+        && /tiersUsed: tiers\.slice\(\)/.test(rsrc),
+        'genWeakRow=' + /status: 'gen-weak'[\s\S]{0,300}?detail:/.test(rsrc)
+          + ' tiersUsed=' + /tiersUsed: tiers\.slice\(\)/.test(rsrc));
+      check('R5 编译失败按"谁的文件"落判词（sol ⇒ 判错；brute/gen ⇒ 判不了），不再一律 arena-error',
+        /verdictsLib\.compileVerdict\(who\[1\]\)/.test(rsrc)
+        && /compileWho: who \? who\[1\] : null/.test(rsrc));
+      check('R5 汇总把两侧编译失败分开记账（否则会静默落进 other，三段账当场算错）',
+        /solCompileError: 0, rulerCompileError: 0/.test(rsrc)
+        && /g\.solCompileError\+\+/.test(rsrc) && /g\.rulerCompileError\+\+/.test(rsrc));
+      // R1 曾经"看起来做了、其实全失效"：`ablation/rejudge.js` 把 `ruler.DIFF_TIERS` 当默认值显式传进去，
+      // planDiffTiers 见到显式数组就照用 ⇒ 题面真实上限 < 2000 的 11 题照旧在 2000 档判 gen-weak
+      // （实测 2241C 的判词行 tiersUsed 仍是 [30,200,2000]）。这条断言钉住"重判这条路必须让尺子自己决定档位"。
+      const rjs = fs.readFileSync(path.join(__dirname, 'rejudge.js'), 'utf8');
+      check('R1 在重判这条路真的生效（rejudge 默认不显式传 tiers，交给 planDiffTiers 按题面收敛）',
+        /tiers: args\.tiers \|\| undefined/.test(rjs) && !/tiers: args\.tiers \|\| ruler\.DIFF_TIERS/.test(rjs),
+        'args.tiers||undefined=' + /tiers: args\.tiers \|\| undefined/.test(rjs)
+          + ' 旧写法残留=' + /tiers: args\.tiers \|\| ruler\.DIFF_TIERS/.test(rjs));
     }
 
     run.writeSummary({ selftest: true });

@@ -406,6 +406,10 @@ L0 vs L2 = +5（p=0.125）；L0 vs L0+ = **−2**（p=0.625）—— 提示词�
   每个数字都带 `source`（override/cache/parsed/default），所以"这次判分是什么规模、什么时限"可以事后复核。
 - **多解题判"不可判"**（`lib/statement.js` 的启发式 + `limits.json` 覆盖）：没有 checker 就没有资格说候选错。
 - 重判工具：`node ablation/rejudge.js --store <目录>`（**串行**跑；别与压测/编译并发，否则 TLE 计时会被污染），
+  `--gen-dir a,b,c` 可让尺子**借别的 store 的 tier-aware 生成器**（`ablation/lib/ruler.js` 的 `findRunGen()`
+  只在 `<store>/l2-data`、`<store>/gen-scale` 与你给的 `--gen-dir` 里找 `ab-<题号>/gen.py`）。
+  **L0/L1 的 store 没有 `l2-data`，不加 `--gen-dir` 就会退回题库里不读 argv 的老生成器、整库判成 `gen-weak`**
+  （实测：146 格 22 秒跑完、两臂 ★AC 全 0；加上之后 22.7 分钟判出真结果）。判"快得不正常"是信号。
   配对表：`node .probe/cfac-pairs.js <store> L0,L0C,L0+,L1,L2 --agg best`（一格多条记录时必须显式选口径，
   `best` = 一格取第一次 CF-AC = pass@k；`first` = pass@1；`latest` = 最后一次）。
 - 重判结果（93 条记录）：**预算对齐之后 L2 赢过同提示词的单次调用臂**

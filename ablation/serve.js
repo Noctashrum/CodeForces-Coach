@@ -325,7 +325,7 @@ async function startRun(o) {
     if (j.level === 'L1') return levels.runL1(ctx);
     // 每次都要干净的工作区：否则链会走"上次已对拍通过"的快通道 —— 测出来的就不是模型，而是缓存
     try { workspace.removeWorkspace(workspace.keyFor(l2.convFor(j.problem))); } catch { /* 没有就算了 */ }
-    return l2.runL2(Object.assign({}, ctx, { lang: opts.lang, rich: !!opts.rich, depth: opts.depth, maxStressMs: opts.maxStressMs }));
+    return l2.runL2(Object.assign({}, ctx, { cfg, lang: opts.lang, rich: !!opts.rich, depth: opts.depth, maxStressMs: opts.maxStressMs }));
   }
 
   async function runJob(j) {

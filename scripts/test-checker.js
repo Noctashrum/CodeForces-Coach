@@ -61,6 +61,19 @@ const PE_PY = 'import sys\nsys.exit(2)\n';
 const UNDECIDED_PY = 'import sys\nprint("FAIL: jury output is too short (test 4)")\nsys.exit(3)\n';
 /** 卡死不退（必须被判成"超时"，绝不能算候选 WA） */
 const HANG_PY = 'import time\nprint("starting", flush=True)\ntime.sleep(30)\n';
+/** 橡皮图章：**不管喂什么**都 AC（正向自检能过，负向探针必须把它拦下） */
+const STAMP_PY = 'import sys\nsys.exit(0)\n';
+/** 只会说 FAIL(exit 3) 的 checker：不认的输出一律"没结论"（探针上算 undecided，不算印章） */
+const FAIL_ONLY_PY = [
+  'import sys',
+  'inp = open(sys.argv[1], encoding="utf-8", errors="replace").read().split()',
+  'out = open(sys.argv[2], encoding="utf-8", errors="replace").read().split()',
+  'n = int(inp[0]) if inp else 0',
+  'if len(out) != n or sorted(int(x) for x in out) != list(range(1, n + 1)):',
+  '    sys.exit(3)',
+  'sys.exit(0)',
+  ''
+].join('\n');
 
 const PERM_CPP = [
   '#include <bits/stdc++.h>',
@@ -215,6 +228,37 @@ const samples = [
     assert.ok(/官方样例/.test(t.note || ''), JSON.stringify(t));
     return t;
   });
+  /* 负向自检（批次③，2026-10-10）：正向自检只证明"checker 认可官方答案"，
+   * 一份"喂什么都 AC"的橡皮图章同样能过 —— 实测就是 2250F 那一格放行的机制。 */
+  await okAsync('selfTest：把官方答案弄坏（空输出 / 截断）也必须被拒 —— 好 checker 照旧采信，并报告探针条数', async () => {
+    const t = await ck.selfTest(builtPy, samples);
+    assert.strictEqual(t.trusted, true, JSON.stringify(t));
+    assert.strictEqual(t.probes, 4, JSON.stringify(t));   // 2 组样例 ×（空 + 截断）
+    return t;
+  });
+  await okAsync('selfTest：橡皮图章（对任何输出都 AC）→ 不可信，并指出它把哪一种坏输出判成了合法', async () => {
+    const stampBuilt = await ck.build({ file: writeFixture('ws-stamp/checker.py', STAMP_PY), lang: 'python' });
+    const pos = await ck.runOnce(stampBuilt, { input: '3\n', participant: '1 2 3\n', jury: '1 2 3\n' });
+    assert.strictEqual(pos.ac, true, '夹具前提：这份 checker 对官方答案是 AC');
+    const t = await ck.selfTest(stampBuilt, samples);
+    assert.strictEqual(t.trusted, false, JSON.stringify(t));
+    assert.ok(Array.isArray(t.stamps) && t.stamps.length >= 1, JSON.stringify(t));
+    assert.ok(/橡皮图章/.test(t.note || ''), t.note);
+    return t;
+  });
+  await okAsync('selfTest：探针上"没给出结论"（exit 3）不算橡皮图章（宁可漏报，不可误报）', async () => {
+    const midBuilt = await ck.build({ file: writeFixture('ws-mid/checker.py', FAIL_ONLY_PY), lang: 'python' });
+    const t = await ck.selfTest(midBuilt, samples);
+    assert.strictEqual(t.trusted, true, JSON.stringify(t));
+    assert.ok(t.undecided >= 1, JSON.stringify(t));
+    assert.ok(!t.stamps, JSON.stringify(t));
+    return t;
+  });
+  ok('negativeProbes：官方答案非空 → 空输出 + 截断两条；单 token 只跑空输出；空答案不产生探针',
+    ck.negativeProbes({ output: '1 2 3\n' }).length === 2
+    && ck.negativeProbes({ output: '9\n' }).length === 1
+    && ck.negativeProbes({ output: '\n' }).length === 0,
+    JSON.stringify([ck.negativeProbes({ output: '1 2 3\n' }), ck.negativeProbes({ output: '9\n' })]));
 
   /* ---------- 5. judgeSol 的三态 ---------- */
   await okAsync('judgeSol：两边都合法（只是答案不同）→ legal=true，不构成题解错的证据', async () => {

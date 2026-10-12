@@ -102,7 +102,7 @@ async function main() {
 
   console.log('重判目录 : ' + store);
   console.log('记录条数 : ' + records.length + '（串行跑；' + (args.latest ? '每格只取最后一条' : '全部记录') + '）');
-  console.log('对拍规模 : ' + (args.tiers || ruler.DIFF_TIERS).join('/') + '，最大规模关：题面最大档 + 真实时限');
+  console.log('对拍规模 : ' + (args.tiers ? args.tiers.join('/') : '自动（默认 ' + ruler.DIFF_TIERS.join('/') + '，按题面真实上限收敛）') + '，最大规模关：题面最大档 + 真实时限');
   console.log('');
 
   const out = fs.createWriteStream(args.out, { flags: args.resume ? 'a' : 'w' });
@@ -151,7 +151,11 @@ async function main() {
     try {
       v = await ruler.runRuler({
         storeDir: store, problem: p, code: rec.code, codeLang: rec.codeLang,
-        cacheDir, tiers: args.tiers || ruler.DIFF_TIERS, generousMs: args.generous || undefined,
+        // R1（2026-10-10）：**默认不要显式传 tiers** —— 只有用户用 `--tiers` 明确指定时才传。
+        // 原来这里写 `args.tiers || ruler.DIFF_TIERS`，等于把 [30,200,2000] 硬塞进去，
+        // `planDiffTiers` 见到显式数组就直接照用 ⇒ R1 的"按题面真实上限收敛"在重判这条路上**完全失效**
+        // （实测：2241C 题面 `n ≤ 100`，判词行仍是 tiersUsed=[30,200,2000]）。
+        cacheDir, tiers: args.tiers || undefined, generousMs: args.generous || undefined,
         oracleMs: args.oracleMs || undefined, oracleTries: args.oracleTries || undefined,
         maxScaleCases: args.maxScaleCases || undefined,
         diffCases: args.diffCases || undefined,
@@ -196,6 +200,7 @@ async function main() {
       + '  | no-code ' + g.noCode + '  gen-weak ' + g.genWeak + '  no-gen ' + g.noGen
       + '  TLE ' + g.tle + '  slow ' + g.slow + '  WA ' + g.wa
       + '  RE ' + g.re + '  oracle坏 ' + (g.oracleBroken || 0)
+      + '  编译失败(候选) ' + (g.solCompileError || 0) + '  编译失败(尺子) ' + (g.rulerCompileError || 0)
       + '  ⚠️oracle超时限无法判 ' + (g.oracleOverTl || 0) + '（尺子抽 N 份最大档数据，oracle 自己就超时限的那些抽样已剔掉；剔光 ⇒ oracle-over-tl-at-max）');
   }
 

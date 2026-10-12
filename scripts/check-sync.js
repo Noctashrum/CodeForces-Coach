@@ -37,8 +37,10 @@ const FILES = [
   'lib/limits.js',
   // 出问题时把"这台机器上到底发生了什么"打包成一份文本（设置页 / CLI / 测试台共用）
   'lib/diagbundle.js',
+  // 内嵌 IDE：补全侧（题面上下文 / 提示词 / 输出清洗 / 代码状态）+ 它自己的前端
+  'lib/ide.js',
   'public/index.html', 'public/styles.css', 'public/js/app.js', 'public/js/review.js',
-  'public/js/md.js', 'public/js/agentruns.js',
+  'public/js/md.js', 'public/js/agentruns.js', 'public/js/ide.js',
   'electron/main.js', 'electron/preload.js',
   'skills/_coach.md',
   'skills/cf-fetch/SKILL.md', 'skills/cf-verify/SKILL.md', 'skills/cf-explain/SKILL.md',
