@@ -2282,3 +2282,132 @@ html[data-bgimage="on"] .modal-mask { backdrop-filter: blur(3px); }
   .rv-seq { display: none; }
 }
 
+/* ---- ⌨️ IDE 页（写代码 / 按按钮出现半透明补全 / 自己填 stdin 跑一次） ----
+   三层对齐的关键：`.ide-layer`（高亮层 pre 与输入层 textarea）**必须**共用同一套
+   font-family / font-size / line-height / padding / white-space: pre（不折行），
+   否则幽灵提示会与光标错位。滚动的同步由 public/js/ide.js 的 syncScroll() 负责。 */
+.ide-wrap {
+  display: flex; flex-direction: column; gap: 10px;
+  height: calc(100vh - 152px); min-height: 460px;
+}
+.ide-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ide-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ide-problem { font-size: 15px; font-weight: 700; color: var(--text); }
+.ide-sub { font-size: 12px; color: var(--text-tertiary); }
+.ide-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ide-lang { width: auto; min-width: 118px; padding: 5px 8px; font-size: 12.5px; }
+.ide-status { font-size: 12px; color: var(--text-tertiary); max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ide-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 11px; font-size: 12.5px; font-family: var(--font);
+  color: var(--text); background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  cursor: pointer; transition: var(--transition); white-space: nowrap;
+}
+.ide-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+.ide-btn:disabled { opacity: 0.55; cursor: default; }
+.ide-btn.primary { background: var(--primary); border-color: transparent; color: #fff; }
+.ide-btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+
+/* 左：编辑器 + 运行区；右：教练的讲题报告（写代码时一直看得见） */
+.ide-cols { display: flex; gap: 10px; flex: 1; min-height: 0; }
+.ide-col-edit { display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.ide-wrap.report-collapsed .ide-report { display: none; }
+
+.ide-main { display: flex; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; background: var(--code-bg); }
+.ide-gutter {
+  flex: 0 0 auto; min-width: 44px; padding: 12px 8px 12px 10px; text-align: right;
+  font-family: var(--mono); font-size: 13px; line-height: 1.55;
+  color: var(--text-tertiary); background: var(--bg-secondary);
+  border-right: 1px solid var(--border); overflow: hidden; user-select: none;
+}
+.ide-gutter div { height: 1.55em; }
+.ide-editor { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+
+/* 三层：高亮层（可见文字 + 幽灵）在底，输入层（透明文字、只留 caret）在上 */
+.ide-layer {
+  margin: 0; border: 0; border-radius: 0;
+  font-family: var(--mono); font-size: 13px; line-height: 1.55;
+  padding: 12px 14px; tab-size: 4; white-space: pre; word-wrap: normal;
+  letter-spacing: normal; word-spacing: normal;
+}
+.ide-hl {
+  position: absolute; inset: 0; z-index: 1; overflow: hidden;
+  color: var(--text); pointer-events: none;
+}
+.ide-hl > code { display: block; background: none; border: none; padding: 0; font: inherit; white-space: inherit; }
+.ide-input {
+  position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%;
+  background: transparent; color: transparent; caret-color: var(--text);
+  border: none; outline: none; resize: none; overflow: auto;
+}
+.ide-input::placeholder { color: var(--text-tertiary); opacity: 0.85; }
+.ide-input::selection { background: var(--primary-weak); }
+
+/* 半透明的幽灵提示：落在光标处，Tab 接受 / Esc 丢弃 */
+.ide-ghost { color: var(--primary); opacity: 0.5; }
+.ide-ghost-hint {
+  position: absolute; right: 10px; bottom: 8px; z-index: 3;
+  padding: 3px 8px; font-size: 11.5px; font-family: var(--mono);
+  color: var(--text-secondary); background: var(--bg-secondary);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  opacity: 0.9; pointer-events: none;
+}
+
+.ide-foot { display: grid; grid-template-columns: 1fr 1.2fr; gap: 10px; height: 190px; flex: 0 0 auto; }
+.ide-foot-left, .ide-foot-right { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.ide-foot-label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); font-weight: 600; }
+.ide-foot-label .ide-btn { margin-left: auto; }
+.ide-foot-note { font-weight: 400; color: var(--text-tertiary); }
+.ide-stdin, .ide-output {
+  flex: 1; min-height: 0; margin: 0; padding: 9px 11px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre;
+  color: var(--text); background: var(--code-bg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  overflow: auto;
+}
+.ide-stdin { resize: none; outline: none; }
+.ide-verdict { margin-left: auto; font-size: 12px; color: var(--text-tertiary); }
+.ide-verdict.ok { color: var(--success); }
+.ide-verdict.warn { color: var(--warning); }
+.ide-verdict.bad { color: var(--danger); }
+
+/* 右侧「讲题报告」栏：图文文档走 sandbox iframe（填满整栏、内部自己滚），只有文字讲解时走 Markdown */
+.ide-report {
+  flex: 0 1 42%; max-width: 640px; min-width: 300px;
+  display: flex; flex-direction: column; min-height: 0;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg-secondary); overflow: hidden;
+}
+.ide-report-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-bottom: 1px solid var(--border);
+}
+.ide-report-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.ide-report-badge { font-size: 11.5px; color: var(--text-tertiary); }
+.ide-report-close {
+  margin-left: auto; width: 22px; height: 22px; line-height: 1;
+  font-size: 12px; color: var(--text-tertiary); cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+}
+.ide-report-close:hover { color: var(--text); background: var(--bg-hover); border-color: var(--border); }
+.ide-report-body { flex: 1; min-height: 0; overflow: auto; }
+.ide-report-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--bg); }
+.ide-report-md { padding: 10px 12px; font-size: 13px; line-height: 1.75; word-break: break-word; }
+.ide-report-empty { padding: 14px 12px; font-size: 12.5px; line-height: 1.8; color: var(--text-tertiary); }
+.ide-report-pre { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
+
+/* 窗口不够宽时上下摞起来：编辑器在上，讲解在下（仍然看得见） */
+@media (max-width: 1180px) {
+  .ide-cols { flex-direction: column; }
+  .ide-report { flex: 0 0 auto; min-width: 0; max-width: none; height: 300px; }
+}
+
+@media (max-width: 900px) {
+  .ide-wrap { height: auto; }
+  .ide-main { min-height: 320px; }
+  .ide-foot { grid-template-columns: 1fr; height: auto; }
+  .ide-stdin, .ide-output { height: 140px; flex: 0 0 auto; }
+}
+

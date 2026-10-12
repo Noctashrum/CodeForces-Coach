@@ -23,7 +23,8 @@
     "app": "electron .",
     "diag": "node scripts/diag.js",
     "icon": "node scripts/gen-icon.js",
-    "pack": "node scripts/pack.js"
+    "pack": "node scripts/pack.js",
+    "install:local": "node scripts/install-local.js"
   },
   "engines": {
     "node": ">=18"
